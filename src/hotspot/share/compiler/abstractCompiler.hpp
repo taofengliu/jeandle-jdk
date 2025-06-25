@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1999, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -148,6 +149,7 @@ class AbstractCompiler : public CHeapObj<mtCompiler> {
   // Compiler type queries.
   bool is_c1() const                     { return _type == compiler_c1; }
   bool is_c2() const                     { return _type == compiler_c2; }
+  bool is_jeandle() const                { return _type == compiler_jeandle; }
   bool is_jvmci() const                  { return _type == compiler_jvmci; }
   CompilerType type() const              { return _type; }
 

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -201,6 +202,14 @@ JVMFlag::Error CodeCacheSegmentSizeConstraintFunc(uintx value, bool verbose) {
 }
 
 JVMFlag::Error CodeEntryAlignmentConstraintFunc(intx value, bool verbose) {
+#ifdef JEANDLE
+  if (UseJeandleCompiler && !FLAG_IS_DEFAULT(CodeEntryAlignment)) {
+    JVMFlag::printError(verbose,
+                        "CodeEntryAlignment must be default when using Jeandle compiler\n");
+    return JVMFlag::VIOLATES_CONSTRAINT;
+  }
+#endif // JEANDLE
+
   if (!is_power_of_2(value)) {
     JVMFlag::printError(verbose,
                         "CodeEntryAlignment (" INTX_FORMAT ") must be "
@@ -450,4 +459,3 @@ JVMFlag::Error ControlIntrinsicConstraintFunc(ccstrlist value, bool verbose) {
 
   return JVMFlag::SUCCESS;
 }
-

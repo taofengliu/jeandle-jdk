@@ -1,0 +1,279 @@
+/*
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ */
+
+package compiler/jeandle/bytecodeTranslate/arithmetic;
+
+super public class Dup_x2_Form1 {
+    public static Method testIDup_x2_1:"(III)I" stack 4 locals 3 {
+        iload_0;
+        iload_1;
+        iload_2;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testIDup_x2_2:"(III)I" stack 4 locals 3 {
+        iload_0;
+        iload_1;
+        iload_2;
+        dup_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup_x2_3:"(III)I" stack 4 locals 3 {
+        iload_0;
+        iload_1;
+        iload_2;
+        dup_x2;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup_x2_4:"(III)I" stack 4 locals 3 {
+        iload_0;
+        iload_1;
+        iload_2;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testFDup_x2_1:"(FFF)F" stack 4 locals 3 {
+        fload_0;
+        fload_1;
+        fload_2;
+        dup_x2;
+        freturn;
+    }
+    public static Method testFDup_x2_2:"(FFF)F" stack 4 locals 3 {
+        fload_0;
+        fload_1;
+        fload_2;
+        dup_x2;
+        pop;
+        freturn;
+    }
+    public static Method testFDup_x2_3:"(FFF)F" stack 4 locals 3 {
+        fload_0;
+        fload_1;
+        fload_2;
+        dup_x2;
+        pop;
+        pop;
+        freturn;
+    }
+    public static Method testFDup_x2_4:"(FFF)F" stack 4 locals 3 {
+        fload_0;
+        fload_1;
+        fload_2;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        freturn;
+    }
+
+    public static Method testADup_x2_1:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 4 locals 3 {
+        aload_0;
+        aload_1;
+        aload_2;
+        dup_x2;
+        areturn;
+    }
+    public static Method testADup_x2_2:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 4 locals 3 {
+        aload_0;
+        aload_1;
+        aload_2;
+        dup_x2;
+        pop;
+        areturn;
+    }
+    public static Method testADup_x2_3:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 4 locals 3 {
+        aload_0;
+        aload_1;
+        aload_2;
+        dup_x2;
+        pop;
+        pop;
+        areturn;
+    }
+    public static Method testADup_x2_4:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 4 locals 3 {
+        aload_0;
+        aload_1;
+        aload_2;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        areturn;
+    }
+
+    public static Method testSDup_x2_1:"()I" stack 4 locals 3 {
+        sipush 5;
+        sipush 6;
+        sipush 7;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testSDup_x2_2:"()I" stack 4 locals 3 {
+        sipush 5;
+        sipush 6;
+        sipush 7;
+        dup_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testSDup_x2_3:"()I" stack 4 locals 3 {
+        sipush 5;
+        sipush 6;
+        sipush 7;
+        dup_x2;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testSDup_x2_4:"()I" stack 4 locals 3 {
+        sipush 5;
+        sipush 6;
+        sipush 7;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testCDup_x2_1:"()I" stack 4 locals 3 {
+        sipush 3;
+        sipush 4;
+        sipush 5;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testCDup_x2_2:"()I" stack 4 locals 3 {
+        sipush 3;
+        sipush 4;
+        sipush 5;
+        dup_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testCDup_x2_3:"()I" stack 4 locals 3 {
+        sipush 3;
+        sipush 4;
+        sipush 5;
+        dup_x2;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testCDup_x2_4:"()I" stack 4 locals 3 {
+        sipush 3;
+        sipush 4;
+        sipush 5;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testBDup_x2_1:"()I" stack 4 locals 3 {
+        bipush 1;
+        bipush 2;
+        bipush 3;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testBDup_x2_2:"()I" stack 4 locals 3 {
+        bipush 1;
+        bipush 2;
+        bipush 3;
+        dup_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testBDup_x2_3:"()I" stack 4 locals 3 {
+        bipush 1;
+        bipush 2;
+        bipush 3;
+        dup_x2;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testBDup_x2_4:"()I" stack 4 locals 3 {
+        bipush 1;
+        bipush 2;
+        bipush 3;
+        dup_x2;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+}
+
+super public class Dup_x2_Form2 {
+    public static Method testIDup_x2_1:"(JI)I" stack 4 locals 3 {
+        lload_0;
+        iload_2;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testIDup_x2_2:"(JI)J" stack 4 locals 3 {
+        lload_0;
+        iload_2;
+        dup_x2;
+        pop;
+        lreturn;
+    }
+    public static Method testIDup_x2_3:"(JI)I" stack 4 locals 3 {
+        lload_0;
+        iload_2;
+        dup_x2;
+        pop;
+        pop2;
+        ireturn;
+    }
+
+    public static Method testIDup_x2_1:"(DI)I" stack 4 locals 3 {
+        dload_0;
+        iload_2;
+        dup_x2;
+        ireturn;
+    }
+    public static Method testIDup_x2_2:"(DI)D" stack 4 locals 3 {
+        dload_0;
+        iload_2;
+        dup_x2;
+        pop;
+        dreturn;
+    }
+    public static Method testIDup_x2_3:"(DI)I" stack 4 locals 3 {
+        dload_0;
+        iload_2;
+        dup_x2;
+        pop;
+        pop2;
+        ireturn;
+    }
+}

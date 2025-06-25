@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1999, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -21,6 +22,12 @@
  * questions.
  *
  */
+
+#ifdef JEANDLE
+#include <cassert>
+#include "llvm/Support/TargetSelect.h"
+#include "utilities/debug.hpp"
+#endif // JEANDLE
 
 #include "precompiled.hpp"
 #include "classfile/javaClasses.inline.hpp"
@@ -79,6 +86,9 @@
 #ifdef COMPILER2
 #include "opto/c2compiler.hpp"
 #endif
+#ifdef JEANDLE
+#include "jeandle/jeandleCompiler.hpp"
+#endif // JEANDLE
 #if INCLUDE_JVMCI
 #include "jvmci/jvmciEnv.hpp"
 #include "jvmci/jvmciRuntime.hpp"
@@ -631,16 +641,26 @@ void CompileBroker::compilation_init_phase1(JavaThread* THREAD) {
   }
 #endif // COMPILER1
 
-#ifdef COMPILER2
+#ifdef COMPILER2_OR_JEANDLE
   if (true JVMCI_ONLY( && !UseJVMCICompiler)) {
     if (_c2_count > 0) {
-      _compilers[1] = new C2Compiler();
+#ifdef JEANDLE
+      if (UseJeandleCompiler) {
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTargetAsmParser();
+        _compilers[1] = JeandleCompiler::create();
+      } else
+#endif // JEANDLE
+      {
+        _compilers[1] = new C2Compiler();
+      }
       // Register c2 first as c2 CompilerPhaseType idToPhase mapping is explicit.
       // idToPhase mapping for c2 is in opto/phasetype.hpp
       JFR_ONLY(register_jfr_phasetype_serializer(compiler_c2);)
     }
   }
-#endif // COMPILER2
+#endif // COMPILER2_OR_JEANDLE
 
 #if INCLUDE_JVMCI
    // Register after c2 registration.
@@ -935,6 +955,10 @@ void CompileBroker::init_compiler_threads() {
   // Initialize the compilation queue
   if (_c2_count > 0) {
     const char* name = JVMCI_ONLY(UseJVMCICompiler ? "JVMCI compile queue" :) "C2 compile queue";
+#ifdef JEANDLE
+    if (UseJeandleCompiler)
+      name = "Jeandle compile queue";
+#endif // JEANDLE
     _c2_compile_queue  = new CompileQueue(name);
     _compiler2_objects = NEW_C_HEAP_ARRAY(jobject, _c2_count, mtCompiler);
     _compiler2_logs = NEW_C_HEAP_ARRAY(CompileLog*, _c2_count, mtCompiler);

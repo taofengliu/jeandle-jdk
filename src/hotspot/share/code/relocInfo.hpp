@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -257,26 +258,27 @@ class relocInfo {
   friend class RelocIterator;
  public:
   enum relocType {
-    none                    =  0, // Used when no relocation should be generated
-    oop_type                =  1, // embedded oop
-    virtual_call_type       =  2, // a standard inline cache call for a virtual send
-    opt_virtual_call_type   =  3, // a virtual call that has been statically bound (i.e., no IC cache)
-    static_call_type        =  4, // a static send
-    static_stub_type        =  5, // stub-entry for static send  (takes care of interpreter case)
-    runtime_call_type       =  6, // call to fixed external routine
-    external_word_type      =  7, // reference to fixed external address
-    internal_word_type      =  8, // reference within the current code blob
-    section_word_type       =  9, // internal, but a cross-section reference
-    poll_type               = 10, // polling instruction for safepoints
-    poll_return_type        = 11, // polling instruction for safepoints at return
-    metadata_type           = 12, // metadata that used to be oops
-    trampoline_stub_type    = 13, // stub-entry for trampoline
-    runtime_call_w_cp_type  = 14, // Runtime call which may load its target from the constant pool
-    data_prefix_tag         = 15, // tag for a prefix (carries data arguments)
-    post_call_nop_type      = 16, // A tag for post call nop relocations
-    entry_guard_type        = 17, // A tag for an nmethod entry barrier guard value
-    barrier_type            = 18, // GC barrier data
-    type_mask               = 31  // A mask which selects only the above values
+    none                       =  0, // Used when no relocation should be generated
+    oop_type                   =  1, // embedded oop
+    virtual_call_type          =  2, // a standard inline cache call for a virtual send
+    opt_virtual_call_type      =  3, // a virtual call that has been statically bound (i.e., no IC cache)
+    static_call_type           =  4, // a static send
+    static_stub_type           =  5, // stub-entry for static send  (takes care of interpreter case)
+    runtime_call_type          =  6, // call to fixed external routine
+    external_word_type         =  7, // reference to fixed external address
+    internal_word_type         =  8, // reference within the current code blob
+    section_word_type          =  9, // internal, but a cross-section reference
+    poll_type                  = 10, // polling instruction for safepoints
+    poll_return_type           = 11, // polling instruction for safepoints at return
+    metadata_type              = 12, // metadata that used to be oops
+    trampoline_stub_type       = 13, // stub-entry for trampoline
+    runtime_call_w_cp_type     = 14, // Runtime call which may load its target from the constant pool
+    data_prefix_tag            = 15, // tag for a prefix (carries data arguments)
+    post_call_nop_type         = 16, // A tag for post call nop relocations
+    entry_guard_type           = 17, // A tag for an nmethod entry barrier guard value
+    barrier_type               = 18, // GC barrier data
+    jeandle_section_word_type  = 19, // internal, but a cross-section reference specific for jeandle
+    type_mask                  = 31  // A mask which selects only the above values
   };
 
  private:
@@ -318,6 +320,7 @@ class relocInfo {
     visitor(post_call_nop) \
     visitor(entry_guard) \
     visitor(barrier) \
+    visitor(jeandle_section_word) \
 
 
  public:
@@ -785,13 +788,17 @@ class Relocation {
 
  protected:
   // platform-independent utility for patching constant section
-  void       const_set_data_value    (address x);
-  void       const_verify_data_value (address x);
+  void       const_set_data_value      (address x);
+  void       const_verify_data_value   (address x);
   // platform-dependent utilities for decoding and patching instructions
-  void       pd_set_data_value       (address x, intptr_t off, bool verify_only = false); // a set or mem-ref
-  void       pd_verify_data_value    (address x, intptr_t off) { pd_set_data_value(x, off, true); }
-  address    pd_call_destination     (address orig_addr = nullptr);
-  void       pd_set_call_destination (address x);
+  void       pd_set_data_value         (address x, intptr_t off, bool verify_only = false); // a set or mem-ref
+  void       pd_verify_data_value      (address x, intptr_t off) {
+    assert(_rtype != relocInfo::jeandle_section_word_type, "no need to verify jeandle section word");
+    pd_set_data_value(x, off, true);
+  }
+  address    pd_call_destination       (address orig_addr = nullptr);
+  void       pd_set_call_destination   (address x);
+  void       pd_set_jeandle_data_value (address x, intptr_t off);
 
   // this extracts the address of an address in the code stream instead of the reloc data
   address* pd_address_in_code       ();
@@ -1419,8 +1426,9 @@ class section_word_Relocation : public internal_word_Relocation {
 
   void copy_into(RelocationHolder& holder) const override;
 
-  section_word_Relocation(address target, int section)
-    : internal_word_Relocation(target, section, relocInfo::section_word_type) {
+  section_word_Relocation(address target, int section,
+    relocInfo::relocType type = relocInfo::section_word_type)
+    : internal_word_Relocation(target, section, type) {
     assert(target != nullptr, "must not be null");
     assert(section >= 0 && section < RelocIterator::SECT_LIMIT, "must be a valid section");
   }
@@ -1428,11 +1436,31 @@ class section_word_Relocation : public internal_word_Relocation {
   //void pack_data_to -- inherited
   void unpack_data() override;
 
- private:
+ protected:
   friend class RelocationHolder;
-  section_word_Relocation() : internal_word_Relocation(relocInfo::section_word_type) { }
+  section_word_Relocation(relocInfo::relocType type = relocInfo::section_word_type)
+    : internal_word_Relocation(type) { }
 };
 
+class jeandle_section_word_Relocation : public section_word_Relocation {
+ public:
+  static RelocationHolder spec(address target, int section) {
+    return RelocationHolder::construct<jeandle_section_word_Relocation>(target, section);
+  }
+
+  void copy_into(RelocationHolder& holder) const override;
+
+  jeandle_section_word_Relocation(address target, int section)
+    : section_word_Relocation(target, section, relocInfo::jeandle_section_word_type) { }
+
+  void set_value(address x) override {
+    pd_set_jeandle_data_value(x, offset());
+  }
+
+ private:
+  friend class RelocationHolder;
+  jeandle_section_word_Relocation() : section_word_Relocation(relocInfo::jeandle_section_word_type) { }
+};
 
 class poll_Relocation : public Relocation {
   bool is_data() override { return true; }

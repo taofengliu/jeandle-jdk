@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2016, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +34,7 @@ enum CompilerType : u1 {
   compiler_none,
   compiler_c1,
   compiler_c2,
+  compiler_jeandle,
   compiler_jvmci,
   compiler_number_of_types
 };

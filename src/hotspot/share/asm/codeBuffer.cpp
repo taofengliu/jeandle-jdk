@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -123,6 +124,14 @@ void CodeBuffer::initialize(csize_t code_size, csize_t locs_size) {
   debug_only(verify_section_allocation();)
 }
 
+void CodeBuffer::initialize(csize_t inst_size,
+                            csize_t locs_size,
+                            csize_t stubs_size,
+                            OopRecorder* oop_recorder) {
+  initialize(inst_size + stubs_size, locs_size);
+  initialize_section_size(&_stubs, stubs_size);
+  initialize_oop_recorder(oop_recorder);
+}
 
 CodeBuffer::~CodeBuffer() {
   verify_section_allocation();

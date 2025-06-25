@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2013, 2023, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -44,11 +45,24 @@ JVM_LDFLAGS += \
     $(EXTRA_LDFLAGS) \
     #
 
+ifeq ($(INCLUDE_JEANDLE), true)
+  JVM_LDFLAGS += \
+      `$(JEANDLE_LLVM_DIR)/bin/llvm-config --ldflags` \
+      #
+endif
+
 JVM_ASFLAGS += $(EXTRA_ASFLAGS)
 
 JVM_LIBS += \
     $(JVM_LIBS_FEATURES) \
     #
+
+ifeq ($(INCLUDE_JEANDLE), true)
+  JVM_LIBS += \
+      -lLLVM -Wl,-rpath,`$(JEANDLE_LLVM_DIR)/bin/llvm-config --libdir` \
+      `$(JEANDLE_LLVM_DIR)/bin/llvm-config --system-libs` \
+      #
+endif
 
 # These files and directories are always excluded
 JVM_EXCLUDE_FILES += args.cc
@@ -86,7 +100,7 @@ CFLAGS_VM_VERSION := \
 DISABLED_WARNINGS_gcc := array-bounds comment delete-non-virtual-dtor \
     empty-body ignored-qualifiers implicit-fallthrough int-in-bool-context \
     maybe-uninitialized missing-field-initializers parentheses \
-    shift-negative-value unknown-pragmas
+    shift-negative-value unknown-pragmas template-id-cdtor
 
 DISABLED_WARNINGS_clang := ignored-qualifiers sometimes-uninitialized \
     missing-braces delete-non-abstract-non-virtual-dtor unknown-pragmas
@@ -262,36 +276,39 @@ TARGETS += $(BUILD_LIBJVM)
 # declaration (either directly or by inheriting from a class that provides
 # one) then the global definition will be used, triggering this check.
 
-ifneq ($(GENERATE_COMPILE_COMMANDS_ONLY), true)
-  ifneq ($(filter $(TOOLCHAIN_TYPE), gcc clang), )
+# When Jeandle is included, there are many global operators 'new' and 'delete' in LLVM. So skip the check here.
+ifneq ($(call check-jvm-feature, jeandle), true)
+  ifneq ($(GENERATE_COMPILE_COMMANDS_ONLY), true)
+    ifneq ($(filter $(TOOLCHAIN_TYPE), gcc clang), )
 
-    DEMANGLED_REGEXP := [^:]operator (new|delete)
+      DEMANGLED_REGEXP := [^:]operator (new|delete)
 
-    # Running c++filt to find offending symbols in all files is too expensive,
-    # so use mangled names when looking for symbols.
-    # Save the demangling for when something is actually found.
-    MANGLED_SYMS := \
-        _ZdaPv \
-        _ZdlPv \
-        _Znam \
-        _Znwm \
-        #
-    UNDEF_PATTERN := ' U '
+      # Running c++filt to find offending symbols in all files is too expensive,
+      # so use mangled names when looking for symbols.
+      # Save the demangling for when something is actually found.
+      MANGLED_SYMS := \
+          _ZdaPv \
+          _ZdlPv \
+          _Znam \
+          _Znwm \
+          #
+      UNDEF_PATTERN := ' U '
 
-    define SetupOperatorNewDeleteCheck
-        $1.op_check: $1
-	  $$(call ExecuteWithLog, $1.op_check, \
-	      $$(NM) $$(NMFLAGS) $$<  2>&1 | $$(GREP) $$(addprefix -e , $$(MANGLED_SYMS)) | $$(GREP) $$(UNDEF_PATTERN) > $1.op_check || true)
-	  if [ -s $1.op_check ]; then \
-	    $$(ECHO) "$$(notdir $$<): Error: Use of global operators new and delete is not allowed in Hotspot:"; \
-	    $$(NM) $$(NMFLAGS) $$< | $$(CXXFILT) | $$(EGREP) '$$(DEMANGLED_REGEXP)' | $$(GREP) $$(UNDEF_PATTERN); \
-	    $$(ECHO) "See: $$(TOPDIR)/make/hotspot/lib/CompileJvm.gmk"; \
-	    exit 1; \
-	  fi
+      define SetupOperatorNewDeleteCheck
+          $1.op_check: $1
+	    $$(call ExecuteWithLog, $1.op_check, \
+	        $$(NM) $$(NMFLAGS) $$<  2>&1 | $$(GREP) $$(addprefix -e , $$(MANGLED_SYMS)) | $$(GREP) $$(UNDEF_PATTERN) > $1.op_check || true)
+	    if [ -s $1.op_check ]; then \
+	      $$(ECHO) "$$(notdir $$<): Error: Use of global operators new and delete is not allowed in Hotspot:"; \
+	      $$(NM) $$(NMFLAGS) $$< | $$(CXXFILT) | $$(EGREP) '$$(DEMANGLED_REGEXP)' | $$(GREP) $$(UNDEF_PATTERN); \
+	      $$(ECHO) "See: $$(TOPDIR)/make/hotspot/lib/CompileJvm.gmk"; \
+	      exit 1; \
+	    fi
 
-      TARGETS += $1.op_check
-    endef
+        TARGETS += $1.op_check
+      endef
 
-    $(foreach o, $(BUILD_LIBJVM_ALL_OBJS), $(eval $(call SetupOperatorNewDeleteCheck,$o)))
+      $(foreach o, $(BUILD_LIBJVM_ALL_OBJS), $(eval $(call SetupOperatorNewDeleteCheck,$o)))
+    endif
   endif
 endif

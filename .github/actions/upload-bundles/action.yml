@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -45,6 +46,7 @@ runs:
         jdk_bundle_tar_gz="$(ls build/*/bundles/jdk-*_bin${{ inputs.debug-suffix }}.tar.gz 2> /dev/null || true)"
         symbols_bundle="$(ls build/*/bundles/jdk-*_bin${{ inputs.debug-suffix }}-symbols.tar.gz 2> /dev/null || true)"
         tests_bundle="$(ls build/*/bundles/jdk-*_bin-tests${{ inputs.debug-suffix }}.tar.gz 2> /dev/null || true)"
+        llvm_bundle_tar_gz="$(ls $GITHUB_WORKSPACE/install_llvm.tar.gz 2> /dev/null || true)"
 
         mkdir bundles
 
@@ -60,6 +62,9 @@ runs:
         if [[ "$tests_bundle" != "" ]]; then
           mv "$tests_bundle" "bundles/tests-${{ inputs.platform }}${{ inputs.debug-suffix }}.tar.gz"
         fi
+        if [[ "$llvm_bundle_tar_gz" != "" ]]; then
+          mv "$llvm_bundle_tar_gz" "bundles/install_llvm.tar.gz"
+        fi
 
         if [[ "$jdk_bundle_zip$jdk_bundle_tar_gz$symbols_bundle$tests_bundle" != "" ]]; then
           echo 'bundles-found=true' >> $GITHUB_OUTPUT
@@ -73,5 +78,5 @@ runs:
       with:
         name: bundles-${{ inputs.platform }}${{ inputs.debug-suffix }}
         path: bundles
-        retention-days: 1
+        retention-days: 3
       if: steps.bundles.outputs.bundles-found == 'true'

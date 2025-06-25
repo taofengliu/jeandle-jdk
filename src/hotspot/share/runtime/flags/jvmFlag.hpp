@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -79,6 +80,7 @@ public:
     //    f was specified on the command-line (but may have since been updated by
     //    someone else like FLAG_SET_ERGO)
     WAS_SET_ON_COMMAND_LINE = 1 << 17,
+    KIND_JEANDLE            = 1 << 18,
 
     KIND_MASK = ~(VALUE_ORIGIN_MASK | WAS_SET_ON_COMMAND_LINE)
   };

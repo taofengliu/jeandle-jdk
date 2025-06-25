@@ -561,6 +561,12 @@ class CodeBuffer: public StackObj DEBUG_ONLY(COMMA private Scrubber) {
   // construction.
   void initialize(csize_t code_size, csize_t locs_size);
 
+  // Initialize a CodeBuffer for Jeandle.
+  void initialize(csize_t inst_size,
+                  csize_t locs_size,
+                  csize_t stubs_size,
+                  OopRecorder* oop_recorder);
+
   CodeSection* consts() { return &_consts; }
   CodeSection* insts() { return &_insts; }
   CodeSection* stubs() { return &_stubs; }

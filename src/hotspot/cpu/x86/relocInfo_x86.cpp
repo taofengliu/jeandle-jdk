@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1998, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -142,6 +143,20 @@ void Relocation::pd_set_call_destination(address x) {
   }
 }
 
+void Relocation::pd_set_jeandle_data_value(address x, intptr_t o) {
+#ifdef AMD64
+  x += o;
+  typedef Assembler::WhichOperand WhichOperand;
+  WhichOperand which = (WhichOperand) format(); // that is, disp32 or imm, call32, narrow oop
+  assert(which == Assembler::disp32_operand, "format unpacks ok");
+  // The address resolved from the jeandle-generated ELF file corresponds to the address of an operand.
+  address disp = addr();
+  address next_ip = disp + sizeof(int32_t);
+  *(int32_t*) disp = x - next_ip;
+#else
+  Unimplemented();
+#endif // AMD64
+}
 
 address* Relocation::pd_address_in_code() {
   // All embedded Intel addresses are stored in 32-bit words.

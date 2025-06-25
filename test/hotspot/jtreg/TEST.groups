@@ -158,6 +158,7 @@ tier1_compiler = \
   :tier1_compiler_1 \
   :tier1_compiler_2 \
   :tier1_compiler_3 \
+  :tier1_compiler_jeandle \
   :tier1_compiler_not_xcomp
 
 hotspot_not_fast_compiler = \
@@ -230,6 +231,9 @@ tier1_compiler_3 = \
   -compiler/intrinsics/zip/TestAdler32.java \
   -compiler/loopopts/Test7052494.java \
   -compiler/runtime/Test6826736.java
+
+tier1_compiler_jeandle = \
+  compiler/jeandle/
 
 tier2_compiler = \
   compiler/allocation/ \

@@ -1,0 +1,96 @@
+/*
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ */
+
+package compiler/jeandle/bytecodeTranslate/arithmetic;
+
+super public class Dup {
+    public static Method testIDup1:"(II)I" stack 3 locals 3 {
+        iload_0;
+        iload_1;
+        dup;
+        ireturn;
+    }
+    public static Method testIDup2:"(II)I" stack 3 locals 3 {
+        iload_0;
+        iload_1;
+        dup;
+        pop;
+        ireturn;
+    }
+    public static Method testFDup1:"(FF)F" stack 3 locals 3 {
+        fload_0;
+        fload_1;
+        dup;
+        freturn;
+    }
+    public static Method testFDup2:"(FF)F" stack 3 locals 3 {
+        fload_0;
+        fload_1;
+        dup;
+        pop;
+        freturn;
+    }
+    public static Method testADup1:"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 3 locals 3 {
+        aload_0;
+        aload_1;
+        dup;
+        areturn;
+    }
+    public static Method testADup2:"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 3 locals 3 {
+        aload_0;
+        aload_1;
+        dup;
+        pop;
+        areturn;
+    }
+    public static Method testSDup1:"()I" stack 3 locals 3 {
+        sipush 5;
+        dup;
+        ireturn;
+    }
+    public static Method testSDup2:"()I" stack 3 locals 3 {
+        sipush 5;
+        dup;
+        pop;
+        ireturn;
+    }
+    public static Method testCDup1:"()I" stack 3 locals 3 {
+        sipush 4;
+        dup;
+        ireturn;
+    }
+    public static Method testCDup2:"()I" stack 3 locals 3 {
+        sipush 4;
+        dup;
+        pop;
+        ireturn;
+    }
+    public static Method testBDup1:"()I" stack 3 locals 3 {
+        bipush 1;
+        dup;
+        ireturn;
+    }
+    public static Method testBDup2:"()I" stack 3 locals 3 {
+        bipush 1;
+        dup;
+        pop;
+        ireturn;
+    }
+}

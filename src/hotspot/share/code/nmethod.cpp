@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -235,6 +236,9 @@ static java_nmethod_stats_struct c1_java_nmethod_stats;
 #ifdef COMPILER2
 static java_nmethod_stats_struct c2_java_nmethod_stats;
 #endif
+#ifdef JEANDLE
+static java_nmethod_stats_struct jeandle_java_nmethod_stats;
+#endif
 #if INCLUDE_JVMCI
 static java_nmethod_stats_struct jvmci_java_nmethod_stats;
 #endif
@@ -252,6 +256,11 @@ static void note_java_nmethod(nmethod* nm) {
 #ifdef COMPILER2
   if (nm->is_compiled_by_c2()) {
     c2_java_nmethod_stats.note_nmethod(nm);
+  } else
+#endif
+#ifdef JEANDLE
+  if (nm->is_compiled_by_jeandle()) {
+    jeandle_java_nmethod_stats.note_nmethod(nm);
   } else
 #endif
 #if INCLUDE_JVMCI
@@ -909,7 +918,7 @@ nmethod::nmethod(
 
     // we use the information of entry points to find out if a method is
     // static or non static
-    assert(compiler->is_c2() || compiler->is_jvmci() ||
+    assert(compiler->is_jeandle() || compiler->is_c2() || compiler->is_jvmci() ||
            _method->is_static() == (entry_point() == _verified_entry_point),
            " entry points must be same for static methods and vice versa");
   }
@@ -1008,6 +1017,10 @@ void nmethod::print_nmethod(bool printmethod) {
     if (is_compiled_by_c1()) {
       tty->cr();
       tty->print_cr("============================= C1-compiled nmethod ==============================");
+    }
+    if (is_compiled_by_jeandle()) {
+      tty->cr();
+      tty->print_cr("=========================== Jeandle-compiled nmethod ===========================");
     }
     if (is_compiled_by_jvmci()) {
       tty->cr();
@@ -2409,6 +2422,8 @@ void nmethod::print(outputStream* st) const {
     st->print("(c1) ");
   } else if (is_compiled_by_c2()) {
     st->print("(c2) ");
+  } else if (is_compiled_by_jeandle()) {
+    st->print("(jeandle) ");
   } else if (is_compiled_by_jvmci()) {
     st->print("(JVMCI) ");
   } else {
@@ -3416,6 +3431,9 @@ void nmethod::print_statistics() {
 #endif
 #ifdef COMPILER2
   c2_java_nmethod_stats.print_nmethod_stats("C2");
+#endif
+#ifdef JEANDLE
+  jeandle_java_nmethod_stats.print_nmethod_stats("Jeandle");
 #endif
 #if INCLUDE_JVMCI
   jvmci_java_nmethod_stats.print_nmethod_stats("JVMCI");

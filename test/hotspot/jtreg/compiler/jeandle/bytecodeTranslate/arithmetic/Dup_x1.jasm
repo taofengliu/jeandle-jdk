@@ -1,0 +1,155 @@
+/*
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ */
+
+package compiler/jeandle/bytecodeTranslate/arithmetic;
+
+super public class Dup_x1 {
+    public static Method testIDup_x1_1:"(II)I" stack 3 locals 3 {
+        iload_0;
+        iload_1;
+        dup_x1;
+        ireturn;
+    }
+    public static Method testIDup_x1_2:"(II)I" stack 3 locals 3 {
+        iload_0;
+        iload_1;
+        dup_x1;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup_x1_3:"(II)I" stack 3 locals 3 {
+        iload_0;
+        iload_1;
+        dup_x1;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testFDup_x1_1:"(FF)F" stack 3 locals 3 {
+        fload_0;
+        fload_1;
+        dup_x1;
+        freturn;
+    }
+    public static Method testFDup_x1_2:"(FF)F" stack 3 locals 3 {
+        fload_0;
+        fload_1;
+        dup_x1;
+        pop;
+        freturn;
+    }
+    public static Method testFDup_x1_3:"(FF)F" stack 3 locals 3 {
+        fload_0;
+        fload_1;
+        dup_x1;
+        pop;
+        pop;
+        freturn;
+    }
+
+    public static Method testADup_x1_1:"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 3 locals 3 {
+        aload_0;
+        aload_1;
+        dup_x1;
+        areturn;
+    }
+    public static Method testADup_x1_2:"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 3 locals 3 {
+        aload_0;
+        aload_1;
+        dup_x1;
+        pop;
+        areturn;
+    }
+    public static Method testADup_x1_3:"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 3 locals 3 {
+        aload_0;
+        aload_1;
+        dup_x1;
+        pop;
+        pop;
+        areturn;
+    }
+
+    public static Method testSDup_x1_1:"()I" stack 3 locals 3 {
+        sipush 5;
+        sipush 6;
+        dup_x1;
+        ireturn;
+    }
+    public static Method testSDup_x1_2:"()I" stack 3 locals 3 {
+        sipush 5;
+        sipush 6;
+        dup_x1;
+        pop;
+        ireturn;
+    }
+    public static Method testSDup_x1_3:"()I" stack 3 locals 3 {
+        sipush 5;
+        sipush 6;
+        dup_x1;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testCDup_x1_1:"()I" stack 3 locals 3 {
+        sipush 3;
+        sipush 4;
+        dup_x1;
+        ireturn;
+    }
+    public static Method testCDup_x1_2:"()I" stack 3 locals 3 {
+        sipush 3;
+        sipush 4;
+        dup_x1;
+        pop;
+        ireturn;
+    }
+    public static Method testCDup_x1_3:"()I" stack 3 locals 3 {
+        sipush 3;
+        sipush 4;
+        dup_x1;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testBDup_x1_1:"()I" stack 3 locals 3 {
+        bipush 1;
+        bipush 2;
+        dup_x1;
+        ireturn;
+    }
+    public static Method testBDup_x1_2:"()I" stack 3 locals 3 {
+        bipush 1;
+        bipush 2;
+        dup_x1;
+        pop;
+        ireturn;
+    }
+    public static Method testBDup_x1_3:"()I" stack 3 locals 3 {
+        bipush 1;
+        bipush 2;
+        dup_x1;
+        pop;
+        pop;
+        ireturn;
+    }
+}

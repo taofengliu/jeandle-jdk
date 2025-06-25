@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -85,6 +86,13 @@ runs:
           echo 'Unpacking tests bundle...'
           mkdir -p bundles/tests
           tar -xf bundles/tests-${{ inputs.platform }}${{ inputs.debug-suffix }}.tar.gz -C bundles/tests
+        fi
+
+        if [[ -e bundles/install_llvm.tar.gz ]]; then
+          echo 'Unpacking llvm bundle...'
+          # the export directory must be the same as original install dir of llvm.
+          tar -xf bundles/install_llvm.tar.gz -C $GITHUB_WORKSPACE
+          ls -R $GITHUB_WORKSPACE/install_llvm
         fi
       shell: bash
 

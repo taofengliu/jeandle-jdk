@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -102,6 +103,10 @@ bool   Arguments::_enable_preview               = false;
 char*  Arguments::_default_shared_archive_path  = nullptr;
 char*  Arguments::SharedArchivePath             = nullptr;
 char*  Arguments::SharedDynamicArchivePath      = nullptr;
+
+#ifdef JEANDLE
+char*  Arguments::_jeandle_template_path        = nullptr;
+#endif // JEANDLE
 
 LegacyGCLogging Arguments::_legacyGCLogging     = { 0, 0 };
 
@@ -3528,6 +3533,26 @@ void Arguments::init_shared_archive_paths() {
   }
 }
 #endif // INCLUDE_CDS
+
+
+#ifdef JEANDLE
+char* Arguments::get_jeandle_template_path() {
+  if (_jeandle_template_path == nullptr) {
+    char jvm_path[JVM_MAXPATHLEN];
+    os::jvm_path(jvm_path, sizeof(jvm_path));
+    char *end = strrchr(jvm_path, *os::file_separator());
+    if (end != nullptr) *end = '\0';
+    size_t jvm_path_len = strlen(jvm_path);
+    size_t file_sep_len = strlen(os::file_separator());
+    const size_t len = jvm_path_len + file_sep_len + 20;
+    _jeandle_template_path = NEW_C_HEAP_ARRAY(char, len, mtArguments);
+    jio_snprintf(_jeandle_template_path, len,
+                "%s%stemplate.ll",
+                jvm_path, os::file_separator());
+  }
+  return _jeandle_template_path;
+}
+#endif // JEANDLE
 
 #ifndef PRODUCT
 // Determine whether LogVMOutput should be implicitly turned on.

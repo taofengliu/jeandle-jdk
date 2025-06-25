@@ -45,8 +45,8 @@ else
 endif
 
 ifeq ($(call check-jvm-feature, zero), true)
-  JVM_EXCLUDES += opto libadt
-  JVM_EXCLUDE_PATTERNS += c1_ c1/ c2_ runtime_ /c2/
+  JVM_EXCLUDES += opto libadt jeandle
+  JVM_EXCLUDE_PATTERNS += c1_ c1/ c2_ runtime_ /c2/ jeandle
   JVM_EXCLUDE_FILES += templateInterpreter.cpp templateInterpreterGenerator.cpp \
                        bcEscapeAnalyzer.cpp ciTypeFlow.cpp
   JVM_CFLAGS_FEATURES += -DZERO -DZERO_LIBARCH='"$(OPENJDK_TARGET_CPU_LEGACY_LIB)"' $(LIBFFI_CFLAGS)
@@ -161,6 +161,13 @@ ifneq ($(call check-jvm-feature, jfr), true)
   JVM_CFLAGS_FEATURES += -DINCLUDE_JFR=0
   JVM_EXCLUDE_PATTERNS += jfr
   JVM_EXCLUDE_FILES += compilerEvent.cpp
+endif
+
+ifeq ($(call check-jvm-feature, jeandle), true)
+  JVM_CFLAGS_FEATURES += -DJEANDLE
+else
+  JVM_EXCLUDES += jeandle
+  JVM_EXCLUDE_PATTERNS += jeandle
 endif
 
 ################################################################################

@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -92,6 +93,12 @@ JVM_CFLAGS += \
     $(JVM_CFLAGS_INCLUDES) \
     $(EXTRA_CFLAGS) \
     #
+
+ifeq ($(INCLUDE_JEANDLE), true)
+  JVM_CFLAGS += \
+      `$(JEANDLE_LLVM_DIR)/bin/llvm-config --cflags` \
+      #
+endif
 
 # -DDONT_USE_PRECOMPILED_HEADER will exclude all includes in precompiled.hpp.
 ifeq ($(USE_PRECOMPILED_HEADER), false)

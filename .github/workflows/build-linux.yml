@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -41,7 +42,7 @@ on:
       debug-levels:
         required: false
         type: string
-        default: '[ "debug", "release" ]'
+        default: '[ "release" ]'
       gcc-major-version:
         required: true
         type: string
@@ -71,10 +72,6 @@ jobs:
       fail-fast: false
       matrix:
         debug-level: ${{ fromJSON(inputs.debug-levels) }}
-        include:
-          - debug-level: debug
-            flags: --with-debug-level=fastdebug
-            suffix: -debug
 
     steps:
       - name: 'Checkout the JDK source'
@@ -114,7 +111,35 @@ jobs:
           sudo apt-get install gcc-${{ inputs.gcc-major-version }}${{ inputs.gcc-package-suffix }} g++-${{ inputs.gcc-major-version }}${{ inputs.gcc-package-suffix }} libxrandr-dev${{ steps.arch.outputs.suffix }} libxtst-dev${{ steps.arch.outputs.suffix }} libcups2-dev${{ steps.arch.outputs.suffix }} libasound2-dev${{ steps.arch.outputs.suffix }} ${{ inputs.apt-extra-packages }}
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-${{ inputs.gcc-major-version }} 100 --slave /usr/bin/g++ g++ /usr/bin/g++-${{ inputs.gcc-major-version }}
 
-      - name: 'Configure'
+      - name: 'Build LLVM'
+        run: |
+          echo "github workspace: ${GITHUB_WORKSPACE}"
+          # set CO_BRANCH
+          JDK_DIR=`pwd`
+          target_branch_llvm=`git log -1 | grep "CO_BRANCH" | awk -F ':| ' '{print $NF}'`
+          if [ -z "${target_branch_llvm}" ]; then
+            target_branch_llvm="main"
+          fi
+          echo "target branch of llvm: $target_branch_llvm"
+
+          # clone llvm
+          cd ../
+          LLVM_DIR=`pwd`/jeandle-llvm
+          git clone -b ${target_branch_llvm} --depth=1 https://github.com/jeandle/jeandle-llvm.git
+
+          #build llvm
+          cd ${LLVM_DIR}
+          mkdir build
+          cd build
+          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE="Release" -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/install_llvm" -DLLVM_BUILD_LLVM_DYLIB=On -DLLVM_DYLIB_COMPONENTS=all ../llvm
+          cmake --build . --target install
+          cd ../../
+          # delete llvm repo to spare space for building jdk.
+          rm -rf jeandle-llvm/
+          cd $GITHUB_WORKSPACE
+          tar czf install_llvm.tar.gz install_llvm/
+
+      - name: 'Configure JDK'
         run: >
           bash configure
           --with-conf-name=${{ inputs.platform }}
@@ -125,12 +150,13 @@ jobs:
           --with-gtest=${{ steps.gtest.outputs.path }}
           --with-zlib=system
           --with-jmod-compress=zip-1
+          --with-jeandle-llvm=$GITHUB_WORKSPACE/install_llvm
           ${{ inputs.extra-conf-options }} ${{ inputs.configure-arguments }} || (
           echo "Dumping config.log:" &&
           cat config.log &&
           exit 1)
 
-      - name: 'Build'
+      - name: 'Build JDK'
         id: build
         uses: ./.github/actions/do-build
         with:

@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2011, 2022, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -63,6 +64,8 @@ ifeq ($(call isTargetOs, aix), false)
           $(LIBJSOUND_CFLAGS), \
       CXXFLAGS := $(CXXFLAGS_JDKLIB) $(LIBJSOUND_CFLAGS), \
       DISABLED_WARNINGS_gcc := undef, \
+      DISABLED_WARNINGS_gcc_PLATFORM_API_LinuxOS_ALSA_MidiIn.c := calloc-transposed-args, \
+      DISABLED_WARNINGS_gcc_PLATFORM_API_LinuxOS_ALSA_MidiUtils.c := calloc-transposed-args, \
       DISABLED_WARNINGS_clang := undef, \
       LDFLAGS := $(LDFLAGS_JDKLIB) \
           $(call SET_SHARED_LIBRARY_ORIGIN), \

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1998, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -160,9 +161,10 @@ public:
   bool is_compiled() const                            { return _is_compiled; }
   const bool* is_compiled_addr() const                { return &_is_compiled; }
 
-  inline bool is_compiled_by_c1() const    { return _type == compiler_c1; };
-  inline bool is_compiled_by_c2() const    { return _type == compiler_c2; };
-  inline bool is_compiled_by_jvmci() const { return _type == compiler_jvmci; };
+  inline bool is_compiled_by_c1() const      { return _type == compiler_c1; };
+  inline bool is_compiled_by_c2() const      { return _type == compiler_c2; };
+  inline bool is_compiled_by_jvmci() const   { return _type == compiler_jvmci; };
+  inline bool is_compiled_by_jeandle() const { return _type == compiler_jeandle; };
   const char* compiler_name() const;
   CompilerType compiler_type() const { return _type; }
 

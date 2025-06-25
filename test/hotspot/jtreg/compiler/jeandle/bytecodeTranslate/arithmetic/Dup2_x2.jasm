@@ -1,0 +1,341 @@
+/*
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ */
+
+package compiler/jeandle/bytecodeTranslate/arithmetic;
+
+super public class Dup2_x2 {
+    public static Method testIDup2_x2_1:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        ireturn;
+    }
+    public static Method testIDup2_x2_2:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup2_x2_3:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup2_x2_4:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup2_x2_5:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+    public static Method testIDup2_x2_6:"(IIII)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        pop;
+        ireturn;
+    }
+
+    public static Method testFDup2_x2_1:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        freturn;
+    }
+    public static Method testFDup2_x2_2:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        pop;
+        freturn;
+    }
+    public static Method testFDup2_x2_3:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        pop;
+        pop;
+        freturn;
+    }
+    public static Method testFDup2_x2_4:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        freturn;
+    }
+    public static Method testFDup2_x2_5:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        freturn;
+    }
+    public static Method testFDup2_x2_6:"(FFFF)F" stack 6 locals 4 {
+        fload_0;
+        fload_1;
+        fload_2;
+        fload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        pop;
+        freturn;
+    }
+
+    public static Method testADup2_x2_1:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        areturn;
+    }
+    public static Method testADup2_x2_2:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        pop;
+        areturn;
+    }
+    public static Method testADup2_x2_3:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        pop;
+        pop;
+        areturn;
+    }
+    public static Method testADup2_x2_4:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        areturn;
+    }
+    public static Method testADup2_x2_5:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        areturn;
+    }
+    public static Method testADup2_x2_6:"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" stack 6 locals 4 {
+        aload_0;
+        aload_1;
+        aload_2;
+        aload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop;
+        pop;
+        pop;
+        areturn;
+    }
+
+    public static Method testJDup2_x2_1:"(JJ)J" stack 6 locals 4 {
+        lload_0;
+        lload_2;
+        dup2_x2;
+        lreturn;
+    }
+    public static Method testJDup2_x2_2:"(JJ)J" stack 6 locals 4 {
+        lload_0;
+        lload_2;
+        dup2_x2;
+        pop2;
+        lreturn;
+    }
+    public static Method testJDup2_x2_3:"(JJ)J" stack 6 locals 4 {
+        lload_0;
+        lload_2;
+        dup2_x2;
+        pop2;
+        pop2;
+        lreturn;
+    }
+
+    public static Method testDDup2_x2_1:"(DD)D" stack 6 locals 4 {
+        dload_0;
+        dload_2;
+        dup2_x2;
+        dreturn;
+    }
+    public static Method testDDup2_x2_2:"(DD)D" stack 6 locals 4 {
+        dload_0;
+        dload_2;
+        dup2_x2;
+        pop2;
+        dreturn;
+    }
+    public static Method testDDup2_x2_3:"(DD)D" stack 6 locals 4 {
+        dload_0;
+        dload_2;
+        dup2_x2;
+        pop2;
+        pop2;
+        dreturn;
+    }
+
+    public static Method testIIJDup2_x2_1:"(IIJ)J" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        lload_2;
+        dup2_x2;
+        lreturn;
+    }
+    public static Method testIIJDup2_x2_2:"(IIJ)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        lload_2;
+        dup2_x2;
+        pop2;
+        ireturn;
+    }
+    public static Method testIIJDup2_x2_3:"(IIJ)I" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        lload_2;
+        dup2_x2;
+        pop2;
+        pop;
+        ireturn;
+    }
+    public static Method testIIJDup2_x2_4:"(IIJ)J" stack 6 locals 4 {
+        iload_0;
+        iload_1;
+        lload_2;
+        dup2_x2;
+        pop2;
+        pop;
+        pop;
+        lreturn;
+    }
+
+    public static Method testJIIDup2_x2_1:"(JII)I" stack 6 locals 4 {
+        lload_0;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        ireturn;
+    }
+    public static Method testJIIDup2_x2_2:"(JII)I" stack 6 locals 4 {
+        lload_0;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        ireturn;
+    }
+    public static Method testJIIDup2_x2_3:"(JII)J" stack 6 locals 4 {
+        lload_0;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        lreturn;
+    }
+    public static Method testJIIDup2_x2_4:"(JII)I" stack 6 locals 4 {
+        lload_0;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop2;
+        ireturn;
+    }
+    public static Method testJIIDup2_x2_5:"(JII)I" stack 6 locals 4 {
+        lload_0;
+        iload_2;
+        iload_3;
+        dup2_x2;
+        pop;
+        pop;
+        pop2;
+        pop;
+        ireturn;
+    }
+
+}

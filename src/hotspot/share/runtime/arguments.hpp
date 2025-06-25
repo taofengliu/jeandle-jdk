@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -370,6 +371,10 @@ class Arguments : AllStatic {
                                          char** base_archive_path,
                                          char** top_archive_path) NOT_CDS_RETURN;
 
+#ifdef JEANDLE
+  static char* _jeandle_template_path;
+#endif // JEANDLE
+
  public:
   static int num_archives(const char* archive_path) NOT_CDS_RETURN_(0);
   // Parses the arguments, first phase
@@ -501,6 +506,11 @@ class Arguments : AllStatic {
 
   static char* get_default_shared_archive_path() NOT_CDS_RETURN_(nullptr);
   static void  init_shared_archive_paths() NOT_CDS_RETURN;
+
+#ifdef JEANDLE
+  // Template module file path
+  static char* get_jeandle_template_path();
+#endif // JEANDLE
 
   // Operation modi
   static Mode mode()                { return _mode;           }

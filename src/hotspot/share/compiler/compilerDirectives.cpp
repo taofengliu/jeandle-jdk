@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1998, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -185,7 +186,7 @@ DirectiveSet* CompilerDirectives::get_for(AbstractCompiler *comp) {
   assert(DirectivesStack_lock->owned_by_self(), "");
   if (comp == nullptr) { // Xint
     return _c1_store;
-  } else  if (comp->is_c2()) {
+  } else  if (comp->is_c2() || comp->is_jeandle()) {
     return _c2_store;
   } else {
     // use c1_store as default

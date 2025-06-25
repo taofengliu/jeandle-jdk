@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +37,9 @@
 #if INCLUDE_JVMCI
 #include "jvmci/jvmci_globals.hpp"
 #endif
+#ifdef JEANDLE
+#include "jeandle/jeandle_globals.hpp"
+#endif // JEANDLE
 
 // TODO -- currently, even if all JIT compilers are disabled, the following flags
 // are still available in HotSpot. This should eventually be fixed ...
@@ -378,6 +382,9 @@
   develop(intx, HugeMethodLimit,  8000,                                     \
           "Don't compile methods larger than this if "                      \
           "+DontCompileHugeMethods")                                        \
+                                                                            \
+  product(bool, UseJeandleCompiler, false,                                  \
+          "Use Jeandle compiler")                                           \
                                                                             \
 
 // end of COMPILER_FLAGS

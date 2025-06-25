@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -35,6 +36,7 @@ m4_include([lib-std.m4])
 m4_include([lib-x11.m4])
 
 m4_include([lib-tests.m4])
+m4_include([lib-jeandle-llvm.m4])
 
 ################################################################################
 # Determine which libraries are needed for this configuration
@@ -128,6 +130,7 @@ AC_DEFUN_ONCE([LIB_SETUP_LIBRARIES],
   LIB_SETUP_X11
 
   LIB_TESTS_SETUP_GTEST
+  LIB_SETUP_JEANDLE_LLVM
 
   BASIC_JDKLIB_LIBS=""
   BASIC_JDKLIB_LIBS_TARGET=""

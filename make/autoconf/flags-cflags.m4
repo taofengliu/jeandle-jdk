@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2011, 2025, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -260,6 +261,7 @@ AC_DEFUN([FLAGS_SETUP_WARNINGS],
       WARNINGS_ENABLE_ADDITIONAL_CXX="-Woverloaded-virtual -Wreorder"
       WARNINGS_ENABLE_ALL_CFLAGS="-Wall -Wextra -Wformat=2 $WARNINGS_ENABLE_ADDITIONAL"
       WARNINGS_ENABLE_ALL_CXXFLAGS="$WARNINGS_ENABLE_ALL_CFLAGS $WARNINGS_ENABLE_ADDITIONAL_CXX"
+      DISABLED_WARNINGS_CXX="redundant-move format-nonliteral attribute-warning pessimizing-move"
 
       DISABLED_WARNINGS="unused-parameter unused"
       # gcc10/11 on ppc generate lots of abi warnings about layout of aggregates containing vectors
@@ -639,9 +641,9 @@ AC_DEFUN([FLAGS_SETUP_CFLAGS_HELPER],
 
   # CXXFLAGS C++ language level for all of JDK, including Hotspot.
   if test "x$TOOLCHAIN_TYPE" = xgcc || test "x$TOOLCHAIN_TYPE" = xclang || test "x$TOOLCHAIN_TYPE" = xxlc; then
-    LANGSTD_CXXFLAGS="-std=c++14"
+    LANGSTD_CXXFLAGS="-std=c++17"
   elif test "x$TOOLCHAIN_TYPE" = xmicrosoft; then
-    LANGSTD_CXXFLAGS="-std:c++14"
+    LANGSTD_CXXFLAGS="-std:c++17"
   else
     AC_MSG_ERROR([Don't know how to enable C++14 for this toolchain])
   fi

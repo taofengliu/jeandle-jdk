@@ -330,6 +330,21 @@
 #define COMPILER1_OR_COMPILER2_PRESENT(code)
 #endif
 
+// JEANDLE variant
+#ifdef JEANDLE
+#define JEANDLE_PRESENT(code) code
+#define NOT_JEANDLE(code)
+#else // JEANDLE
+#define JEANDLE_PRESENT(code)
+#define NOT_JEANDLE(code) code
+#endif // JEANDLE
+
+// COMPILER2 or JEANDLE
+#if defined(COMPILER2) || defined(JEANDLE)
+#define COMPILER2_OR_JEANDLE 1
+#else // COMPILER2 || JEANDLE
+#define COMPILER2_OR_JEANDLE 0
+#endif // COMPILER2 || JEANDLE
 
 // PRODUCT variant
 #ifdef PRODUCT

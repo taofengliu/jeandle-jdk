@@ -40,8 +40,8 @@ AC_DEFUN([HOTSPOT_CHECK_JVM_VARIANT],
 
 ###############################################################################
 # Check which variants of the JVM that we want to build. Available variants are:
-#   server: normal interpreter, and a tiered C1/C2 compiler
-#   client: normal interpreter, and C1 (no C2 compiler)
+#   server: normal interpreter, and a tiered C1/C2/Jeandle compiler
+#   client: normal interpreter, and C1 (no C2/Jeandle compiler)
 #   minimal: reduced form of client with optional features stripped out
 #   core: normal interpreter only, no compiler
 #   zero: C++ based interpreter only, no compiler

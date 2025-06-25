@@ -44,7 +44,7 @@
 m4_define(jvm_features_valid, m4_normalize( \
     ifdef([custom_jvm_features_valid], custom_jvm_features_valid) \
     \
-    cds compiler1 compiler2 dtrace epsilongc g1gc jfr jni-check \
+    cds compiler1 compiler2 dtrace epsilongc g1gc jeandle jfr jni-check \
     jvmci jvmti link-time-opt management minimal opt-size parallelgc \
     serialgc services shenandoahgc static-build vm-structs zero zgc \
 ))
@@ -61,6 +61,7 @@ m4_define(jvm_feature_desc_compiler2, [enable hotspot compiler C2])
 m4_define(jvm_feature_desc_dtrace, [enable dtrace support])
 m4_define(jvm_feature_desc_epsilongc, [include the epsilon (no-op) garbage collector])
 m4_define(jvm_feature_desc_g1gc, [include the G1 garbage collector])
+m4_define(jvm_feature_desc_jeandle, [include the Jeandle compiler])
 m4_define(jvm_feature_desc_jfr, [enable JDK Flight Recorder (JFR)])
 m4_define(jvm_feature_desc_jni_check, [enable -Xcheck:jni support])
 m4_define(jvm_feature_desc_jvmci, [enable JVM Compiler Interface (JVMCI)])
@@ -271,6 +272,23 @@ AC_DEFUN_ONCE([JVM_FEATURES_CHECK_DTRACE],
 ])
 
 ###############################################################################
+# Check if the feature 'jeandle' is available on this platform.
+#
+AC_DEFUN_ONCE([JVM_FEATURES_CHECK_JEANDLE],
+[
+  JVM_FEATURES_CHECK_AVAILABILITY(jeandle, [
+    AC_MSG_CHECKING([if platform is supported by Jeandle])
+    if test "x$OPENJDK_TARGET_CPU_ARCH" = "xx86" && \
+        test "x$OPENJDK_TARGET_OS" = xlinux; then
+      AC_MSG_RESULT([yes])
+    else
+      AC_MSG_RESULT([no, $OPENJDK_TARGET_OS-$OPENJDK_TARGET_CPU])
+      AVAILABLE=false
+    fi
+  ])
+])
+
+###############################################################################
 # Check if the feature 'jvmci' is available on this platform.
 #
 AC_DEFUN_ONCE([JVM_FEATURES_CHECK_JVMCI],
@@ -393,6 +411,7 @@ AC_DEFUN_ONCE([JVM_FEATURES_PREPARE_PLATFORM],
 
   JVM_FEATURES_CHECK_CDS
   JVM_FEATURES_CHECK_DTRACE
+  JVM_FEATURES_CHECK_JEANDLE
   JVM_FEATURES_CHECK_JVMCI
   JVM_FEATURES_CHECK_SHENANDOAHGC
   JVM_FEATURES_CHECK_STATIC_BUILD
@@ -419,17 +438,17 @@ AC_DEFUN([JVM_FEATURES_PREPARE_VARIANT],
     JVM_FEATURES_VARIANT_UNAVAILABLE="cds minimal zero"
   elif test "x$variant" = "xzero"; then
     JVM_FEATURES_VARIANT_UNAVAILABLE="compiler1 compiler2 \
-        jvmci minimal zgc"
+        jeandle jvmci minimal zgc"
   else
     JVM_FEATURES_VARIANT_UNAVAILABLE="minimal zero"
   fi
 
   # Check which features should be off by default for this JVM variant.
   if test "x$variant" = "xclient"; then
-    JVM_FEATURES_VARIANT_FILTER="compiler2 jvmci link-time-opt opt-size"
+    JVM_FEATURES_VARIANT_FILTER="compiler2 jeandle jvmci link-time-opt opt-size"
   elif test "x$variant" = "xminimal"; then
     JVM_FEATURES_VARIANT_FILTER="cds compiler2 dtrace epsilongc g1gc \
-        jfr jni-check jvmci jvmti management parallelgc services \
+        jeandle jfr jni-check jvmci jvmti management parallelgc services \
         shenandoahgc vm-structs zgc"
     if test "x$OPENJDK_TARGET_CPU" = xarm ; then
       JVM_FEATURES_VARIANT_FILTER="$JVM_FEATURES_VARIANT_FILTER opt-size"
@@ -439,7 +458,7 @@ AC_DEFUN([JVM_FEATURES_PREPARE_VARIANT],
           link-time-opt"
     fi
   elif test "x$variant" = "xcore"; then
-    JVM_FEATURES_VARIANT_FILTER="compiler1 compiler2 jvmci \
+    JVM_FEATURES_VARIANT_FILTER="compiler1 compiler2 jeandle jvmci \
         link-time-opt opt-size"
   elif test "x$variant" = "xzero"; then
     JVM_FEATURES_VARIANT_FILTER="jfr link-time-opt opt-size"
@@ -535,12 +554,20 @@ AC_DEFUN([JVM_FEATURES_VERIFY],
   if JVM_FEATURES_IS_ACTIVE(compiler2); then
     INCLUDE_COMPILER2="true"
   fi
+  if JVM_FEATURES_IS_ACTIVE(jeandle); then
+    INCLUDE_JEANDLE="true"
+  fi
 
   # Verify that we have at least one gc selected (i.e., feature named "*gc").
   if ! JVM_FEATURES_IS_ACTIVE(.*gc); then
       AC_MSG_NOTICE([At least one gc needed for variant '$variant'.])
       AC_MSG_NOTICE([Specified features: '$JVM_FEATURES_ACTIVE'])
       AC_MSG_ERROR([Cannot continue])
+  fi
+
+  # If Jeandle is included, the installation directory of jeandl-llvm must be specified.
+  if JVM_FEATURES_IS_ACTIVE(jeandle) && test "x${JEANDLE_LLVM_DIR}" = "x"; then
+    AC_MSG_ERROR([The installation directory of jeandle-llvm is not specified. To include Jeandle, use --with-jeandle-llvm=PATH])
   fi
 ])
 
@@ -559,6 +586,7 @@ AC_DEFUN_ONCE([JVM_FEATURES_SETUP],
   ENABLE_CDS="true"
   INCLUDE_JVMCI="true"
   INCLUDE_COMPILER2="false"
+  INCLUDE_JEANDLE="false"
 
   for variant in $JVM_VARIANTS; do
     # Figure out if any features are unavailable, or should be filtered out
@@ -596,5 +624,6 @@ AC_DEFUN_ONCE([JVM_FEATURES_SETUP],
 
   AC_SUBST(INCLUDE_JVMCI)
   AC_SUBST(INCLUDE_COMPILER2)
+  AC_SUBST(INCLUDE_JEANDLE)
 
 ])

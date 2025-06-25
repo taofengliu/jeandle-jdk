@@ -1,19 +1,24 @@
-# Welcome to OpenJDK 21 Updates!
+<p align="center">
+  <img src="logo.png" alt="Jeandle logo">
+</p>
 
-The JDK 21 Updates project uses two GitHub repositories.
-Updates are continuously developed in the repository [jdk21u-dev](https://github.com/openjdk/jdk21u-dev). This is the repository usually targeted by contributors.
-The [jdk21u](https://github.com/openjdk/jdk21u) repository is used for rampdown of the update releases of jdk21u and only accepts critical changes that must make the next release during rampdown. (You probably do not want to target jdk21u).
+## Introduction
+Jeandle is a Just-in-Time compiler for Java. It is built on OpenJDK and leverages the LLVM compiler infrastructure to generate machine code, aiming to provide powerful compilation optimizations and deliver high-performance code.
 
-For more OpenJDK 21 updates specific information such as timelines and contribution guidelines see the [project wiki page](https://wiki.openjdk.org/display/JDKUpdates/JDK+21u/).
+Jeandle is currently a work in progress. All contributions are welcome.
 
+## Getting Started
+[Getting Started](https://github.com/jeandle/jeandle-jdk/blob/main/jeandle-docs/getting-started.md)
 
-For build instructions please see the
-[online documentation](https://openjdk.org/groups/build/doc/building.html),
-or either of these files:
+## Contribution Guide
+[Contribution Guide](https://github.com/jeandle/jeandle-jdk/blob/main/jeandle-docs/contribution-guide.md)
 
-- [doc/building.html](doc/building.html) (html version)
-- [doc/building.md](doc/building.md) (markdown version)
+## Getting Connected
+Join the Jeandle community discussions on [Slack](https://join.slack.com/t/jeandle/shared_invite/zt-38frttmvo-H~vDGc04NmPnxAZm~ojqow).
 
-See <https://openjdk.org/> for more information about the OpenJDK
-Community and the JDK and see <https://bugs.openjdk.org> for JDK issue
-tracking.
+## Other Documentation
+[Development Guide](https://github.com/jeandle/jeandle-jdk/blob/main/jeandle-docs/development-guide.md)
+
+[System Design](https://github.com/jeandle/jeandle-jdk/blob/main/jeandle-docs/system-design.md)
+
+[JVM Flags of Jeandle](https://github.com/jeandle/jeandle-jdk/blob/main/jeandle-docs/jeandle-flags.md)
