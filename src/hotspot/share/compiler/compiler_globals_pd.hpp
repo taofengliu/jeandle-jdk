@@ -30,6 +30,7 @@
 // Note: for historical reasons, some of these flags are declared in globals.hpp.
 // E.g., BackgroundCompilation. Such declarations should be moved to this
 // file instead.
+// asdfafasdf
 
 #include "runtime/globals_shared.hpp"
 #ifdef COMPILER1
