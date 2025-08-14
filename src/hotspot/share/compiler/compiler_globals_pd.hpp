@@ -31,6 +31,7 @@
 // E.g., BackgroundCompilation. Such declarations should be moved to this
 // file instead.
 // asdfafasdf
+// asdfasfasf
 
 #include "runtime/globals_shared.hpp"
 #ifdef COMPILER1
