@@ -22,8 +22,6 @@
 #include "llvm/Object/StackMapParser.h"
 #include "llvm/Support/DataExtractor.h"
 
-#include "llvm/ExecutionEngine/JITLink/x86_64.h"
-
 #include "jeandle/jeandleAssembler.hpp"
 #include "jeandle/jeandleCompilation.hpp"
 #include "jeandle/jeandleCompiledCode.hpp"
