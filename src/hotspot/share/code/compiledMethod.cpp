@@ -288,6 +288,9 @@ void CompiledMethod::verify_oop_relocations() {
       if (!reloc->oop_is_immediate()) {
         reloc->verify_oop_relocation();
       }
+    } else if (iter.type() == relocInfo::jeandle_oop_type) {
+      jeandle_oop_Relocation* reloc = iter.jeandle_oop_reloc();
+      reloc->verify_oop_relocation();
     }
   }
 }

@@ -1140,6 +1140,9 @@ void nmethod::fix_oop_relocations(address begin, address end, bool initialize_im
     } else if (iter.type() == relocInfo::metadata_type) {
       metadata_Relocation* reloc = iter.metadata_reloc();
       reloc->fix_metadata_relocation();
+    } else if (iter.type() == relocInfo::jeandle_oop_type) {
+      jeandle_oop_Relocation* reloc = iter.jeandle_oop_reloc();
+      reloc->fix_oop_relocation();
     }
   }
 }
@@ -2927,11 +2930,17 @@ const char* nmethod::reloc_string_for(u_char* begin, u_char* end) {
     have_one = true;
     switch (iter.type()) {
         case relocInfo::none:                  return "no_reloc";
-        case relocInfo::oop_type: {
+        case relocInfo::oop_type:
+        case relocInfo::jeandle_oop_type: {
           // Get a non-resizable resource-allocated stringStream.
           // Our callees make use of (nested) ResourceMarks.
           stringStream st(NEW_RESOURCE_ARRAY(char, 1024), 1024);
-          oop_Relocation* r = iter.oop_reloc();
+          oop_Relocation* r = nullptr;
+          if (iter.type() == relocInfo::jeandle_oop_type) {
+            r = iter.jeandle_oop_reloc();
+          } else {
+            r = iter.oop_reloc();
+          }
           oop obj = r->oop_value();
           st.print("oop(");
           if (obj == nullptr) st.print("nullptr");
@@ -3005,14 +3014,15 @@ const char* nmethod::reloc_string_for(u_char* begin, u_char* end) {
           }
           return st.as_string();
         }
-        case relocInfo::static_stub_type:      return "static_stub";
-        case relocInfo::external_word_type:    return "external_word";
-        case relocInfo::internal_word_type:    return "internal_word";
-        case relocInfo::section_word_type:     return "section_word";
-        case relocInfo::poll_type:             return "poll";
-        case relocInfo::poll_return_type:      return "poll_return";
-        case relocInfo::trampoline_stub_type:  return "trampoline_stub";
-        case relocInfo::type_mask:             return "type_bit_mask";
+        case relocInfo::static_stub_type:          return "static_stub";
+        case relocInfo::external_word_type:        return "external_word";
+        case relocInfo::internal_word_type:        return "internal_word";
+        case relocInfo::jeandle_section_word_type:
+        case relocInfo::section_word_type:         return "section_word";
+        case relocInfo::poll_type:                 return "poll";
+        case relocInfo::poll_return_type:          return "poll_return";
+        case relocInfo::trampoline_stub_type:      return "trampoline_stub";
+        case relocInfo::type_mask:                 return "type_bit_mask";
 
         default:
           break;

@@ -22,6 +22,8 @@
 #include "llvm/Object/StackMapParser.h"
 #include "llvm/Support/DataExtractor.h"
 
+#include "llvm/ExecutionEngine/JITLink/x86_64.h"
+
 #include "jeandle/jeandleAssembler.hpp"
 #include "jeandle/jeandleCompilation.hpp"
 #include "jeandle/jeandleCompiledCode.hpp"
@@ -34,7 +36,7 @@ namespace {
 
 class JeandleReloc {
  public:
-  JeandleReloc(uint32_t offset) : _offset(offset) { }
+  JeandleReloc(uint32_t offset) : _offset(offset) {}
 
   uint32_t offset() const { return _offset; }
 
@@ -62,7 +64,7 @@ class JeandleConstReloc : public JeandleReloc {
     JeandleReloc(block.getAddress().getValue() + edge.getOffset()),
     _kind(edge.getKind()),
     _addend(edge.getAddend()),
-    _target(target) { }
+    _target(target) {}
 
   void emit_reloc(JeandleAssembler& assembler) override {
     assembler.emit_const_reloc(offset(), _kind, _addend, _target);
@@ -77,24 +79,36 @@ class JeandleConstReloc : public JeandleReloc {
 class JeandleCallReloc : public JeandleReloc {
  public:
   JeandleCallReloc(CallSiteInfo* call) : JeandleReloc(call->inst_offset()),
-    _call(call) { }
+    _call(call) {}
 
-  void emit_reloc(JeandleAssembler& assembler) override;
+  void emit_reloc(JeandleAssembler& assembler) override {
+    if (_call->type() == JeandleJavaCall::Type::STATIC_CALL) {
+      assembler.emit_static_call_stub(_call);
+      assembler.patch_static_call_site(_call);
+    }
+
+    if (_call->type() == JeandleJavaCall::Type::DYNAMIC_CALL) {
+      assembler.patch_ic_call_site(_call);
+    }
+  }
 
  private:
   CallSiteInfo* _call;
 };
 
-void JeandleCallReloc::emit_reloc(JeandleAssembler& assembler) {
-  if (_call->type() == JeandleJavaCall::Type::STATIC_CALL) {
-    assembler.emit_static_call_stub(_call);
-    assembler.patch_static_call_site(_call);
+class JeandleOopReloc : public JeandleReloc {
+ public:
+  JeandleOopReloc(uint32_t offset, jobject oop_handle) :
+    JeandleReloc(offset),
+    _oop_handle(oop_handle) {}
+
+  void emit_reloc(JeandleAssembler& assembler) override {
+    assembler.emit_oop_reloc(offset(), _oop_handle);
   }
 
-  if (_call->type() == JeandleJavaCall::Type::DYNAMIC_CALL) {
-    assembler.patch_ic_call_site(_call);
-  }
-}
+ private:
+  jobject _oop_handle;
+};
 
 } // anonymous namespace
 
@@ -191,20 +205,17 @@ void JeandleCompiledCode::resolve_reloc_info(JeandleAssembler& assembler) {
     for (auto& edge : block->edges()) {
       auto& target = edge.getTarget();
 
-      if (!target.isDefined()) {
-        continue;
-      }
-
-      auto& target_section = target.getSection();
-      auto section_name = target_section.getName();
-
-      // Const target section.
-      if (section_name.starts_with(".rodata")) {
+      if (target.isDefined() && target.getSection().getName().starts_with(".rodata")) {
+        // Const relocatinos.
         address target_addr = resolve_const_edge(*block, edge, assembler);
         if (target_addr == nullptr) {
           return;
         }
         relocs.push_back(new JeandleConstReloc(*block, edge, target_addr));
+      } else if (!target.isDefined() && edge.getKind() == assembler.get_oop_reloc_kind()) {
+        // Oop relocations.
+        assert((*(target.getName())).starts_with("oop_handle"), "invalid oop relocation name");
+        relocs.push_back(new JeandleOopReloc(block->getAddress().getValue() + edge.getOffset(), _oop_handles[(*(target.getName()))]));
       }
     }
   }

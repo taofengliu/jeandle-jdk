@@ -278,6 +278,7 @@ class relocInfo {
     entry_guard_type           = 17, // A tag for an nmethod entry barrier guard value
     barrier_type               = 18, // GC barrier data
     jeandle_section_word_type  = 19, // internal, but a cross-section reference specific for jeandle
+    jeandle_oop_type           = 20, // embedded oop for jeandle
     type_mask                  = 31  // A mask which selects only the above values
   };
 
@@ -321,6 +322,7 @@ class relocInfo {
     visitor(entry_guard) \
     visitor(barrier) \
     visitor(jeandle_section_word) \
+    visitor(jeandle_oop) \
 
 
  public:
@@ -788,17 +790,15 @@ class Relocation {
 
  protected:
   // platform-independent utility for patching constant section
-  void       const_set_data_value      (address x);
-  void       const_verify_data_value   (address x);
+  void       const_set_data_value         (address x);
+  void       const_verify_data_value      (address x);
   // platform-dependent utilities for decoding and patching instructions
-  void       pd_set_data_value         (address x, intptr_t off, bool verify_only = false); // a set or mem-ref
-  void       pd_verify_data_value      (address x, intptr_t off) {
-    assert(_rtype != relocInfo::jeandle_section_word_type, "no need to verify jeandle section word");
-    pd_set_data_value(x, off, true);
-  }
-  address    pd_call_destination       (address orig_addr = nullptr);
-  void       pd_set_call_destination   (address x);
-  void       pd_set_jeandle_data_value (address x, intptr_t off);
+  void       pd_set_data_value            (address x, intptr_t off, bool verify_only = false); // a set or mem-ref
+  void       pd_verify_data_value         (address x, intptr_t off) { pd_set_data_value(x, off, true); }
+  address    pd_call_destination          (address orig_addr = nullptr);
+  void       pd_set_call_destination      (address x);
+  void       pd_set_jeandle_data_value    (address x, bool verify_only = false);
+  void       pd_verify_jeandle_data_value (address x) { pd_set_jeandle_data_value(x, true); }
 
   // this extracts the address of an address in the code stream instead of the reloc data
   address* pd_address_in_code       ();
@@ -874,6 +874,10 @@ class Relocation {
   // ic_call_type is not always position dependent (depending on the state of the cache)). However, this is
   // probably a reasonable assumption, since empty caches simplifies code reloacation.
   virtual void fix_relocation_after_move(const CodeBuffer* src, CodeBuffer* dest) { }
+
+  bool is_jeandle_reloc() {
+    return _rtype == relocInfo::jeandle_oop_type || _rtype == relocInfo::jeandle_section_word_type;
+  }
 };
 
 
@@ -912,7 +916,12 @@ class DataRelocation : public Relocation {
   // both target and offset must be computed somehow from relocation data
   virtual int    offset()                      { return 0; }
   address         value() override             = 0;
-  void        set_value(address x) override    { set_value(x, offset()); }
+  void        set_value(address x) override    {
+    if (is_jeandle_reloc())
+      pd_set_jeandle_data_value(x);
+    else
+      set_value(x, offset());
+  }
   void        set_value(address x, intptr_t o) {
     if (addr_in_const())
       const_set_data_value(x);
@@ -922,6 +931,8 @@ class DataRelocation : public Relocation {
   void        verify_value(address x) {
     if (addr_in_const())
       const_verify_data_value(x);
+    else if (is_jeandle_reloc())
+      pd_verify_jeandle_data_value(x);
     else
       pd_verify_data_value(x, offset());
   }
@@ -1006,11 +1017,11 @@ class oop_Relocation : public DataRelocation {
   jint _oop_index;                  // if > 0, index into CodeBlob::oop_at
   jint _offset;                     // byte offset to apply to the oop itself
 
-  oop_Relocation(int oop_index, int offset)
-    : DataRelocation(relocInfo::oop_type), _oop_index(oop_index), _offset(offset) { }
-
+ protected:
   friend class RelocationHolder;
-  oop_Relocation() : DataRelocation(relocInfo::oop_type) {}
+  oop_Relocation(relocInfo::relocType type = relocInfo::oop_type) : DataRelocation(type) {}
+  oop_Relocation(int oop_index, int offset, relocInfo::relocType type = relocInfo::oop_type)
+    : DataRelocation(type), _oop_index(oop_index), _offset(offset) { }
 
  public:
   int oop_index() { return _oop_index; }
@@ -1020,9 +1031,9 @@ class oop_Relocation : public DataRelocation {
   void pack_data_to(CodeSection* dest) override;
   void unpack_data() override;
 
-  void fix_oop_relocation();        // reasserts oop value
+  virtual void fix_oop_relocation();        // reasserts oop value
 
-  void verify_oop_relocation();
+  virtual void verify_oop_relocation();
 
   address value() override { return *reinterpret_cast<address*>(oop_addr()); }
 
@@ -1031,6 +1042,31 @@ class oop_Relocation : public DataRelocation {
   oop* oop_addr();                  // addr or &pool[jint_data]
   oop  oop_value();                 // *oop_addr
   // Note:  oop_value transparently converts Universe::non_oop_word to nullptr.
+};
+
+class jeandle_oop_Relocation : public oop_Relocation {
+ public:
+  static RelocationHolder spec(int oop_index) {
+    assert(oop_index > 0, "must be a pool-resident oop");
+    return RelocationHolder::construct<jeandle_oop_Relocation>(oop_index);
+  }
+
+  void copy_into(RelocationHolder& holder) const override;
+
+  virtual void fix_oop_relocation() {
+    set_value(reinterpret_cast<address>(oop_addr()));
+  }
+
+  virtual void verify_oop_relocation() {
+    verify_value(reinterpret_cast<address>(oop_addr()));
+  }
+
+ private:
+  jeandle_oop_Relocation(int oop_index)
+    : oop_Relocation(oop_index, 0, relocInfo::jeandle_oop_type) {}
+
+  friend class RelocationHolder;
+  jeandle_oop_Relocation() : oop_Relocation(relocInfo::jeandle_oop_type) { }
 };
 
 
@@ -1452,10 +1488,6 @@ class jeandle_section_word_Relocation : public section_word_Relocation {
 
   jeandle_section_word_Relocation(address target, int section)
     : section_word_Relocation(target, section, relocInfo::jeandle_section_word_type) { }
-
-  void set_value(address x) override {
-    pd_set_jeandle_data_value(x, offset());
-  }
 
  private:
   friend class RelocationHolder;

@@ -49,6 +49,10 @@ class JeandleAssembler : public StackObj {
 
   void emit_const_reloc(uint32_t offset, LinkKind kind, int64_t addend, address target);
 
+  void emit_oop_reloc(uint32_t offset, jobject oop_handle);
+
+  static LinkKind get_oop_reloc_kind();
+
  private:
   MacroAssembler* _masm;
 };
