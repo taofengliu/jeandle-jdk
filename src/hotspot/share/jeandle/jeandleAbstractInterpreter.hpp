@@ -220,6 +220,9 @@ class JeandleAbstractInterpreter : public StackObj {
   // Assign a unique statepoint id for each statepoint.
   uint32_t _statepoint_id;
 
+  // Record oop values.
+  llvm::DenseMap<jobject, llvm::Value*> _oops;
+
   // The JeandleBasicBlock and its JeandleVMState currently being interpreted.
   JeandleBasicBlock* _block;
   JeandleVMState* _jvm;
@@ -249,6 +252,29 @@ class JeandleAbstractInterpreter : public StackObj {
   llvm::DenseMap<int, JeandleBasicBlock*>& bci2block() { return _block_builder->bci2block(); }
 
   uint32_t next_statepoint_id() { return _statepoint_id++; }
+
+  llvm::Value* find_or_insert_oop(ciObject* oop);
+
+  int _oop_idx;
+  std::string next_oop_name() { return std::string("oop_handle_") + std::to_string(_oop_idx++); }
+
+  // Implementation of _get* and _put* bytecodes.
+  void do_getstatic() { do_field_access(true, true); }
+  void do_getfield() { do_field_access(true, false); }
+  void do_putstatic() { do_field_access(false, true); }
+  void do_putfield() { do_field_access(false, false); }
+
+  // Common code for making initial checks and forming addresses.
+  void do_field_access(bool is_get, bool is_static);
+
+  // Helper methods for field access.
+  llvm::Value* compute_instance_field_address(llvm::Value* obj, int offset);
+  llvm::Value* compute_static_field_address(ciInstanceKlass* holder, int offset);
+  llvm::Value* load_from_address(llvm::Value* addr, BasicType type);
+  void store_to_address(llvm::Value* addr, llvm::Value* value, BasicType type);
+
+  void do_get_xxx(ciField* field, bool is_static);
+  void do_put_xxx(ciField* field, bool is_static);
 };
 
 #endif // SHARE_JEANDLE_ABSTRACT_INTERPRETER_HPP

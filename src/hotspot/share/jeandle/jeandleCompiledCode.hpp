@@ -86,6 +86,8 @@ class JeandleCompiledCode : public StackObj {
 
   llvm::DenseMap<uint32_t, CallSiteInfo*>& call_sites() { return _call_sites; }
 
+  llvm::StringMap<jobject>& oop_handles() { return _oop_handles; }
+
   const char* object_start() const { return _obj->getBufferStart(); }
   size_t object_size() const { return _obj->getBufferSize(); }
 
@@ -108,6 +110,7 @@ class JeandleCompiledCode : public StackObj {
   CodeBuffer _code_buffer; // Relocations and stubs.
   llvm::DenseMap<uint32_t, CallSiteInfo*> _call_sites;
   llvm::StringMap<address> _const_sections;
+  llvm::StringMap<jobject> _oop_handles;
   CodeOffsets _offsets;
   ExceptionHandlerTable _exception_handler_table;
   ImplicitExceptionTable _implicit_exception_table;

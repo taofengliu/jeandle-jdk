@@ -862,8 +862,14 @@ void RelocIterator::print_current() {
   tty->print("]");
   switch (type()) {
   case relocInfo::oop_type:
+  case relocInfo::jeandle_oop_type:
     {
-      oop_Relocation* r = oop_reloc();
+      oop_Relocation* r = nullptr;
+      if (type() == relocInfo::jeandle_oop_type) {
+        r = (oop_Relocation*)jeandle_oop_reloc();
+      } else {
+        r = oop_reloc();
+      }
       oop* oop_addr  = nullptr;
       oop  raw_oop   = nullptr;
       oop  oop_value = nullptr;
@@ -906,6 +912,7 @@ void RelocIterator::print_current() {
   case relocInfo::external_word_type:
   case relocInfo::internal_word_type:
   case relocInfo::section_word_type:
+  case relocInfo::jeandle_section_word_type:
     {
       DataRelocation* r = (DataRelocation*) reloc();
       tty->print(" | [target=" INTPTR_FORMAT "]", p2i(r->value())); //value==target

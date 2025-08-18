@@ -108,15 +108,26 @@ void JeandleAssembler::emit_ic_check() {
     __ nop(nops_cnt);
 }
 
-using LinkKind_86_64 = llvm::jitlink::x86_64::EdgeKind_x86_64;
+using LinkKind_x86_64 = llvm::jitlink::x86_64::EdgeKind_x86_64;
 
 void JeandleAssembler::emit_const_reloc(uint32_t operand_offset, LinkKind kind, int64_t addend, address target) {
   assert(operand_offset != 0, "invalid operand address");
-  assert(kind == LinkKind_86_64::Delta32, "invalid link kind");
+  assert(kind == LinkKind_x86_64::Delta32, "invalid link kind");
 
   address at_address = __ code()->insts_begin() + operand_offset;
   address reloc_target = target + addend + sizeof(int32_t);
   RelocationHolder rspec = jeandle_section_word_Relocation::spec(reloc_target, CodeBuffer::SECT_CONSTS);
 
   __ code_section()->relocate(at_address, rspec, __ disp32_operand);
+}
+
+void JeandleAssembler::emit_oop_reloc(uint32_t offset, jobject oop_handle) {
+  int index = __ oop_recorder()->find_index(oop_handle);
+  RelocationHolder rspec = jeandle_oop_Relocation::spec(index);
+  address at_address = __ code()->insts_begin() + offset;
+  __ code_section()->relocate(at_address, rspec, __ disp32_operand);
+}
+
+LinkKind JeandleAssembler::get_oop_reloc_kind() {
+  return LinkKind_x86_64::RequestGOTAndTransformToPCRel32GOTLoadREXRelaxable;
 }
