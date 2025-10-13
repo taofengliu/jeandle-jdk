@@ -30,7 +30,7 @@
 
 #define __ _masm->
 
-void JeandleAssembler::emit_static_call_stub(int inst_offset, CallSiteInfo* call) {
+void JeandleAssembler::emit_static_callasdf_stub(int inst_offset, CallSiteInfo* call) {
   assert(call->type() == JeandleCompiledCall::STATIC_CALL, "illegal call type");
   address call_address = __ addr_at(inst_offset);
 
