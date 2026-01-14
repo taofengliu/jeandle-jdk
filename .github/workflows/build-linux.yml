@@ -168,6 +168,7 @@ jobs:
           rm -rf jeandle-llvm/
           df -h
           pushd $GITHUB_WORKSPACE
+          echo GITHUB_WORKSPACE=$GITHUB_WORKSPACE
           tar czf install_llvm${{ matrix.suffix }}.tar.gz install_llvm${{ matrix.suffix }}/
 
       - name: 'Configure JDK'
