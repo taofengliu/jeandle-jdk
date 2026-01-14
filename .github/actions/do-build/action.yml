@@ -39,6 +39,10 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: 'Check Disk'
+      id: Disk
+      run: du -h --max-depth=1 . && rm -rf .git
+      shell: bash
     - name: 'Build'
       id: build
       run: >
