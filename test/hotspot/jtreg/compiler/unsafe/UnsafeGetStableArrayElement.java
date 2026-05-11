@@ -38,6 +38,13 @@
  *                   -XX:+WhiteBoxAPI
  *                   -XX:CompileCommand=dontinline,*Test::test*
  *                   compiler.unsafe.UnsafeGetStableArrayElement
+ *
+ * @run main/bootclasspath/othervm -XX:+UnlockDiagnosticVMOptions
+ *                   -Xbatch -XX:-TieredCompilation
+ *                   -XX:-FoldStableValues
+ *                   -XX:+WhiteBoxAPI
+ *                   -XX:CompileCommand=dontinline,*Test::test*
+ *                   compiler.unsafe.UnsafeGetStableArrayElement nofold
  */
 
 package compiler.unsafe;
@@ -345,6 +352,11 @@ public class UnsafeGetStableArrayElement {
     public static void main(String[] args) throws Exception {
         if (!Platform.isServer() || Platform.isEmulatedClient()) {
             throw new Error("TESTBUG: Not server mode");
+        }
+        if (args.length > 0 && args[0].equals("nofold")) {
+            run(Test::testI_I, null, Test::changeI);
+            System.out.println("TEST PASSED");
+            return;
         }
         testUnsafeAccess();
         System.out.println("TEST PASSED");

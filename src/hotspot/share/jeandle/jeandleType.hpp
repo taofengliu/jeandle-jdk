@@ -27,6 +27,7 @@
 #include "llvm/IR/Type.h"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
+#include "ci/ciObject.hpp"
 #include "ci/compilerInterface.hpp"
 #include "jeandle/jeandleCompilation.hpp"
 
@@ -90,16 +91,22 @@ class TypedValue {
 private:
   BasicType _basic_type;
   llvm::Value * _value;
+  // Metadata for LLVM values that are known aliases of a constant oop. It is
+  // carried with stack/local values so PHI nodes can preserve it across merges.
+  ciObject* _constant_oop;
 
 public:
-  TypedValue(BasicType type, llvm::Value* value) : _basic_type(type), _value(value) {
+  TypedValue(BasicType type, llvm::Value* value, ciObject* constant_oop = nullptr) :
+      _basic_type(type), _value(value), _constant_oop(constant_oop) {
     if (value == nullptr) {
       assert(type == T_ILLEGAL, "value is null");
+      assert(constant_oop == nullptr, "null value cannot be a constant oop");
     } else {
       assert(value->getType() == JeandleType::java2llvm(type, value->getContext()), "type does not match");
+      assert(constant_oop == nullptr || is_reference_type(type), "only reference values can be constant oops");
     }
   }
-  TypedValue() : _basic_type(T_ILLEGAL), _value(nullptr) {}
+  TypedValue() : _basic_type(T_ILLEGAL), _value(nullptr), _constant_oop(nullptr) {}
 
   static TypedValue null_value() { return TypedValue(T_ILLEGAL, nullptr); }
   bool   is_null() const { return _basic_type == T_ILLEGAL && _value == nullptr; }
@@ -107,6 +114,19 @@ public:
   BasicType computational_type() const { return JeandleType::actual2computational(_basic_type); }
   BasicType        actual_type() const { return _basic_type; }
   llvm::Value*           value() const { return _value; }
+  ciObject*      constant_oop() const { return _constant_oop; }
+
+  TypedValue clone_with_value(llvm::Value* value) const {
+    return TypedValue(_basic_type, value, _constant_oop);
+  }
+
+  void merge_constant_oop(const TypedValue& incoming) {
+    if (_constant_oop != nullptr &&
+        _constant_oop == incoming._constant_oop) {
+      return;
+    }
+    _constant_oop = nullptr;
+  }
 };
 
 /* A pair of TypedValue and corresponding lock (llvm::Value*) used by monitors */
@@ -117,8 +137,6 @@ private:
 
 public:
   LockValue(TypedValue object, llvm::Value* lock) : _object(object), _basic_lock(lock) { }
-  LockValue(BasicType type, llvm::Value* object, llvm::Value* lock)
-    : _object(TypedValue(type, object)), _basic_lock(lock) { }
   LockValue() : _object(TypedValue()), _basic_lock(nullptr) { }
 
   bool equals(const LockValue& rhs) {

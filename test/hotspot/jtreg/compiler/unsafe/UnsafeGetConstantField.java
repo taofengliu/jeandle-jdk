@@ -103,6 +103,7 @@ public class UnsafeGetConstantField {
         testUnsafeGetAddress();
         testUnsafeGetField();
         testUnsafeGetFieldUnaligned();
+        testUnsafeGetFieldBasePhi();
         System.out.println("TEST PASSED");
     }
 
@@ -117,6 +118,42 @@ public class UnsafeGetConstantField {
 
     static long checkGetAddress() {
         return U.getAddress(nativeAddr);
+    }
+
+    static final class PhiBase {
+        final int value = 42;
+    }
+
+    static final PhiBase PHI_BASE = new PhiBase();
+    static final long PHI_VALUE_OFFSET;
+    static volatile boolean phiToggle;
+
+    static {
+        try {
+            PHI_VALUE_OFFSET = U.objectFieldOffset(PhiBase.class.getDeclaredField("value"));
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    static void testUnsafeGetFieldBasePhi() {
+        for (int i = 0; i < 20_000; i++) {
+            Asserts.assertEQ(42, testBasePhiUnsafe());
+        }
+
+        U.putInt(PHI_BASE, PHI_VALUE_OFFSET, 0);
+        Asserts.assertEQ(42, testBasePhiUnsafe(),
+                "unsafe get through a merged constant oop should stay folded");
+    }
+
+    static int testBasePhiUnsafe() {
+        Object base;
+        if (phiToggle) {
+            base = PHI_BASE;
+        } else {
+            base = PHI_BASE;
+        }
+        return U.getInt(base, PHI_VALUE_OFFSET);
     }
 
     static void testUnsafeGetField() {

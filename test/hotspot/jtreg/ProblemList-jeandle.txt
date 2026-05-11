@@ -215,13 +215,6 @@ compiler/intrinsics/klass/CastNullCheckDroppingsTest.java                       
 compiler/intrinsics/math/TestFpMinMaxReductions.java                                           linux-x64
 
 ###
-# Constant Folding
-# related issue: https://github.com/jeandle/jeandle-jdk/issues/387
-###
-compiler/unsafe/UnsafeGetConstantField.java                                                    linux-aarch64,linux-x64
-compiler/unsafe/UnsafeGetStableArrayElement.java                                               linux-aarch64,linux-x64
-
-###
 # CompressedOops/CompressedClassPointers
 ###
 gc/arguments/TestMaxRAMFlags.java                                                              linux-aarch64,linux-x64

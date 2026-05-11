@@ -154,6 +154,7 @@ bool JeandleVMState::update_phi_nodes(JeandleVMState* income_jvm, llvm::BasicBlo
     }
 
     phi_node->addIncoming(income_locals[i].value(), income_block);
+    _locals[i].merge_constant_oop(income_locals[i]);
   }
 
   // Create phi nodes for stack.
@@ -165,6 +166,7 @@ bool JeandleVMState::update_phi_nodes(JeandleVMState* income_jvm, llvm::BasicBlo
     llvm::PHINode* phi_node = llvm::cast<llvm::PHINode>(_stack[i].value());
 
     phi_node->addIncoming(income_stack[i].value(), income_block);
+    _stack[i].merge_constant_oop(income_stack[i]);
   }
 
   return true;
@@ -172,16 +174,19 @@ bool JeandleVMState::update_phi_nodes(JeandleVMState* income_jvm, llvm::BasicBlo
 
 // Stack operations:
 
-void JeandleVMState::push(BasicType type, llvm::Value* value) {
-  assert(value != nullptr, "null value to push");
-  assert(value->getType() == JeandleType::java2llvm(type, *_context), "type must match");
-  _stack.push_back(TypedValue(type, value));
-  if (is_double_word_type(type)) {
+void JeandleVMState::push(TypedValue value) {
+  assert(!value.is_null(), "null value to push");
+  _stack.push_back(value);
+  if (is_double_word_type(value.actual_type())) {
     _stack.push_back(TypedValue::null_value());
   }
 }
 
-llvm::Value* JeandleVMState::pop(BasicType type) {
+void JeandleVMState::push(BasicType type, llvm::Value* value) {
+  push(TypedValue(type, value));
+}
+
+TypedValue JeandleVMState::pop_typed_value(BasicType type) {
   if (is_double_word_type(type)) {
     assert(_stack.back().is_null(), "hi-word of doubleword value must be null");
     _stack.pop_back();
@@ -190,22 +195,29 @@ llvm::Value* JeandleVMState::pop(BasicType type) {
   assert(v.value() != nullptr, "null value to pop");
   assert(v.computational_type() == JeandleType::actual2computational(type), "type must match");
   _stack.pop_back();
-  return v.value();
+  return v;
+}
+
+llvm::Value* JeandleVMState::pop(BasicType type) {
+  return pop_typed_value(type).value();
 }
 
 // Locals operations:
 
-llvm::Value* JeandleVMState::load(BasicType type, int index) {
+TypedValue JeandleVMState::load_typed_value(BasicType type, int index) {
   assert(!is_double_word_type(type) || _locals[index + 1].is_null(), "hi-word of doubleword value must be null");
   TypedValue v = _locals[index];
   assert(v.value() != nullptr, "null value to load");
   assert(v.computational_type() == JeandleType::actual2computational(type), "type must match");
-  return v.value();
+  return v;
 }
 
-void JeandleVMState::store(BasicType type, int index, llvm::Value* value) {
-  assert(value != nullptr, "null value to store");
-  assert(value->getType() == JeandleType::java2llvm(type, *_context), "type must match");
+llvm::Value* JeandleVMState::load(BasicType type, int index) {
+  return load_typed_value(type, index).value();
+}
+
+void JeandleVMState::store(int index, TypedValue value) {
+  assert(!value.is_null(), "null value to store");
   if (index > 0) {
     // When overwriting local i, check if i - 1 was the start of a double word local and kill it.
     TypedValue prev = _locals[index - 1];
@@ -213,10 +225,14 @@ void JeandleVMState::store(BasicType type, int index, llvm::Value* value) {
       _locals[index - 1] = TypedValue::null_value();
     }
   }
-  _locals[index] = TypedValue(type, value);
-  if (is_double_word_type(type)) {
+  _locals[index] = value;
+  if (is_double_word_type(value.actual_type())) {
     _locals[index + 1] = TypedValue::null_value();
   }
+}
+
+void JeandleVMState::store(BasicType type, int index, llvm::Value* value) {
+  store(index, TypedValue(type, value));
 }
 
 
@@ -370,7 +386,7 @@ void JeandleBasicBlock::initialize_VM_state_from(JeandleVMState* incoming_state,
     } else {
       llvm::PHINode* phi_node = ir_builder.CreatePHI(lock.object().value()->getType(), 2);
       phi_node->addIncoming(lock.object().value(), incoming_block);
-      _jvm->push_lock(LockValue(T_OBJECT, phi_node, lock.lock()));
+      _jvm->push_lock(LockValue(lock.object().clone_with_value(phi_node), lock.lock()));
     }
   }
 
@@ -386,7 +402,7 @@ void JeandleBasicBlock::initialize_VM_state_from(JeandleVMState* incoming_state,
 
     llvm::PHINode* phi_node = ir_builder.CreatePHI(incoming_state->locals_at(i)->getType(), 2);
     phi_node->addIncoming(incoming_state->locals_at(i), incoming_block);
-    _jvm->set_locals_at(i, TypedValue(incoming_state->locals_type_at(i), phi_node));
+    _jvm->set_locals_at(i, incoming_state->locals_typed_value_at(i).clone_with_value(phi_node));
   }
 
   for (size_t i = 0; i < incoming_state->stack_size(); i++) {
@@ -397,7 +413,7 @@ void JeandleBasicBlock::initialize_VM_state_from(JeandleVMState* incoming_state,
 
     llvm::PHINode* phi_node = ir_builder.CreatePHI(incoming_state->stack_at(i)->getType(), 2);
     phi_node->addIncoming(incoming_state->stack_at(i), incoming_block);
-    _jvm->raw_push(TypedValue(incoming_state->stack_type_at(i), phi_node));
+    _jvm->raw_push(incoming_state->stack_typed_value_at(i).clone_with_value(phi_node));
   }
 }
 
@@ -767,7 +783,7 @@ void JeandleAbstractInterpreter::initialize_VM_state_from_osr_buffer(JeandleVMSt
         _sync_lock.set_object(TypedValue(BasicType::T_OBJECT, lock_object));
         _sync_lock.set_lock(lock);
       }
-      initial_jvm->push_lock(LockValue(T_OBJECT, lock_object, lock));
+      initial_jvm->push_lock(LockValue(TypedValue(T_OBJECT, lock_object), lock));
     }
   }
 
@@ -1117,11 +1133,11 @@ void JeandleAbstractInterpreter::interpret_block(JeandleBasicBlock* block) {
       case Bytecodes::_dload_3: _jvm->dpush(_jvm->dload(3)); break;
       case Bytecodes::_dload: _jvm->dpush(_jvm->dload(_bytecodes.get_index())); break;
 
-      case Bytecodes::_aload_0: _jvm->apush(_jvm->aload(0)); break;
-      case Bytecodes::_aload_1: _jvm->apush(_jvm->aload(1)); break;
-      case Bytecodes::_aload_2: _jvm->apush(_jvm->aload(2)); break;
-      case Bytecodes::_aload_3: _jvm->apush(_jvm->aload(3)); break;
-      case Bytecodes::_aload: _jvm->apush(_jvm->aload(_bytecodes.get_index())); break;
+      case Bytecodes::_aload_0: _jvm->push(_jvm->load_typed_value(T_OBJECT, 0)); break;
+      case Bytecodes::_aload_1: _jvm->push(_jvm->load_typed_value(T_OBJECT, 1)); break;
+      case Bytecodes::_aload_2: _jvm->push(_jvm->load_typed_value(T_OBJECT, 2)); break;
+      case Bytecodes::_aload_3: _jvm->push(_jvm->load_typed_value(T_OBJECT, 3)); break;
+      case Bytecodes::_aload: _jvm->push(_jvm->load_typed_value(T_OBJECT, _bytecodes.get_index())); break;
 
       case Bytecodes::_iaload: do_array_load(T_INT); break;
       case Bytecodes::_laload: do_array_load(T_LONG); break;
@@ -1158,11 +1174,11 @@ void JeandleAbstractInterpreter::interpret_block(JeandleBasicBlock* block) {
       case Bytecodes::_dstore_3: _jvm->dstore(3, _jvm->dpop()); break;
       case Bytecodes::_dstore: _jvm->dstore(_bytecodes.get_index(), _jvm->dpop()); break;
 
-      case Bytecodes::_astore_0: _jvm->astore(0, _jvm->apop()); break;
-      case Bytecodes::_astore_1: _jvm->astore(1, _jvm->apop()); break;
-      case Bytecodes::_astore_2: _jvm->astore(2, _jvm->apop()); break;
-      case Bytecodes::_astore_3: _jvm->astore(3, _jvm->apop()); break;
-      case Bytecodes::_astore: _jvm->astore(_bytecodes.get_index(), _jvm->apop()); break;
+      case Bytecodes::_astore_0: _jvm->store(0, _jvm->pop_typed_value(T_OBJECT)); break;
+      case Bytecodes::_astore_1: _jvm->store(1, _jvm->pop_typed_value(T_OBJECT)); break;
+      case Bytecodes::_astore_2: _jvm->store(2, _jvm->pop_typed_value(T_OBJECT)); break;
+      case Bytecodes::_astore_3: _jvm->store(3, _jvm->pop_typed_value(T_OBJECT)); break;
+      case Bytecodes::_astore: _jvm->store(_bytecodes.get_index(), _jvm->pop_typed_value(T_OBJECT)); break;
 
       case Bytecodes::_iastore: do_array_store(T_INT); break;
       case Bytecodes::_lastore: do_array_store(T_LONG); break;
@@ -1440,33 +1456,7 @@ void JeandleAbstractInterpreter::load_constant() {
     return;
   }
 
-  llvm::Value* value = nullptr;
-  switch (con.basic_type()) {
-    case BasicType::T_BOOLEAN: value = JeandleType::int_const(_ir_builder, con.as_boolean()); break;
-    case BasicType::T_BYTE: value = JeandleType::int_const(_ir_builder, con.as_byte()); break;
-    case BasicType::T_CHAR: value = JeandleType::int_const(_ir_builder, con.as_char()); break;
-    case BasicType::T_SHORT: value = JeandleType::int_const(_ir_builder, con.as_short()); break;
-    case BasicType::T_INT: value = JeandleType::int_const(_ir_builder, con.as_int()); break;
-    case BasicType::T_LONG: value = JeandleType::long_const(_ir_builder, con.as_long()); break;
-    case BasicType::T_FLOAT: value = JeandleType::float_const(_ir_builder, con.as_float()); break;
-    case BasicType::T_DOUBLE: value = JeandleType::double_const(_ir_builder, con.as_double()); break;
-    case BasicType::T_ARRAY: // fall-through
-    case BasicType::T_OBJECT: {
-      ciObject* con_obj = con.as_object();
-
-      if (con_obj->is_null_object()) {
-        value = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(JeandleType::java2llvm(BasicType::T_OBJECT, *_context)));
-      } else {
-        llvm::Value* oop_handle = find_or_insert_oop(con_obj);
-        value = _ir_builder.CreateLoad(JeandleType::java2llvm(BasicType::T_OBJECT, *_context), oop_handle);
-      }
-
-      break;
-    }
-    default: Unimplemented(); break;
-  }
-
-  _jvm->push(con.basic_type(), value);
+  _jvm->push(constant_to_value(con));
 }
 
 void JeandleAbstractInterpreter::increment() {
@@ -1991,9 +1981,59 @@ bool JeandleAbstractInterpreter::inline_intrinsic(const ciMethod* target) {
       }
       break;
     }
+    case vmIntrinsics::_getReference:
+    case vmIntrinsics::_getReferenceVolatile:
+      return inline_unsafe_get(T_OBJECT);
+    case vmIntrinsics::_getBoolean:
+    case vmIntrinsics::_getBooleanVolatile:
+      return inline_unsafe_get(T_BOOLEAN);
+    case vmIntrinsics::_getByte:
+    case vmIntrinsics::_getByteVolatile:
+      return inline_unsafe_get(T_BYTE);
+    case vmIntrinsics::_getShort:
+    case vmIntrinsics::_getShortVolatile:
+    case vmIntrinsics::_getShortUnaligned:
+      return inline_unsafe_get(T_SHORT);
+    case vmIntrinsics::_getChar:
+    case vmIntrinsics::_getCharVolatile:
+    case vmIntrinsics::_getCharUnaligned:
+      return inline_unsafe_get(T_CHAR);
+    case vmIntrinsics::_getInt:
+    case vmIntrinsics::_getIntVolatile:
+    case vmIntrinsics::_getIntUnaligned:
+      return inline_unsafe_get(T_INT);
+    case vmIntrinsics::_getLong:
+    case vmIntrinsics::_getLongVolatile:
+    case vmIntrinsics::_getLongUnaligned:
+      return inline_unsafe_get(T_LONG);
+    case vmIntrinsics::_getFloat:
+    case vmIntrinsics::_getFloatVolatile:
+      return inline_unsafe_get(T_FLOAT);
+    case vmIntrinsics::_getDouble:
+    case vmIntrinsics::_getDoubleVolatile:
+      return inline_unsafe_get(T_DOUBLE);
     default:
       return false;
   }
+  return true;
+}
+
+bool JeandleAbstractInterpreter::inline_unsafe_get(BasicType type) {
+  // This mirrors only C2's final/@Stable constant folding path in
+  // LibraryCallKit::inline_unsafe_access. General Unsafe lowering, memory
+  // ordering, off-heap access, and mismatched accesses stay on the normal call
+  // path by returning false here.
+  llvm::Value* offset = _jvm->raw_peek(1).value();
+  TypedValue base = _jvm->raw_peek(2);
+  TypedValue constant = try_fold_unsafe_get(base, offset, type);
+  if (constant.is_null()) {
+    return false;
+  }
+
+  _jvm->lpop();
+  _jvm->apop();
+  _jvm->apop(); // Unsafe receiver.
+  _jvm->push(constant);
   return true;
 }
 
@@ -2312,7 +2352,111 @@ llvm::Value* JeandleAbstractInterpreter::find_or_insert_oop(ciObject* oop) {
   return global_oop_handle;
 }
 
-// TODO: Handle field attributions like final, stable.
+TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con) {
+  if (!con.is_valid()) {
+    return TypedValue::null_value();
+  }
+
+  switch (con.basic_type()) {
+    case BasicType::T_BOOLEAN: return TypedValue(T_BOOLEAN, JeandleType::int_const(_ir_builder, con.as_boolean()));
+    case BasicType::T_BYTE:    return TypedValue(T_BYTE, JeandleType::int_const(_ir_builder, con.as_byte()));
+    case BasicType::T_CHAR:    return TypedValue(T_CHAR, JeandleType::int_const(_ir_builder, con.as_char()));
+    case BasicType::T_SHORT:   return TypedValue(T_SHORT, JeandleType::int_const(_ir_builder, con.as_short()));
+    case BasicType::T_INT:     return TypedValue(T_INT, JeandleType::int_const(_ir_builder, con.as_int()));
+    case BasicType::T_LONG:    return TypedValue(T_LONG, JeandleType::long_const(_ir_builder, con.as_long()));
+    case BasicType::T_FLOAT:   return TypedValue(T_FLOAT, JeandleType::float_const(_ir_builder, con.as_float()));
+    case BasicType::T_DOUBLE:  return TypedValue(T_DOUBLE, JeandleType::double_const(_ir_builder, con.as_double()));
+    case BasicType::T_ARRAY:   // fall through
+    case BasicType::T_OBJECT: {
+      ciObject* con_obj = con.as_object();
+      if (con_obj->is_null_object()) {
+        llvm::Value* value = llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(JeandleType::java2llvm(BasicType::T_OBJECT, *_context)));
+        return TypedValue(T_OBJECT, value, con_obj);
+      }
+      llvm::Value* oop_handle = find_or_insert_oop(con_obj);
+      llvm::Value* value = _ir_builder.CreateLoad(JeandleType::java2llvm(BasicType::T_OBJECT, *_context), oop_handle);
+      return TypedValue(T_OBJECT, value, con_obj);
+    }
+    default:
+      Unimplemented();
+      return TypedValue::null_value();
+  }
+}
+
+TypedValue JeandleAbstractInterpreter::try_fold_field_load(ciField* field, ciObject* holder) {
+  if (!field->is_constant()) {
+    return TypedValue::null_value();
+  }
+
+  if (is_reference_type(field->layout_type()) && !field->type()->is_loaded()) {
+    // TODO: Match C2 Parse::do_get_xxx by asserting nullness for unloaded field types.
+    return TypedValue::null_value();
+  }
+
+  ciConstant con;
+  if (field->is_static()) {
+    con = field->constant_value();
+  } else {
+    if (holder == nullptr || !holder->is_instance()) {
+      return TypedValue::null_value();
+    }
+    con = field->constant_value_of(holder);
+  }
+  return constant_to_value(con);
+}
+
+TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm::Value* offset, BasicType type) {
+  llvm::ConstantInt* offset_con = llvm::dyn_cast<llvm::ConstantInt>(offset);
+  ciObject* base_oop = base.constant_oop();
+  if (offset_con == nullptr || base_oop == nullptr || base_oop->is_null_object()) {
+    return TypedValue::null_value();
+  }
+
+  int field_offset = (int)offset_con->getSExtValue();
+  if (base_oop->is_array()) {
+    if (!FoldStableValues) {
+      return TypedValue::null_value();
+    }
+    ciArray* array = base_oop->as_array();
+    if (array->element_basic_type() != type) {
+      return TypedValue::null_value();
+    }
+    ciConstant con = array->element_value_by_offset(field_offset);
+    if (!con.is_valid() || con.is_null_or_zero()) {
+      return TypedValue::null_value();
+    }
+    return constant_to_value(con);
+  }
+
+  if (!base_oop->is_instance()) {
+    return TypedValue::null_value();
+  }
+
+  ciInstance* instance = base_oop->as_instance();
+  ciField* field = nullptr;
+  ciConstant con;
+  ciType* mirror_type = instance->java_mirror_type();
+  if (mirror_type != nullptr && mirror_type->is_klass() && mirror_type->as_klass()->is_instance_klass()) {
+    field = mirror_type->as_klass()->as_instance_klass()->get_field_by_offset(field_offset, true);
+    if (field == nullptr || !field->is_constant() || field->layout_type() != type) {
+      return TypedValue::null_value();
+    }
+    con = field->constant_value();
+  } else {
+    field = instance->klass()->as_instance_klass()->get_field_by_offset(field_offset, false);
+    if (field == nullptr || !field->is_constant() || field->layout_type() != type) {
+      return TypedValue::null_value();
+    }
+    con = field->constant_value_of(instance);
+  }
+  if (is_reference_type(field->layout_type()) && !field->type()->is_loaded()) {
+    // TODO: Keep consistent with C2 and assert nullness for unloaded field type.
+    return TypedValue::null_value();
+  }
+  return constant_to_value(con);
+}
+
 void JeandleAbstractInterpreter::do_field_access(bool is_get, bool is_static) {
   bool will_link;
   ciField* field = _bytecodes.get_field(will_link);
@@ -2358,9 +2502,20 @@ void JeandleAbstractInterpreter::do_get_xxx(ciField* field, bool is_static) {
   llvm::Value* addr = nullptr;
 
   if (is_static) {
+    TypedValue constant = try_fold_field_load(field, nullptr);
+    if (!constant.is_null()) {
+      _jvm->push(constant);
+      return;
+    }
     addr = compute_static_field_address(field->holder(), offset);
   } else {
-    addr = compute_instance_field_address(_jvm->apop(), offset);
+    TypedValue obj = _jvm->pop_typed_value(T_OBJECT);
+    TypedValue constant = try_fold_field_load(field, obj.constant_oop());
+    if (!constant.is_null()) {
+      _jvm->push(constant);
+      return;
+    }
+    addr = compute_instance_field_address(obj.value(), offset);
   }
 
   bool is_volatile = field->is_volatile();
@@ -3167,8 +3322,8 @@ void JeandleAbstractInterpreter::monitorenter() {
   JeandleCompilation::current()->set_has_monitors(true);
   null_check(_jvm->raw_peek().value());
 
-  llvm::Value* obj = _jvm->apop();
-  shared_lock(LockValue(BasicType::T_OBJECT, obj, nullptr));
+  TypedValue obj = _jvm->pop_typed_value(T_OBJECT);
+  shared_lock(LockValue(obj, nullptr));
 }
 
 void JeandleAbstractInterpreter::monitorexit() {
