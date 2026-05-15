@@ -27,6 +27,7 @@
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "runtime/arguments.hpp"
+#include "runtime/globals_extension.hpp"
 
 void apply_vm_flag_feature_overrides(llvm::SubtargetFeatures& features) {
   if (!UseAES) {
@@ -36,7 +37,7 @@ void apply_vm_flag_feature_overrides(llvm::SubtargetFeatures& features) {
     features.AddFeature("sha2", false);
     features.AddFeature("sha3", false);
   }
-  if (!UseNeon) {
+  if (FLAG_IS_CMDLINE(UseNeon) && !UseNeon) {
     features.AddFeature("neon", false);
   }
   if (!UseCRC32) {
@@ -45,12 +46,13 @@ void apply_vm_flag_feature_overrides(llvm::SubtargetFeatures& features) {
   if (!UseLSE) {
     features.AddFeature("lse", false);
   }
-  if (UseSVE < 2) {
-    features.AddFeature("sve2", false);
-  }
-  if (UseSVE < 1) {
-    features.AddFeature("sve", false);
-  }
+  // TODO: SVE is disabled as a workaround. When LLVM uses SVE registers, it
+  // generates `addvl sp, sp, #-N` in the prologue to allocate variable-length
+  // spill space. But HotSpot's frame_size is a compile-time constant and cannot
+  // include the addvl portion, causing GC stack walks to miscalculate sender_sp
+  // and crash (SIGSEGV or heap assertion failures).
+  features.AddFeature("sve2", false);
+  features.AddFeature("sve", false);
 }
 
 void JeandleFuncSig::setup_description(llvm::Function* func, bool is_stub) {
