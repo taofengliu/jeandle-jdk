@@ -1,0 +1,616 @@
+================================================================================
+  Jeandle JIT Compiler Code Review Report
+  Review Date: 2026-05-15
+  Review Scope: jeandle-jdk and jeandle-llvm
+  Focus: Code correctness (C2 comparison), multi-threading safety, bug identification
+================================================================================
+
+EXECUTIVE SUMMARY
+================================================================================
+
+This review covers 8 modules across both the jeandle-jdk and jeandle-llvm
+repositories. A total of 47 bugs were identified:
+
+  P0 (crash/corruption):  6 bugs
+  P1 (miscompilation):   12 bugs
+  P2 (thread safety/performance): 16 bugs
+  P3 (edge cases):       13 bugs
+
+The most critical findings are:
+1. Klass* pointers embedded as raw integers without metadata relocations (P0)
+   - Class unloading will cause dangling pointers in compiled code
+2. No dependency recording for type check elimination (P1)
+   - Dynamic class loading can silently break optimized code
+3. Exception handler table off-by-one range check (P1)
+   - Exceptions at range boundaries are dispatched incorrectly
+4. Missing merge_into_exception_handler for if_zero/if_acmp/if_null (P1)
+   - Exception handlers reachable only via these branches are dead-coded
+5. XMM/vector register mapping missing in stackmap parsing (P1)
+   - Float/double deoptimization will crash or produce wrong values
+6. last_Java_pc never set in call_VM stubs (P1)
+   - Stack walking from runtime stubs will fail
+
+================================================================================
+MODULE 1: COMPILER LIFECYCLE & GLOBAL STATE SAFETY
+================================================================================
+
+Bug 1.1 [P0] stopping_compiler_thread leaves dangling TLS pointer
+  File: jeandleCompiler.hpp:50,63; jeandleCompiler.cpp:60
+  Description: After `delete _target_machine`, the TLS slot still holds
+  the freed address. Any subsequent access to `target_machine()` on this
+  thread returns a dangling pointer.
+  Fix: Set `_target_machine = nullptr` after delete. Add assert in
+  `target_machine()` that `_target_machine != nullptr`.
+
+Bug 1.2 [P0] VMCallback.cpp unprotected static mutable state
+  File: jeandle-llvm/llvm/lib/IR/Jeandle/VMCallback.cpp:15-25
+  Description: `StoredCallbacks` and `CallbacksRegistered` are plain
+  statics with no synchronization. `CallbacksRegistered = true` can be
+  reordered before `StoredCallbacks = CB` by the compiler/CPU. While
+  currently safe due to HotSpot's init gate, this code lives in LLVM
+  where HotSpot conventions don't apply.
+  Fix: Make `CallbacksRegistered` an `std::atomic<bool>` with
+  `memory_order_release` on write and `memory_order_acquire` on read.
+
+Bug 1.3 [P2] Static `installed` flag in install_jeandle_llvm_fatal_error_handler
+  File: jeandleCompiler.cpp:50-56
+  Description: Redundant `static bool installed` with no atomic. Safety
+  depends entirely on the external init gate. The flag is misleading.
+  Fix: Remove the flag; rely on should_perform_init() for single-threading.
+
+Bug 1.4 [P2] _template_buffer visibility relies on implicit monitor ordering
+  File: jeandleCompiler.hpp:68; jeandleCompiler.cpp:119,139
+  Description: The happens-before from set_state() to other threads is
+  not documented. A future caller outside the init gate could see null.
+  Fix: Add assertion in compile_method() that _template_buffer != nullptr.
+
+Bug 1.5 [P2] _data_layout derived from one thread's _target_machine
+  File: jeandleCompiler.hpp:65; jeandleCompiler.cpp:107
+  Description: No verification that all threads' DataLayouts match.
+  Fix: Add debug-only verification after should_perform_init().
+
+Bug 1.6 [P2] _routine_entry/_gc_leaf_routines safety is undocumented
+  File: jeandleRuntimeRoutine.hpp:374-375
+  Description: Write-once-during-init, read-many-after-init pattern
+  relies on init gate for visibility, but this is not documented.
+  Fix: Add comments documenting the thread-safety contract.
+
+Bug 1.7 [P2] llvm::cl::ParseCommandLineOptions mutates global state
+  File: jeandleCompiler.cpp:181-206
+  Description: Called once under init gate but not documented as one-time.
+  Fix: Add comment noting one-time-only nature.
+
+================================================================================
+MODULE 2: ABSTRACT INTERPRETER - BYTECODE-TO-IR TRANSLATION
+================================================================================
+
+Bug 2.1 [P1] Missing merge_into_exception_handler in if_zero/if_acmp/if_null
+  File: jeandleAbstractInterpreter.cpp:1478-1540
+  Description: `if_zero()`, `if_acmp()`, and `if_null()` do not call
+  `merge_into_exception_handler()` for their successor blocks. If a
+  branch target is an exception handler, its VM state is never initialized,
+  causing the handler to be treated as dead code. `if_icmp()` correctly
+  handles this.
+  Fix: Add `merge_into_exception_handler()` calls for both true and false
+  successors in `if_zero()`, `if_acmp()`, and `if_null()`, matching the
+  pattern in `if_icmp()`.
+  C2 comparison: C2 builds a unified CFG where exception edges are handled
+  through merge() calls for all branches.
+
+Bug 2.2 [P1] BCI corruption in dispatch_exception_to_handler
+  File: jeandleAbstractInterpreter.cpp:2882-2886
+  Description: `_bytecodes.force_bci(handler_bci)` is called before
+  `create_call_ex()`, which internally reads `_bytecodes.cur_bci()` for
+  exception dispatch. The forced BCI corrupts the exception dispatch
+  lookup, potentially routing exceptions to wrong handlers.
+  Fix: Restore the original BCI before `create_call_ex()`, or pass the
+  handler BCI through a different mechanism for the deopt bundle.
+  C2 comparison: C2 uses per-node BCI tracking, not a global mutable stream.
+
+Bug 2.3 [P2] _goto_w bytecode not implemented
+  File: jeandleAbstractInterpreter.cpp:1334
+  Description: `_goto_w` (wide goto) is marked `Unimplemented()`. Methods
+  with code > 32KB will crash.
+  Fix: Replace `Unimplemented()` with `goto_bci(_bytecodes.get_far_dest())`.
+  C2 comparison: C2 handles `_goto_w` identically to `_goto` with
+  `get_far_dest()`.
+
+Bug 2.4 [P3] Phi node erasure with non-empty uses in release builds
+  File: jeandleAbstractInterpreter.cpp:149-152
+  Description: When a phi node type doesn't match, the code erases it
+  from the parent with `eraseFromParent()`. The `use_empty()` assert
+  only fires in debug builds. In release, dangling uses could cause
+  miscompilation.
+  Fix: Replace with `undef` or `poison` value instead of erasing.
+
+Bug 2.5 [P3] Missing IllegalMonitorStateException in shared_unlock
+  File: jeandleAbstractInterpreter.cpp:3136-3163
+  Description: The slow-path unlock call uses a regular `CallInst` not
+  `InvokeInst`, so exceptions from `complete_monitor_unlocking_C` are
+  not caught by Java exception handlers.
+  Fix: Wrap the slow-path call with `create_call_ex()` or verify the
+  runtime call cannot throw to Java code.
+
+Bug 2.6 [P3] Missing reexecute BCI for new/newarray
+  File: jeandleAbstractInterpreter.cpp:223-286; jeandleCompiledCode.cpp:540
+  Description: `bytecode_should_reexecute` has a TODO for multianewarray
+  and doesn't handle `new`/`newarray` reexecute semantics. Deoptimization
+  at allocation points may not re-allocate the object.
+  Fix: Add reexecute handling for `new`, `newarray`, `anewarray`,
+  `multianewarray` bytecodes, matching C2's `should_reexecute_implied_by_bytecode`.
+
+================================================================================
+MODULE 3: CODE INSTALLATION, ELF PARSING & RELOCATION
+================================================================================
+
+Bug 3.1 [P1] Exception handler table off-by-one range check
+  File: jeandleExceptionHandlerTable.cpp:50
+  Description: `find_handler` uses `(pc_offset > start && pc_offset <= end)`
+  but the table entries use `[start, start+length)` semantics. Should be
+  `(pc_offset >= start && pc_offset < end)`.
+  Fix: Change `>` to `>=` and `<=` to `<`.
+
+Bug 3.2 [P0] Missing bounds check on derived pointer iterator in oop map parsing
+  File: jeandleCompiledCode.cpp:613-615
+  Description: After `location++`, there is no check against
+  `record->location_end()`. If the stackmap has an odd number of entries
+  or a `Direct` base is skipped, this dereferences the end iterator.
+  Fix: Add `if (location == record->location_end()) break;` after `location++`.
+
+Bug 3.3 [P1] No XMM/vector register mapping in resolve_vmreg
+  File: jeandleCompiledCode.cpp:376-395; jeandleRegister_x86.hpp:42-52
+  Description: DWARF register numbers 17-48 (XMM0-XMM31) are not mapped.
+  Float/double values in XMM registers at safepoints will trigger an
+  assertion in debug builds or read out of bounds in release builds.
+  Fix: Extend `JeandleRegister::decode_dwarf_register` to handle XMM
+  registers and map them to the correct `VMReg` via `XMMRegister::as_VMReg()`.
+  C2 comparison: C2 has separate GPR and FPR register spaces with
+  `FloatRegister::as_VMReg()`.
+
+Bug 3.4 [P0] getAlignment().value() without error checking
+  File: jeandleReadELF.cpp:49,81
+  Description: If the ELF section has no alignment, `.value()` on a
+  disengaged optional is undefined behavior (crash).
+  Fix: Check the return value before calling `.value()`.
+
+Bug 3.5 [P0] No bounds validation on ELF section offsets
+  File: jeandleReadELF.cpp:57; jeandleCompiledCode.cpp:186,308,349,638,689
+  Description: Multiple locations use section offsets from the ELF without
+  validating that `offset + size <= buffer_size`. Corrupted ELF causes
+  out-of-bounds memory reads.
+  Fix: Add bounds checking after findFunc/findSection.
+
+Bug 3.6 [P0] StringMap::operator[] silently inserts null jobject
+  File: jeandleCompiledCode.cpp:291,296
+  Description: If `target_name` is not in `_oop_handles`, `operator[]`
+  inserts a default `nullptr` jobject. This null handle is passed to
+  `OopRecorder::find_index`, causing crashes during GC.
+  Fix: Use `_oop_handles.find()` and check for existence before access.
+
+Bug 3.7 [P2] DataExtractor errors silently ignored in release builds
+  File: jeandleCompiledCode.cpp:649-678
+  Description: All error checks use `assert(data_cursor, ...)`. In release
+  builds, assertions are disabled, so parse failures are silent and can
+  cause infinite loops or garbage entries.
+  Fix: Replace asserts with `if (!data_cursor) { JEANDLE_REPORT_ERROR... }`.
+
+Bug 3.8 [P1] Frame size calculation differs between x86 and AArch64/RISC-V
+  File: jeandleCompiledCode_x86.cpp:36-37; jeandleCompiledCode_aarch64.cpp:36-37
+  Description: x86 adds `BytesPerWord` for the return address (pushed by
+  `call`). AArch64/RISC-V do not. The correctness depends on whether
+  LLVM's `.stack_sizes` includes the LR save slot. Needs verification.
+  Fix: Add comments documenting the assumption. Verify against LLVM backend.
+
+Bug 3.9 [P3] Assert checks base_kind instead of derived_kind
+  File: jeandleCompiledCode.cpp:618
+  Description: `assert(base_kind != Direct, ...)` is tautologically true
+  because the `continue` on line 610 already handled `Direct` base kinds.
+  The intent was to check `derived_kind`.
+  Fix: Change to `assert(derived_kind != Direct, ...)`.
+
+Bug 3.10 [P3] Narrowing int64_t to int in oop relocation addend
+  File: jeandleAssembler_x86.cpp:257
+  Description: `addend` is `int64_t` but `spec()` takes `int`. Large
+  addends are silently truncated.
+  Fix: Add assertion that `addend` fits in `int`.
+
+Bug 3.11 [P1] RISC-V pd_resolve_reloc returns true, bypassing shared fallback
+  File: jeandleCompiledCode_riscv.cpp:218
+  Description: When RISC-V's `pd_resolve_reloc` handles all edges and
+  returns `true`, the shared relocation pass is skipped. Any edge type
+  not handled by RISC-V would be silently dropped.
+  Fix: Add exhaustive edge-type check or document the design choice.
+
+================================================================================
+MODULE 4: RUNTIME STUBS, VM CALLS & CALL INTERFACE
+================================================================================
+
+Bug 4.1 [P1] last_Java_pc never set in call_VM stub
+  File: jeandleCallVM.cpp:52-60
+  Description: The call_VM stub sets `last_Java_sp` but never sets
+  `last_Java_pc`. On x86, `JavaThread::pd_last_frame()` asserts
+  `_anchor.last_Java_pc() != nullptr`. Any runtime routine that calls
+  `current->last_frame()` will trigger this assertion.
+  Fix: Set `last_Java_pc` before the C call, or ensure the return address
+  is at `last_Java_sp[-1]` on x86.
+  C2 comparison: C2 sets `last_Java_frame(noreg, noreg, nullptr)` which
+  allows `make_walkable()` to derive the PC from the stack.
+
+Bug 4.2 [P1] Missing deoptimize_caller_frame in all allocation routines
+  File: jeandleRuntimeRoutine.cpp:164,207,229,247,266,286,305
+  Description: All allocation routines have `TODO: deoptimize_caller_frame`
+  comments but the calls are not implemented. When allocation throws
+  (e.g., OutOfMemoryError), the caller frame is not deoptimized, causing
+  stale compiled code handler tables to be used for exception dispatch.
+  Fix: Implement `deoptimize_caller_frame` for Jeandle, similar to C2's
+  `OptoRuntime::deoptimize_caller_frame`.
+  C2 comparison: C2 calls this after every allocation slow path.
+
+Bug 4.3 [P2] last_Java_sp not cleared on exception path in call_VM stub
+  File: jeandleCallVM.cpp:96-120
+  Description: The `forward_exception_block` (taken when a pending
+  exception is detected) does NOT clear `last_Java_sp`. Only the
+  `no_exception_block` clears it. Stale `last_Java_sp` can cause
+  invalid stack walks during GC.
+  Fix: Move `last_Java_sp`/`last_Java_pc` clearing before the exception
+  check, or duplicate it in the exception path.
+  C2 comparison: C2 calls `reset_last_Java_frame` before checking
+  for exceptions.
+
+Bug 4.4 [P2] install_exceptional_return_for_call_vm may crash with null CodeBlob
+  File: jeandleRuntimeRoutine_x86.cpp:57-74
+  Description: Uses `last_frame().cb()` which may return nullptr for C
+  function frames not registered as CodeBlobs. The `guarantee` would fail.
+  Fix: Ensure the frame is a registered stub frame, or restructure to
+  use the assembly exceptional_return blob directly.
+
+Bug 4.5 [P2] Safepoint handler missing async exception check
+  File: jeandleRuntimeRoutine.cpp:107
+  Description: After `process_if_requested_with_exit_check`, there is a
+  `// TODO: Exception check.` comment. Pending async exceptions
+  (ThreadDeath, InterruptedException) are silently delayed.
+  Fix: Add `if (HAS_PENDING_EXCEPTION) { ... }` after the safepoint check.
+  C2 comparison: C2's safepoint handler checks for pending exceptions.
+
+Bug 4.6 [P3] install_exceptional_return is JRT_LEAF but walks the stack
+  File: jeandleRuntimeRoutine_x86.cpp:35-54
+  Description: JRT_LEAF contract prohibits stack walking and oop
+  operations, but this function calls `last_frame().sender()` which
+  walks the stack. Violates the JRT_LEAF contract.
+  Fix: Change to `JRT_ENTRY_NO_ASYNC` or convert to assembly.
+  C2 comparison: C2 uses assembly blobs for exception dispatch.
+
+Bug 4.7 [P3] G1 post-barrier fence seq_cst is overly strict
+  File: template.ll:437
+  Description: `fence seq_cst` between oop store and card table re-read
+  is stronger than necessary. Only StoreStore ordering is needed.
+  Fix: Replace with `fence acq_rel` or architecture-appropriate StoreStore.
+  C2 comparison: C2 uses `OrderAccess::release()` or `storestore()`.
+
+Bug 4.8 [P3] vm_result clear store uses i64 instead of pointer type
+  File: jeandleCallVM.cpp:142
+  Description: Store of `int64(0)` to a pointer-type address. Semantically
+  incorrect LLVM IR that works on x86-64 but may break on other platforms.
+  Fix: Use `ConstantPointerNull::get(pointer_type)`.
+
+================================================================================
+MODULE 5: LLVM OPTIMIZATION PASSES & TYPE SYSTEM
+================================================================================
+
+Bug 5.1 [P1] instanceof Object folded to true without null guarantee
+  File: TypeCheckElimination.cpp:64-73
+  Description: The pass replaces `jeandle.check_instanceof` with `true`
+  when `IsObjectKlass(SuperKlass)` returns true, but does not verify
+  the operand is non-null. `null instanceof Object` must return `false`
+  in Java. The `nonnull` attribute on the function declaration is not
+  enforced by LLVM at call sites.
+  Fix: Check that the operand has the `nonnull` attribute or is dominated
+  by a null check before folding to `true`.
+
+Bug 5.2 [P1] No dependency recording for eliminated type checks
+  File: TypeCheckElimination.cpp (entire file); jeandleCompilation.cpp:264
+  Description: Type check elimination bakes type hierarchy assumptions
+  into compiled code without recording dependencies. When new subclasses
+  are loaded at runtime, the eliminated checks become stale and produce
+  wrong results without triggering deoptimization.
+  Fix: Implement a dependency recording mechanism. Extend VMCallbacks
+  with a RecordDependency callback, or have LLVM passes log assumptions
+  that the HotSpot-side compilation driver converts into Dependencies calls.
+  C2 comparison: C2 records `leaf_type`, `unique_concrete_method`,
+  `abstract_with_unique_concrete_subtype` for every optimization.
+
+Bug 5.3 [P2] InsertGCBarriers only handles StoreInst, not memcpy/memmove
+  File: InsertGCBarriers.cpp:29-55
+  Description: The pass only checks `StoreInst` for Java heap stores.
+  If the LLVM optimizer generates `memcpy`/`memmove` for bulk reference
+  copies (e.g., array copies), no barriers are inserted.
+  Fix: Add handling for `MemCpyInst` and `MemMoveInst` that operate on
+  Java heap address space.
+
+Bug 5.4 [P2] removeFunctionFromLLVMUsed doesn't strip pointer casts
+  File: JavaOperationLower.cpp:44-51
+  Description: If `llvm.used` contains bitcasted references, `dyn_cast<Function>`
+  fails and the function won't be removed, creating dangling references
+  after function erasure.
+  Fix: Use `Element->stripPointerCastsAndAliases()` before checking.
+
+Bug 5.5 [P2] InsertGCBarriers runs after optimizer; relies on atomic stores
+  File: Pipeline.cpp:40-48
+  Description: The main optimizer runs before InsertGCBarriers. If it
+  eliminates an atomic store as "dead" (which shouldn't happen but is
+  not guaranteed), the pre-barrier for that store is missing.
+  Fix: Add an assertion or verification pass that all Java heap stores
+  are still present after optimization.
+
+Bug 5.6 [P3] areKlassesIncompatible misses class-vs-interface optimization
+  File: JavaType.cpp:122-130
+  Description: When `Klass` is a concrete class and `OtherKlass` is an
+  interface it doesn't implement, the function returns `false` (not
+  incompatible), missing a valid optimization opportunity.
+  Fix: Add a check: if `Klass` is not an interface and `OtherKlass` is
+  an interface and `!IsSubtype(Klass, OtherKlass)`, they are incompatible.
+
+Bug 5.7 [P3] traceToCheckInstanceof has no recursion depth limit
+  File: JavaType.cpp:572-578
+  Description: Only a visited-set prevents infinite loops. Deep IR chains
+  could cause stack overflow.
+  Fix: Add a depth parameter similar to `MaxExtractKlassDepth`.
+
+Bug 5.8 [P3] JavaOperationLower asserts isInlineViable then InlineFunction can fail
+  File: JavaOperationLower.cpp:102-134
+  Description: If `InlineFunction` fails after `isInlineViable` succeeds,
+  the subsequent `user_empty()` assertion fires for un-inlined call sites.
+  Fix: Handle inlining failure gracefully by not erasing functions with
+  remaining users.
+
+================================================================================
+MODULE 6: VM CALLBACKS & VM INTERFACE SAFETY
+================================================================================
+
+Bug 6.1 [P0] Klass* pointers embedded as raw integers without metadata relocations
+  File: jeandleAbstractInterpreter.cpp (multiple lines); jeandleUtils.cpp:120,138,156
+  Description: Klass pointers are embedded as `int64((intptr_t)klass)` in
+  LLVM IR. After code generation, these become immediate values with no
+  metadata relocation. When a class is unloaded, the Klass* becomes a
+  dangling pointer, causing crashes when the compiled code dereferences it.
+  Fix: Register all embedded Klass* values with the OopRecorder as
+  metadata, and apply metadata relocations during code installation.
+  C2 comparison: C2 uses `mov_metadata()` which registers with OopRecorder
+  and applies metadata relocations via `relocInfo::metadata_type`.
+
+Bug 6.2 [P1] No Dependencies recorded for speculative type hierarchy optimizations
+  File: jeandleCompilation.cpp:264
+  Description: A `Dependencies` object is created but never populated.
+  Without dependencies, class hierarchy changes (new subclasses, class
+  redefinition) cannot trigger deoptimization of Jeandle-compiled code.
+  Fix: Extend the LLVM callback system to report type hierarchy assumptions
+  back to the compilation, and record them via `_env->dependencies()`.
+  C2 comparison: C2 records `leaf_type`, `evol_method`, `unique_concrete_method`,
+  etc., for every type-based optimization.
+
+Bug 6.3 [P2] VM callbacks access raw VM structures from _thread_in_native state
+  File: jeandleVMCallback.cpp:37-87
+  Description: Callbacks like `jeandle_is_subtype` directly access raw
+  Klass* structures from LLVM passes running in `_thread_in_native` state.
+  While the specific read operations are unlikely to cause crashes,
+  this violates HotSpot's thread state contract.
+  Fix: (a) Pre-cache type information during abstract interpretation using
+  the ci layer, or (b) wrap LLVM optimization invocations in
+  `ThreadInVMfromNative` transitions.
+  C2 comparison: C2 uses the ci layer to cache type info; never reads
+  raw Klass* from compiler threads.
+
+Bug 6.4 [P2] jeandle_get_field_type creates Handles from _thread_in_native
+  File: jeandleVMCallback.cpp:56-60
+  Description: `Handle(current, ik->class_loader())` creates a Handle
+  from `_thread_in_native` state. While technically safe (the thread's
+  handle area is accessible), it's an anti-pattern. Also,
+  `JavaFieldStream` only iterates declared fields, not inherited ones.
+  Fix: Pre-compute field type information during abstract interpretation.
+  Consider removing the unused callback.
+
+Bug 6.5 [P3] Error macros dereference current() without null check
+  File: jeandleCompilation.hpp:126-131
+  Description: `JEANDLE_CRASH_ON_ERROR` dereferences
+  `JeandleCompilation::current()` without checking for null.
+  Fix: Add null check: `comp ? comp->name().c_str() : "unknown"`.
+
+Bug 6.6 [P3] LCA callback has unbounded loop with no null guard
+  File: jeandleVMCallback.cpp:41-44
+  Description: `Klass::LCA()` has an unbounded `while(1)` loop. If either
+  argument is a stale Klass*, the loop dereferences a dangling pointer.
+  Fix: Add null check before calling LCA(). Consider a loop bound.
+
+================================================================================
+MODULE 7: PLATFORM-SPECIFIC CODE & RELOCATION
+================================================================================
+
+Bug 7.1 [P1] fix_oop_relocation uses wrong API for Delta32 format (x86)
+  File: jeandleAssembler_x86.cpp (via jeandle_oop_Relocation)
+  Description: `fix_oop_relocation()` calls `set_value()` which uses
+  `pd_set_data_value` with `disp32_operand` format. This decodes the
+  x86 instruction at the relocation address, but the address points to
+  the displacement field, not the instruction start. The instruction
+  decoder misinterprets the bytes, corrupting the oop reference.
+  Additionally, the addend stored in `_offset` is never applied.
+  Fix: Override `fix_oop_relocation` to use `pd_set_jeandle_data_value`
+  with the correct Delta32 formula, matching how
+  `jeandle_section_word_Relocation` works.
+  C2 comparison: C2 uses `imm_operand` format for embedded oops where
+  `addr()` points to the immediate operand, not the instruction start.
+
+Bug 7.2 [P1] jeandleOopAddrReloc pd_emit_reloc and emit_oop_addr_reloc Unimplemented
+  File: jeandleOopAddrReloc_x86.cpp:28-30; jeandleAssembler.cpp:262
+  Description: Both functions call `Unimplemented()`. Oop address
+  relocations in the constant pool are silently skipped (the x86
+  `is_oop_addr_reloc` returns `false`), causing incorrect oop references.
+  Fix: Implement oop address relocation support, or add a guarantee when
+  an oop address relocation is encountered.
+  C2 comparison: C2 handles oop relocations in the constant pool via
+  `narrow_oop_in_const` format.
+
+Bug 7.3 [P1] Section word relocation addend not applied after prolog insertion
+  File: jeandleReloc.cpp:129-143
+  Description: When `_reloc_section == SECT_CONSTS`, `fixup_offset()`
+  updates `_target` but does NOT re-apply the Delta32 value at the
+  relocation site. The code in the consts section still references the
+  pre-prolog address.
+  Fix: After updating `_target`, re-apply the Delta32 displacement value
+  at the relocation site using the new target address.
+
+Bug 7.4 [P1] Compressed oops (narrow_oop) handling is incomplete
+  File: jeandleOopReloc_x86.cpp:28-30
+  Description: The `pd_emit_reloc` always uses `disp32_operand` format.
+  When compressed oops are enabled, narrow oop relocations are not
+  handled. This will break oop references when `UseCompressedOops` is on.
+  Fix: Add support for `narrow_oop_operand` format in `emit_oop_reloc`.
+
+Bug 7.5 [P2] RISC-V jal used for tail calls clobbers destination register
+  File: jeandleRuntimeRoutine_riscv.cpp:134,198
+  Description: `jal(t1)` expands to `jalr t1, 0(t1)`, which overwrites
+  `t1` with the return address. For non-returning tail calls, `jr(t1)`
+  should be used instead.
+  Fix: Use `jr()` for tail calls and `jal()` only for calls that return.
+  C2 comparison: AArch64 correctly uses `br()` for tail calls.
+
+Bug 7.6 [P2] Hardcoded OopMap frame size in runtime stubs
+  File: jeandleRuntimeRoutine_x86.cpp:114,187
+  Description: `OopMap(4, 0)` hardcodes the frame slot count. Any future
+  prolog changes could silently break this.
+  Fix: Compute from actual stack layout or add a verification assertion.
+
+Bug 7.7 [P3] EXTERNAL_CALL uses NativeJump::instruction_size instead of NativeCall
+  File: jeandleCompiledCall_x86.cpp:26-37
+  Description: Semantically misleading. Works because both are 5 bytes
+  on x86-64, but would break if they diverged.
+  Fix: Use `NativeCall::instruction_size` for `ROUTINE_CALL` and
+  `EXTERNAL_CALL`.
+
+================================================================================
+MODULE 8: COMPILATION PIPELINE INTEGRATION & ERROR HANDLING
+================================================================================
+
+Bug 8.1 [P1] Exception handler table off-by-one (duplicate of Bug 3.1)
+  File: jeandleExceptionHandlerTable.cpp:50
+  See Module 3 Bug 3.1 for details.
+
+Bug 8.2 [P2] LLVM Expected<T> error not consumed
+  File: jeandleCompilation.cpp:276-279
+  Description: When `parseBitcodeFile` returns an error, the code uses
+  `JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL` which checks `operator bool()`
+  but doesn't consume the error. In LLVM debug builds, the unconsumed
+  `Expected` triggers `fatalUncheckedExpected()` -> `abort()`.
+  Fix: Use `toString(module_or_error.takeError())` to consume the error
+  and report its message.
+
+Bug 8.3 [P2] has_unsafe_access hardcoded to false
+  File: jeandleCompilation.cpp:248-249
+  Description: The `has_unsafe_access` flag is hardcoded to `false`. When
+  Jeandle compiles a method using `sun.misc.Unsafe`, the VM's signal
+  handler won't convert SIGSEGV from unsafe access to a Java exception,
+  causing a crash instead.
+  Fix: Track `_has_unsafe_access` during abstract interpretation and pass
+  it to `register_method`.
+  C2 comparison: C2 sets `_has_unsafe_access` whenever unsafe operations
+  are encountered during parsing.
+
+Bug 8.4 [P2] LLVM fatal error handler race
+  File: jeandleCompiler.cpp:43-56
+  Description: `static bool installed` with no synchronization. While
+  protected by the init gate, the flag is redundant and misleading.
+  Fix: Remove the flag or use `std::call_once`.
+
+Bug 8.5 [P3] Static timer and counter not thread-safe
+  File: jeandleCompilation.cpp:75,78,335
+  Description: `jeandle_timers[]` and `jeandle_compilation_count++` are
+  modified without synchronization. Timer values can be lost.
+  Fix: Use `Atomic::inc(&jeandle_compilation_count)`.
+
+Bug 8.6 [P3] No post-optimization verification
+  File: jeandleCompilation.cpp:304 (after verifyModule)
+  Description: `verifyModule()` is called before optimization but not
+  after. Custom Jeandle passes could corrupt IR without detection.
+  Fix: Add `DEBUG_ONLY(verifyModule(*_llvm_module, &errs());)` after
+  `llvm::jeandle::optimize()`.
+  C2 comparison: C2 verifies at multiple pipeline stages.
+
+Bug 8.7 [P3] Error message overwritten on multiple errors
+  File: jeandleCompilation.hpp:64-68
+  Description: `report_error()` unconditionally overwrites `_error_msg`.
+  Only the last error is preserved.
+  Fix: Only set `_error_msg` if it is still `nullptr`.
+  C2 comparison: C2's `record_failure` preserves the first failure reason.
+
+Bug 8.8 [P3] _has_monitors uninitialized in constructor
+  File: jeandleCompilation.cpp:116-126
+  Description: `_has_monitors` is not initialized in the member
+  initializer list. If read before `initialize()` sets it, UB results.
+  Fix: Initialize `_has_monitors(false)` in the constructor initializer list.
+
+================================================================================
+THREAD SAFETY ANALYSIS SUMMARY
+================================================================================
+
+The Jeandle compiler's thread safety model relies on:
+
+1. Per-thread compilation: Each CompilerThread has its own JeandleCompilation
+   (stack-allocated), LLVMContext, and Module. No cross-thread sharing of
+   compilation state.
+
+2. THREAD_LOCAL TargetMachine: Each compiler thread gets its own
+   TargetMachine, correctly addressing LLVM's lack of thread safety for
+   TargetMachine. The dangling pointer on thread exit (Bug 1.1) is the
+   one issue here.
+
+3. One-time initialization via should_perform_init(): The init gate
+   provides mutual exclusion and a happens-before relationship through
+   HotSpot's CompileThread_lock monitor. All global mutable state
+   (_routine_entry, _gc_leaf_routines, _template_buffer, _data_layout,
+   VMCallbacks) is written during init and read-only afterward.
+
+4. No explicit memory ordering in LLVM code: The VMCallback.cpp code
+   (Bug 1.2) relies on the HotSpot monitor's implicit ordering, but
+   this is not self-documenting and breaks if the code is used outside
+   the HotSpot initialization protocol.
+
+5. VM callbacks from _thread_in_native: The LLVM optimization passes
+   call VM callbacks that access raw Klass* structures (Bug 6.3). This
+   violates HotSpot's thread state contract. The ci layer should be used
+   instead.
+
+6. No Dependencies system (Bug 6.2): This is the most significant
+   architectural gap compared to C2. Without dependencies, Jeandle
+   cannot safely eliminate type checks or finalize classes.
+
+================================================================================
+PRIORITY FIX RECOMMENDATIONS
+================================================================================
+
+Immediate (P0 - crash/corruption):
+1. Bug 6.1: Implement metadata relocations for embedded Klass* pointers
+2. Bug 1.1: Null _target_machine after delete in stopping_compiler_thread
+3. Bug 3.2: Add bounds check on derived pointer iterator in oop map parsing
+4. Bug 3.4: Add error checking for getAlignment().value()
+5. Bug 3.5: Add bounds validation on ELF section offsets
+6. Bug 3.6: Replace StringMap::operator[] with find() for oop handle lookup
+
+High Priority (P1 - miscompilation):
+1. Bug 5.2/6.2: Implement dependency recording for type check elimination
+2. Bug 2.1: Add merge_into_exception_handler for if_zero/if_acmp/if_null
+3. Bug 3.1/8.1: Fix exception handler table range check (>= start, < end)
+4. Bug 4.1: Set last_Java_pc in call_VM stub
+5. Bug 4.2: Implement deoptimize_caller_frame for allocation routines
+6. Bug 3.3: Add XMM register mapping for stackmap/deopt parsing
+7. Bug 7.1: Fix fix_oop_relocation to use correct Delta32 API
+8. Bug 7.3: Apply section word relocation addend after prolog insertion
+9. Bug 7.4: Add compressed oops (narrow_oop) support
+10. Bug 2.2: Fix BCI corruption in dispatch_exception_to_handler
+11. Bug 8.3: Track has_unsafe_access during compilation
+
+Medium Priority (P2 - thread safety/performance):
+1. Bug 1.2: Make VMCallbacks atomic with release/acquire
+2. Bug 4.3: Clear last_Java_sp on exception path
+3. Bug 6.3: Use ci layer for VM callbacks or add ThreadInVMfromNative
+4. Bug 8.2: Consume LLVM Expected<T> errors properly
+5. Bug 5.3: Handle memcpy/memmove in InsertGCBarriers
+6. Bug 5.4: Strip pointer casts in removeFunctionFromLLVMUsed
