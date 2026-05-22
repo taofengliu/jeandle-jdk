@@ -87,6 +87,38 @@ void JeandleIntrinsicLowering::attach_callee_return_klass_attr(llvm::CallBase* c
                                    *_interp->_context);
 }
 
+// Translate descriptor memory flags into an LLVM `memory()` call-site attribute.
+// Only applied when the call is safe from LLVM's reordering perspective: no GC
+// state observation, no deopt, no exception edge — anything that could imply a
+// safepoint or surprise the optimizer must be excluded.
+//
+// LLVM builtin intrinsics (`@llvm.sqrt`, `@llvm.fabs`, ...) already carry the
+// correct memory attribute in their upstream definition; this helper only adds
+// value for *external* runtime stubs whose body LLVM cannot see, enabling LICM
+// / GVN / DCE on hot pure libm calls and read-only array scans.
+static void apply_memory_attr(llvm::CallBase* site, const JeandleIntrinsicDescriptor& desc) {
+  if (desc.needs_gc_state() || desc.may_deopt() || desc.needs_exception_edge()) {
+    return;
+  }
+  if (desc.only_orders_memory()) {
+    // Ordering-only intrinsics are fences, lowered to LLVM `fence` instructions
+    // and never reach emit_callsite. Guard anyway in case a future descriptor
+    // pairs MEM_ORDERING_ONLY with a call-shaped lowering.
+    return;
+  }
+  const bool reads = desc.reads_memory();
+  const bool writes = desc.writes_memory();
+  if (!reads && !writes) {
+    site->setDoesNotAccessMemory();   // memory(none)
+  } else if (reads && !writes) {
+    site->setOnlyReadsMemory();        // memory(read)
+  } else if (!reads && writes) {
+    site->setOnlyWritesMemory();       // memory(write)
+  }
+  // reads && writes: default IR semantics already cover read+write — adding the
+  // attribute would narrow nothing.
+}
+
 llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDescriptor& desc,
                                                         const JeandleIntrinsicDecision& decision,
                                                         llvm::FunctionCallee callee,
@@ -105,6 +137,7 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDe
     // cannot be inferred).
     site = _interp->create_call(callee, args, calling_conv, bundles);
     site->setDoesNotThrow();
+    apply_memory_attr(site, desc);
   }
   annotate_generated_instruction(*site, desc, decision, entry);
   attach_callee_return_klass_attr(site);

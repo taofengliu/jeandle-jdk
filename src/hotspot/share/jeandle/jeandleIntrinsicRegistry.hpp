@@ -38,13 +38,26 @@ enum JeandleControlFlag : uint8_t {
 
 // Memory-effect facts about an intrinsic.  Combined into descriptor.memory_flags
 // with bitwise OR.  barrier_kind is a separate descriptor field because it is a
-// multi-valued enum, not a yes/no flag.
+// multi-valued enum tied to GC barrier semantics, orthogonal to the data-flow
+// direction encoded here.
+//
+// Direction bits (MEM_READ / MEM_WRITE) describe the LLVM-visible memory
+// effects of the intrinsic's lowered call site, and are translated into LLVM
+// `memory()` call-site attributes by JeandleIntrinsicLowering when the call is
+// a leaf path (no safepoint / deopt / exception edge).  MEM_ORDERING_ONLY
+// marks fences and similar primitives that constrain ordering without
+// transferring data; it is mutually exclusive with MEM_READ / MEM_WRITE.
 enum JeandleMemoryFlag : uint8_t {
   MEM_NONE              = 0,
-  // The intrinsic reads/writes heap or otherwise constrains memory ordering.
-  MEM_HAS_EFFECT        = 1u << 0,
+  // The call reads LLVM-visible memory.  Combined with MEM_WRITE for RMW.
+  MEM_READ              = 1u << 0,
+  // The call writes LLVM-visible memory.
+  MEM_WRITE             = 1u << 1,
+  // The call only constrains memory ordering (fence-like).  Mutually exclusive
+  // with MEM_READ / MEM_WRITE.
+  MEM_ORDERING_ONLY     = 1u << 2,
   // The lowered IR/call must remain visible to GC-aware statepoint/barrier code.
-  MEM_NEEDS_GC_STATE    = 1u << 1,
+  MEM_NEEDS_GC_STATE    = 1u << 3,
 };
 
 // What lowering paths a descriptor *declares* it can take.  Combined into
@@ -102,7 +115,9 @@ struct JeandleIntrinsicDescriptor {
   // Inline accessors so consumers can read named flags without bit-twiddling.
   bool may_deopt()             const { return (control_flags & CTRL_MAY_DEOPT) != 0; }
   bool needs_exception_edge()  const { return (control_flags & CTRL_NEEDS_EXCEPTION_EDGE) != 0; }
-  bool has_memory_effect()     const { return (memory_flags  & MEM_HAS_EFFECT) != 0; }
+  bool reads_memory()          const { return (memory_flags  & MEM_READ) != 0; }
+  bool writes_memory()         const { return (memory_flags  & MEM_WRITE) != 0; }
+  bool only_orders_memory()    const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
   bool needs_gc_state()        const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
   bool supports_hotspot_stub() const { return (support_flags & SUPPORT_HOTSPOT_STUB) != 0; }
   bool supports_llvm_intrin()  const { return (support_flags & SUPPORT_LLVM_INTRIN) != 0; }

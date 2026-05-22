@@ -38,13 +38,11 @@ static bool is_managed_runtime_call(JeandleIntrinsicImplKind impl_kind,
 
 static JeandleIRSemanticPlan make_plan(const JeandleIntrinsicDescriptor& desc,
                                        JeandleIntrinsicImplKind impl_kind) {
-  const bool is_javaop         = (impl_kind == JeandleIntrinsicImplKind::JavaOperation);
-  const bool is_pure_llvm      = (impl_kind == JeandleIntrinsicImplKind::IRInstruction ||
-                                  impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall);
-  const bool is_managed        = is_managed_runtime_call(impl_kind, desc);
-  const bool is_leaf_call      = (impl_kind == JeandleIntrinsicImplKind::HotSpotStub ||
-                                  impl_kind == JeandleIntrinsicImplKind::SharedRuntime) && !is_managed;
-  const bool needs_unwind_edge = desc.needs_exception_edge() && !is_javaop;
+  const bool is_pure_llvm = (impl_kind == JeandleIntrinsicImplKind::IRInstruction ||
+                             impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall);
+  const bool is_managed   = is_managed_runtime_call(impl_kind, desc);
+  const bool is_leaf_call = (impl_kind == JeandleIntrinsicImplKind::HotSpotStub ||
+                             impl_kind == JeandleIntrinsicImplKind::SharedRuntime) && !is_managed;
 
   JeandleIRSemanticPlan plan{};
 
@@ -56,15 +54,18 @@ static JeandleIRSemanticPlan make_plan(const JeandleIntrinsicDescriptor& desc,
   //     "deopt" bundle into the gc.statepoint's deopt section for HotSpot to use
   //     at runtime if the safepoint deopts.
   //   - the call crosses a managed-runtime boundary (call or invoke);
-  //   - the call is a JavaOp (conservatively non-leaf until JavaOp infrastructure can
-  //     derive precise bundle requirements).
+  //   - the call needs an exception edge (the unwind path crosses Java EH).
+  // JavaOps follow the same uniform rule: a JavaOp that promises (via its
+  // descriptor) not to deopt / safepoint / throw gets no bundle, allowing LLVM
+  // attribute-based DCE and aliasing before inlining.
   plan.attach_deopt_bundle = desc.may_deopt() || desc.needs_gc_state() ||
-                             is_managed || needs_unwind_edge || is_javaop;
+                             is_managed || desc.needs_exception_edge();
 
-  // gc-leaf-function attribute is only correct on truly side-effect-free leaf paths:
-  // pure LLVM IR or a leaf runtime call with no GC/exception/deopt interaction.
+  // gc-leaf-function asserts that this call site does not enter a safepoint;
+  // RewriteStatepointsForGC reads it to skip statepoint insertion. It says
+  // nothing about memory reads / writes (those are described separately via
+  // MEM_READ / MEM_WRITE for LLVM `memory()` attribute generation).
   plan.attach_gc_leaf_attr = !desc.needs_gc_state() &&
-                             !desc.has_memory_effect() &&
                              !desc.may_deopt() &&
                              !desc.needs_exception_edge() &&
                              (is_pure_llvm || is_leaf_call);

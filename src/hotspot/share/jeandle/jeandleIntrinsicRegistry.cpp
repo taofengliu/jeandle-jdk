@@ -100,6 +100,8 @@ static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
          "JavaOperation descriptor must have a non-null java_op_name");
   assert(desc.java_op_name == nullptr || desc.java_op_name[0] != '\0',
          "empty JavaOp name string");
+  assert(!desc.only_orders_memory() || (!desc.reads_memory() && !desc.writes_memory()),
+         "MEM_ORDERING_ONLY is mutually exclusive with MEM_READ / MEM_WRITE");
 }
 #endif
 
@@ -268,7 +270,7 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     // TypeSemantic + JavaOperation: the two-level load (klass → OopHandle → mirror)
     // is implemented as jeandle.get_class.
     //
-    // Memory: MEM_HAS_EFFECT | MEM_NEEDS_GC_STATE — three loads (header, OopHandle,
+    // Memory: MEM_READ | MEM_NEEDS_GC_STATE — three loads (header, OopHandle,
     // mirror oop); the mirror oop comes from OopStorage so a future GC-aware pass
     // must see this site for barrier insertion.
     //
@@ -281,7 +283,7 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     // Note: attach_deopt_bundle is still set unconditionally for JavaOpCall mode
     // (see make_plan); plan-level decision independent of CTRL_MAY_DEOPT.
     { vmIntrinsics::_getClass,
-      CTRL_NONE,                          MEM_HAS_EFFECT | MEM_NEEDS_GC_STATE,
+      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::JavaOperation,
       SUPPORT_NONE,                       "jeandle.get_class" },
 
@@ -289,36 +291,37 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     // CTRL_NONE — no speculative guard; attach_deopt_bundle is plan-driven by
     // MEM_NEEDS_GC_STATE, not by deoptimization semantics.
     { vmIntrinsics::_Reference_get,
-      CTRL_NONE,                          MEM_HAS_EFFECT | MEM_NEEDS_GC_STATE,
+      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE,
       JeandleMemoryBarrierKind::WeakReferentLoad, JeandleLoweringKind::JavaOperation,
       SUPPORT_NONE,                       "jeandle.reference_get" },
 
     // Reference.refersTo0(): raw referent pointer identity comparison (no GC barrier).
     { vmIntrinsics::_Reference_refersTo0,
-      CTRL_NONE,                          MEM_HAS_EFFECT | MEM_NEEDS_GC_STATE,
+      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE,
       JeandleMemoryBarrierKind::RawReferentRead, JeandleLoweringKind::JavaOperation,
       SUPPORT_NONE,                       "jeandle.reference_refers_to" },
 
     // Memory fences: lower to LLVM fence instructions (acquire / release / seq_cst).
-    // MEM_HAS_EFFECT but no GC interaction; barrier_kind=None because the fence IR
-    // instruction is the complete implementation — no GC pass augmentation needed.
+    // MEM_ORDERING_ONLY: the fence constrains ordering without reading or writing
+    // data; barrier_kind=None because the fence IR instruction is the complete
+    // implementation — no GC pass augmentation needed.
     { vmIntrinsics::_loadFence,
-      CTRL_NONE,                          MEM_HAS_EFFECT,
+      CTRL_NONE,                          MEM_ORDERING_ONLY,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::PureIRInstruction,
       SUPPORT_NONE,                       nullptr },
     { vmIntrinsics::_storeFence,
-      CTRL_NONE,                          MEM_HAS_EFFECT,
+      CTRL_NONE,                          MEM_ORDERING_ONLY,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::PureIRInstruction,
       SUPPORT_NONE,                       nullptr },
     { vmIntrinsics::_fullFence,
-      CTRL_NONE,                          MEM_HAS_EFFECT,
+      CTRL_NONE,                          MEM_ORDERING_ONLY,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::PureIRInstruction,
       SUPPORT_NONE,                       nullptr },
 
     // PhantomReference.refersTo0 shares semantics with Reference.refersTo0:
     // raw referent read (no GC barrier), pointer identity comparison.
     { vmIntrinsics::_PhantomReference_refersTo0,
-      CTRL_NONE,                          MEM_HAS_EFFECT | MEM_NEEDS_GC_STATE,
+      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE,
       JeandleMemoryBarrierKind::RawReferentRead, JeandleLoweringKind::JavaOperation,
       SUPPORT_NONE,                       "jeandle.reference_refers_to" },
 
@@ -330,10 +333,11 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     //
     // CTRL_NEEDS_EXCEPTION_EDGE: NegativeArraySizeException / NullPointerException /
     //   IllegalArgumentException may be thrown by the runtime.
-    // MEM_HAS_EFFECT only (not MEM_NEEDS_GC_STATE): the runtime call handles
+    // MEM_READ | MEM_WRITE (no MEM_NEEDS_GC_STATE): reads klass mirror, writes
+    //   the newly allocated object header/elements; the runtime call handles
     //   allocation-time GC interaction, no per-lowering barrier required.
     { vmIntrinsics::_newArray,
-      CTRL_NEEDS_EXCEPTION_EDGE,          MEM_HAS_EFFECT,
+      CTRL_NEEDS_EXCEPTION_EDGE,          MEM_READ | MEM_WRITE,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::JavaOperation,
       SUPPORT_NONE,                       "jeandle.new_array" },
 
@@ -348,7 +352,7 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     //   emit uncommon_trap(Reason_intrinsic) which requires a deopt bundle so the
     //   interpreter can re-execute and throw IOOBE.
     { vmIntrinsics::_countPositives,
-      CTRL_MAY_DEOPT,                     MEM_HAS_EFFECT,
+      CTRL_MAY_DEOPT,                     MEM_READ,
       JeandleMemoryBarrierKind::None,     JeandleLoweringKind::RuntimeLeafCall,
       SUPPORT_HOTSPOT_STUB,               nullptr,
       trap_reason_mask(Deoptimization::Reason_intrinsic) },
