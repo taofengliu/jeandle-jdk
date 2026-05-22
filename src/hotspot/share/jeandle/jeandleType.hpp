@@ -94,26 +94,19 @@ private:
   // Metadata for LLVM values that are known aliases of a constant oop. It is
   // carried with stack/local values so PHI nodes can preserve it across merges.
   ciObject* _constant_oop;
-  // C2 only folds stable array elements when the array value is known to come
-  // from an @Stable array field. Track the remaining stable dimensions here.
-  int _stable_dimension;
 
 public:
-  TypedValue(BasicType type, llvm::Value* value, ciObject* constant_oop = nullptr, int stable_dimension = 0) :
-      _basic_type(type), _value(value), _constant_oop(constant_oop), _stable_dimension(stable_dimension) {
+  TypedValue(BasicType type, llvm::Value* value, ciObject* constant_oop = nullptr) :
+      _basic_type(type), _value(value), _constant_oop(constant_oop) {
     if (value == nullptr) {
       assert(type == T_ILLEGAL, "value is null");
       assert(constant_oop == nullptr, "null value cannot be a constant oop");
-      assert(stable_dimension == 0, "null value cannot be a stable array");
     } else {
       assert(value->getType() == JeandleType::java2llvm(type, value->getContext()), "type does not match");
       assert(constant_oop == nullptr || is_reference_type(type), "only reference values can be constant oops");
-      assert(stable_dimension >= 0, "stable dimension must be non-negative");
-      assert(stable_dimension == 0 || constant_oop != nullptr, "stable arrays must be constant oops");
-      assert(stable_dimension == 0 || constant_oop->is_array(), "stable arrays must use array oops");
     }
   }
-  TypedValue() : _basic_type(T_ILLEGAL), _value(nullptr), _constant_oop(nullptr), _stable_dimension(0) {}
+  TypedValue() : _basic_type(T_ILLEGAL), _value(nullptr), _constant_oop(nullptr) {}
 
   static TypedValue null_value() { return TypedValue(T_ILLEGAL, nullptr); }
   bool   is_null() const { return _basic_type == T_ILLEGAL && _value == nullptr; }
@@ -122,21 +115,16 @@ public:
   BasicType        actual_type() const { return _basic_type; }
   llvm::Value*           value() const { return _value; }
   ciObject*      constant_oop() const { return _constant_oop; }
-  int        stable_dimension() const { return _stable_dimension; }
 
   TypedValue clone_with_value(llvm::Value* value) const {
-    return TypedValue(_basic_type, value, _constant_oop, _stable_dimension);
+    return TypedValue(_basic_type, value, _constant_oop);
   }
 
   void merge_constant_oop(const TypedValue& incoming) {
     if (_constant_oop != nullptr && _constant_oop == incoming._constant_oop) {
-      if (_stable_dimension != incoming._stable_dimension) {
-        _stable_dimension = 0;
-      }
       return;
     }
     _constant_oop = nullptr;
-    _stable_dimension = 0;
   }
 };
 

@@ -2353,7 +2353,7 @@ llvm::Value* JeandleAbstractInterpreter::find_or_insert_oop(ciObject* oop) {
   return global_oop_handle;
 }
 
-TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con, int stable_dimension) {
+TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con) {
   if (!con.is_valid()) {
     return TypedValue::null_value();
   }
@@ -2377,7 +2377,7 @@ TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con, int sta
       }
       llvm::Value* oop_handle = find_or_insert_oop(con_obj);
       llvm::Value* value = _ir_builder.CreateLoad(JeandleType::java2llvm(BasicType::T_OBJECT, *_context), oop_handle);
-      return TypedValue(T_OBJECT, value, con_obj, stable_dimension);
+      return TypedValue(T_OBJECT, value, con_obj);
     }
     default:
       Unimplemented();
@@ -2404,12 +2404,7 @@ TypedValue JeandleAbstractInterpreter::try_fold_field_load(ciField* field, ciObj
     }
     con = field->constant_value_of(holder);
   }
-  int stable_dimension = 0;
-  if (FoldStableValues && field->is_stable() && field->type()->is_array_klass() &&
-      con.is_valid() && !con.is_null_or_zero()) {
-    stable_dimension = field->type()->as_array_klass()->dimension();
-  }
-  return constant_to_value(con, stable_dimension);
+  return constant_to_value(con);
 }
 
 TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm::Value* offset, BasicType type) {
@@ -2421,19 +2416,10 @@ TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm
 
   int field_offset = (int)offset_con->getSExtValue();
   if (base_oop->is_array()) {
-    if (!FoldStableValues || base.stable_dimension() <= 0) {
-      return TypedValue::null_value();
-    }
-    ciArray* array = base_oop->as_array();
-    if (array->element_basic_type() != type) {
-      return TypedValue::null_value();
-    }
-    ciConstant con = array->element_value_by_offset(field_offset);
-    if (!con.is_valid() || con.is_null_or_zero()) {
-      return TypedValue::null_value();
-    }
-    int stable_dimension = base.stable_dimension() > 0 ? base.stable_dimension() - 1 : 0;
-    return constant_to_value(con, stable_dimension);
+    // TODO: Support @Stable array constant folding in a follow-up. The array
+    // case should be handled consistently for bytecode array loads and Unsafe
+    // element accesses, including stable dimensions and control-flow merges.
+    return TypedValue::null_value();
   }
 
   if (!base_oop->is_instance()) {
