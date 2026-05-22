@@ -278,6 +278,12 @@ DEF_JAVA_OP(reference_get, 1,
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
   referent->setAtomic(llvm::AtomicOrdering::Acquire);
+  if (UseG1GC) {
+    llvm::Function* barrier_func = template_module.getFunction("jeandle.g1_pre_barrier_loaded");
+    assert(barrier_func != nullptr, "jeandle.g1_pre_barrier_loaded not found");
+    llvm::CallInst* call = ir_builder.CreateCall(barrier_func, {referent});
+    call->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+  }
   ir_builder.CreateRet(referent);
 JAVA_OP_END
 
