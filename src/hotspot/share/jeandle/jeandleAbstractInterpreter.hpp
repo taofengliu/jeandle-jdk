@@ -374,7 +374,7 @@ class JeandleAbstractInterpreter : public StackObj {
   llvm::SmallVector<JeandleBasicBlock*>& bci2block() { return _block_builder->bci2block(); }
 
   llvm::Value* find_or_insert_oop(ciObject* oop);
-  TypedValue constant_to_value(ciConstant con);
+  TypedValue constant_to_value(ciConstant con, int stable_dimension = 0);
   TypedValue try_fold_field_load(ciField* field, ciObject* holder);
   TypedValue try_fold_unsafe_get(TypedValue base, llvm::Value* offset, BasicType type);
 

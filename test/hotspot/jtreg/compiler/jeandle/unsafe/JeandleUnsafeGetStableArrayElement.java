@@ -23,7 +23,9 @@
 
 /*
  * @test
- * @summary tests on constant folding of unsafe get operations from stable arrays
+ * @summary Jeandle tests on constant folding of unsafe get operations from stable arrays
+ *          Copied from test/hotspot/jtreg/compiler/unsafe/UnsafeGetStableArrayElement.java
+ *          for Jeandle-specific issue #387 coverage.
  * @library /test/lib
  * @build jdk.test.whitebox.WhiteBox
  * @requires vm.flavor == "server" & !vm.emulatedClient
@@ -34,13 +36,22 @@
  *
  * @run main/bootclasspath/othervm -XX:+UnlockDiagnosticVMOptions
  *                   -Xbatch -XX:-TieredCompilation
+ *                   -XX:+UseJeandleCompiler
  *                   -XX:+FoldStableValues
  *                   -XX:+WhiteBoxAPI
  *                   -XX:CompileCommand=dontinline,*Test::test*
- *                   compiler.unsafe.UnsafeGetStableArrayElement
+ *                   compiler.jeandle.unsafe.JeandleUnsafeGetStableArrayElement
+ *
+ * @run main/bootclasspath/othervm -XX:+UnlockDiagnosticVMOptions
+ *                   -Xbatch -XX:-TieredCompilation
+ *                   -XX:+UseJeandleCompiler
+ *                   -XX:-FoldStableValues
+ *                   -XX:+WhiteBoxAPI
+ *                   -XX:CompileCommand=dontinline,*Test::test*
+ *                   compiler.jeandle.unsafe.JeandleUnsafeGetStableArrayElement nofold
  */
 
-package compiler.unsafe;
+package compiler.jeandle.unsafe;
 
 import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.Stable;
@@ -54,7 +65,7 @@ import static jdk.test.lib.Asserts.assertNE;
 
 import jdk.test.whitebox.code.Compiler;
 
-public class UnsafeGetStableArrayElement {
+public class JeandleUnsafeGetStableArrayElement {
     @Stable static final boolean[] STABLE_BOOLEAN_ARRAY = new boolean[16];
     @Stable static final    byte[]    STABLE_BYTE_ARRAY = new    byte[16];
     @Stable static final   short[]   STABLE_SHORT_ARRAY = new   short[8];
@@ -64,8 +75,10 @@ public class UnsafeGetStableArrayElement {
     @Stable static final   float[]   STABLE_FLOAT_ARRAY = new   float[4];
     @Stable static final  double[]  STABLE_DOUBLE_ARRAY = new  double[2];
     @Stable static final  Object[]  STABLE_OBJECT_ARRAY = new  Object[4];
+    static final int[] FINAL_INT_ARRAY = new int[4];
 
     static {
+        FINAL_INT_ARRAY[0] = Integer.MAX_VALUE;
         Setter.reset();
     }
     static final Unsafe U = Unsafe.getUnsafe();
@@ -104,6 +117,7 @@ public class UnsafeGetStableArrayElement {
         static void changeF() { Setter.setF(true); }
         static void changeD() { Setter.setD(true); }
         static void changeL() { Setter.setL(true); }
+        static void changeFinalI() { FINAL_INT_ARRAY[0] = 0; }
 
         static boolean testZ_Z() { return U.getBoolean(STABLE_BOOLEAN_ARRAY, ARRAY_BOOLEAN_BASE_OFFSET); }
         static byte    testZ_B() { return U.getByte(   STABLE_BOOLEAN_ARRAY, ARRAY_BOOLEAN_BASE_OFFSET); }
@@ -191,6 +205,7 @@ public class UnsafeGetStableArrayElement {
         static char    testC_U() { return U.getCharUnaligned(  STABLE_CHAR_ARRAY,  ARRAY_CHAR_BASE_OFFSET + 1); }
         static int     testI_U() { return U.getIntUnaligned(    STABLE_INT_ARRAY,   ARRAY_INT_BASE_OFFSET + 1); }
         static long    testJ_U() { return U.getLongUnaligned(  STABLE_LONG_ARRAY,  ARRAY_LONG_BASE_OFFSET + 1); }
+        static int     testFinalI_I() { return U.getInt(FINAL_INT_ARRAY, ARRAY_INT_BASE_OFFSET); }
     }
 
     static void run(Callable<?> c) throws Exception {
@@ -238,6 +253,10 @@ public class UnsafeGetStableArrayElement {
     }
 
     static void testUnsafeAccess() throws Exception {
+        // A final array field is a constant oop, but C2 only folds array
+        // elements when the array value carries @Stable metadata.
+        run(Test::testFinalI_I, null, Test::changeFinalI);
+
         // boolean[], aligned accesses
         testMatched(   Test::testZ_Z, Test::changeZ);
         testMismatched(Test::testZ_B, Test::changeZ);
@@ -345,6 +364,11 @@ public class UnsafeGetStableArrayElement {
     public static void main(String[] args) throws Exception {
         if (!Platform.isServer() || Platform.isEmulatedClient()) {
             throw new Error("TESTBUG: Not server mode");
+        }
+        if (args.length > 0 && args[0].equals("nofold")) {
+            run(Test::testI_I, null, Test::changeI);
+            System.out.println("TEST PASSED");
+            return;
         }
         testUnsafeAccess();
         System.out.println("TEST PASSED");

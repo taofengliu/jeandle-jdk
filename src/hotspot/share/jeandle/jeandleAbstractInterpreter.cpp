@@ -38,6 +38,7 @@
 #include "ci/ciObjArrayKlass.hpp"
 #include "ci/ciSymbols.hpp"
 #include "ci/ciTypeFlow.hpp"
+#include "oops/instanceMirrorKlass.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "classfile/javaClasses.hpp"
 #include "gc/shared/gc_globals.hpp"
@@ -2352,7 +2353,7 @@ llvm::Value* JeandleAbstractInterpreter::find_or_insert_oop(ciObject* oop) {
   return global_oop_handle;
 }
 
-TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con) {
+TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con, int stable_dimension) {
   if (!con.is_valid()) {
     return TypedValue::null_value();
   }
@@ -2376,7 +2377,7 @@ TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con) {
       }
       llvm::Value* oop_handle = find_or_insert_oop(con_obj);
       llvm::Value* value = _ir_builder.CreateLoad(JeandleType::java2llvm(BasicType::T_OBJECT, *_context), oop_handle);
-      return TypedValue(T_OBJECT, value, con_obj);
+      return TypedValue(T_OBJECT, value, con_obj, stable_dimension);
     }
     default:
       Unimplemented();
@@ -2403,7 +2404,12 @@ TypedValue JeandleAbstractInterpreter::try_fold_field_load(ciField* field, ciObj
     }
     con = field->constant_value_of(holder);
   }
-  return constant_to_value(con);
+  int stable_dimension = 0;
+  if (FoldStableValues && field->is_stable() && field->type()->is_array_klass() &&
+      con.is_valid() && !con.is_null_or_zero()) {
+    stable_dimension = field->type()->as_array_klass()->dimension();
+  }
+  return constant_to_value(con, stable_dimension);
 }
 
 TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm::Value* offset, BasicType type) {
@@ -2415,7 +2421,7 @@ TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm
 
   int field_offset = (int)offset_con->getSExtValue();
   if (base_oop->is_array()) {
-    if (!FoldStableValues) {
+    if (!FoldStableValues || base.stable_dimension() <= 0) {
       return TypedValue::null_value();
     }
     ciArray* array = base_oop->as_array();
@@ -2426,7 +2432,8 @@ TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm
     if (!con.is_valid() || con.is_null_or_zero()) {
       return TypedValue::null_value();
     }
-    return constant_to_value(con);
+    int stable_dimension = base.stable_dimension() > 0 ? base.stable_dimension() - 1 : 0;
+    return constant_to_value(con, stable_dimension);
   }
 
   if (!base_oop->is_instance()) {
@@ -2437,7 +2444,9 @@ TypedValue JeandleAbstractInterpreter::try_fold_unsafe_get(TypedValue base, llvm
   ciField* field = nullptr;
   ciConstant con;
   ciType* mirror_type = instance->java_mirror_type();
-  if (mirror_type != nullptr && mirror_type->is_klass() && mirror_type->as_klass()->is_instance_klass()) {
+  if (mirror_type != nullptr && mirror_type->is_klass() &&
+      mirror_type->as_klass()->is_instance_klass() &&
+      field_offset >= InstanceMirrorKlass::offset_of_static_fields()) {
     field = mirror_type->as_klass()->as_instance_klass()->get_field_by_offset(field_offset, true);
     if (field == nullptr || !field->is_constant() || field->layout_type() != type) {
       return TypedValue::null_value();

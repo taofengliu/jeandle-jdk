@@ -23,8 +23,10 @@
 
 /*
  * @test
- * @summary tests on constant folding of unsafe get operations
- * @library /test/lib
+ * @summary Jeandle tests on constant folding of unsafe get operations
+ *          Copied from test/hotspot/jtreg/compiler/unsafe/UnsafeGetConstantField.java
+ *          for Jeandle-specific issue #387 coverage.
+ * @library /test/lib /compiler/jsr292/patches
  *
  * @requires vm.flavor == "server" & !vm.emulatedClient
  *
@@ -32,30 +34,31 @@
  *          java.base/jdk.internal.vm.annotation
  *          java.base/jdk.internal.misc
  *
- * @library ../jsr292/patches
  * @build java.base/java.lang.invoke.MethodHandleHelper
  *
  * @run main/bootclasspath/othervm -XX:+UnlockDiagnosticVMOptions
  *                                 -Xbatch -XX:-TieredCompilation
+ *                                 -XX:+UseJeandleCompiler
  *                                 -XX:+FoldStableValues
- *                                 -XX:CompileCommand=dontinline,compiler.unsafe.UnsafeGetConstantField::checkGetAddress
+ *                                 -XX:CompileCommand=dontinline,compiler.jeandle.unsafe.JeandleUnsafeGetConstantField::checkGetAddress
  *                                 -XX:CompileCommand=dontinline,*::test*
  *                                 -XX:+UseUnalignedAccesses
  *                                 --add-reads=java.base=ALL-UNNAMED
- *                                 compiler.unsafe.UnsafeGetConstantField
+ *                                 compiler.jeandle.unsafe.JeandleUnsafeGetConstantField
  *
  * @run main/bootclasspath/othervm -XX:+UnlockDiagnosticVMOptions
  *                                 -Xbatch -XX:-TieredCompilation
+ *                                 -XX:+UseJeandleCompiler
  *                                 -XX:+FoldStableValues
- *                                 -XX:CompileCommand=dontinline,compiler.unsafe.UnsafeGetConstantField::checkGetAddress
+ *                                 -XX:CompileCommand=dontinline,compiler.jeandle.unsafe.JeandleUnsafeGetConstantField::checkGetAddress
  *                                 -XX:CompileCommand=dontinline,*::test*
  *                                 -XX:CompileCommand=inline,*Unsafe::get*
  *                                 -XX:-UseUnalignedAccesses
  *                                 --add-reads=java.base=ALL-UNNAMED
- *                                 compiler.unsafe.UnsafeGetConstantField
+ *                                 compiler.jeandle.unsafe.JeandleUnsafeGetConstantField
  */
 
-package compiler.unsafe;
+package compiler.jeandle.unsafe;
 
 import jdk.internal.misc.Unsafe;
 import jdk.internal.org.objectweb.asm.ClassWriter;
@@ -92,8 +95,8 @@ import static jdk.internal.org.objectweb.asm.Opcodes.PUTFIELD;
 import static jdk.internal.org.objectweb.asm.Opcodes.PUTSTATIC;
 import static jdk.internal.org.objectweb.asm.Opcodes.RETURN;
 
-public class UnsafeGetConstantField {
-    static final Class<?> THIS_CLASS = UnsafeGetConstantField.class;
+public class JeandleUnsafeGetConstantField {
+    static final Class<?> THIS_CLASS = JeandleUnsafeGetConstantField.class;
     static final Unsafe U = Unsafe.getUnsafe();
 
     public static void main(String[] args) {
@@ -103,6 +106,7 @@ public class UnsafeGetConstantField {
         testUnsafeGetAddress();
         testUnsafeGetField();
         testUnsafeGetFieldUnaligned();
+        testUnsafeGetFieldBasePhi();
         System.out.println("TEST PASSED");
     }
 
@@ -117,6 +121,42 @@ public class UnsafeGetConstantField {
 
     static long checkGetAddress() {
         return U.getAddress(nativeAddr);
+    }
+
+    static final class PhiBase {
+        final int value = 42;
+    }
+
+    static final PhiBase PHI_BASE = new PhiBase();
+    static final long PHI_VALUE_OFFSET;
+    static volatile boolean phiToggle;
+
+    static {
+        try {
+            PHI_VALUE_OFFSET = U.objectFieldOffset(PhiBase.class.getDeclaredField("value"));
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    static void testUnsafeGetFieldBasePhi() {
+        for (int i = 0; i < 20_000; i++) {
+            Asserts.assertEQ(42, testBasePhiUnsafe());
+        }
+
+        U.putInt(PHI_BASE, PHI_VALUE_OFFSET, 0);
+        Asserts.assertEQ(42, testBasePhiUnsafe(),
+                "unsafe get through a merged constant oop should stay folded");
+    }
+
+    static int testBasePhiUnsafe() {
+        Object base;
+        if (phiToggle) {
+            base = PHI_BASE;
+        } else {
+            base = PHI_BASE;
+        }
+        return U.getInt(base, PHI_VALUE_OFFSET);
     }
 
     static void testUnsafeGetField() {
