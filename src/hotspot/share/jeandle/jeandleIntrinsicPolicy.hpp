@@ -24,7 +24,6 @@
 #include "jeandle/jeandleIntrinsicSupport.hpp"
 #include "memory/allocation.hpp"
 
-class ciMethod;
 
 enum class JeandleIntrinsicImplKind {
   Unsupported,
@@ -55,9 +54,9 @@ struct JeandleIntrinsicDecision {
 
 class JeandleIntrinsicPolicy : public StackObj {
  public:
-  JeandleIntrinsicDecision decide(const JeandleIntrinsicDescriptor& desc,
-                                  const ciMethod* caller,
-                                  int caller_bci) const;
+  // Pure descriptor → impl_kind decision. Runtime-state checks (trap throttle)
+  // are the caller's responsibility, performed before invoking this.
+  JeandleIntrinsicDecision decide(const JeandleIntrinsicDescriptor& desc) const;
 
   // Rebuild a decision when lowering picks a different impl_kind than policy did
   // (e.g. pow(x, 2) -> fmul replaces a planned LLVMBuiltinCall with IRInstruction).

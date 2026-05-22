@@ -21,9 +21,6 @@
 #include "jeandle/jeandleIntrinsicSupport.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
-#include "ci/ciMethod.hpp"
-#include "ci/ciMethodData.hpp"
-#include "runtime/deoptimization.hpp"
 
 // Whether the chosen impl_kind crosses a runtime call boundary that the IR-level
 // pipeline (statepoints, deopt bundles) must observe.
@@ -84,44 +81,6 @@ static JeandleIntrinsicDecision unsupported(const JeandleIntrinsicDescriptor& de
           make_plan(desc, JeandleIntrinsicImplKind::Unsupported)};
 }
 
-// Mirrors Compile::too_many_traps(caller_method, bci, reason):
-//   1. per-BCI check: has_trap_at(bci, nullptr, reason) != 0 → true immediately
-//   2. aggregate fallback: trap_count(reason) >= per_method_trap_limit(reason)
-// Keyed on the CALLER method and invoke-site BCI, not the callee MDO, so one
-// hot caller cannot disable the intrinsic for all other call sites.
-// For non-speculate reasons (Reason_intrinsic, Reason_range_check) m = nullptr.
-//
-// Known gap vs C2: C2 also maintains a per-compilation trap count accumulator
-// (Compile::_trap_count[]) that sums traps across the root method and all inlined
-// callees in the same compilation unit. The fallback here only reads the caller
-// method's own MDO, which is equivalent for single-method compilations but weaker
-// when non-intrinsic inlining is introduced.
-// TODO: add a per-compilation accumulator to JeandleAbstractInterpreter (or
-// JeandleCompilation) once non-intrinsic inlining is supported.
-static bool too_many_traps_at(const ciMethod* caller, int bci,
-                              Deoptimization::DeoptReason reason) {
-  if (caller == nullptr) return false;
-  ciMethodData* md = const_cast<ciMethod*>(caller)->method_data();
-  if (md == nullptr || md->is_empty()) return false;
-  if (md->has_trap_at(bci, nullptr, reason) != 0) return true;
-  return md->trap_count(reason) >= Deoptimization::per_method_trap_limit(reason);
-}
-
-static bool too_many_traps_for_any_reason(const ciMethod* caller, int bci,
-                                          JeandleTrapReasonMask mask) {
-  uint reason_index = 0;
-  while (mask != 0) {
-    if ((mask & 1u) != 0 &&
-        too_many_traps_at(caller, bci,
-                          static_cast<Deoptimization::DeoptReason>(reason_index))) {
-      return true;
-    }
-    reason_index++;
-    mask >>= 1;
-  }
-  return false;
-}
-
 // Pick the best available HotSpot runtime path, preferring the dedicated stub
 // over the generic SharedRuntime entry.  Returns Unsupported if neither exists.
 static JeandleIntrinsicImplKind try_hotspot_path(const JeandleIntrinsicCapabilities& caps) {
@@ -136,13 +95,10 @@ JeandleIntrinsicDecision JeandleIntrinsicPolicy::refine(const JeandleIntrinsicDe
   return {base.supported, refined_kind, make_plan(desc, refined_kind)};
 }
 
-JeandleIntrinsicDecision JeandleIntrinsicPolicy::decide(const JeandleIntrinsicDescriptor& desc,
-                                                        const ciMethod* caller,
-                                                        int caller_bci) const {
-  if (too_many_traps_for_any_reason(caller, caller_bci, desc.trap_throttle_mask)) {
-    return unsupported(desc);
-  }
-
+JeandleIntrinsicDecision JeandleIntrinsicPolicy::decide(const JeandleIntrinsicDescriptor& desc) const {
+  // Pure descriptor → impl_kind mapping. Trap-throttle is a runtime-state
+  // concern handled by the caller (JeandleAbstractInterpreter::try_lower_intrinsic)
+  // via the interpreter's per-compilation trap accumulator.
   switch (desc.lowering_kind) {
     case JeandleLoweringKind::PureIRInstruction:
       // Bare LLVM IR instruction (bitcast, fence). Unconditionally supported,

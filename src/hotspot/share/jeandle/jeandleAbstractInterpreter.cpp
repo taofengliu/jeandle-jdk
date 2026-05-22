@@ -1945,8 +1945,24 @@ bool JeandleAbstractInterpreter::try_lower_intrinsic(const ciMethod* target) {
     }
   }
 
+  // Trap-throttle short-circuit. Mirrors C2's per-bci check in each inline_xxx
+  // (library_call.cpp), but data-driven via desc->trap_throttle_mask. Uses the
+  // interpreter's too_many_traps (which combines the caller MDO's has_trap_at
+  // with the per-compilation _trap_count accumulator seeded by
+  // accumulate_trap_counts_from_mdo at compile entry), so cross-method inlining
+  // is accounted for — matching Compile::too_many_traps in C2.
+  const int cur_bci = _bytecodes.cur_bci();
+  JeandleTrapReasonMask mask = desc->trap_throttle_mask;
+  for (uint reason_idx = 0; mask != 0; ++reason_idx, mask >>= 1) {
+    if ((mask & 1u) != 0 &&
+        too_many_traps(const_cast<ciMethod*>(_method), cur_bci,
+                       static_cast<Deoptimization::DeoptReason>(reason_idx))) {
+      return false;
+    }
+  }
+
   JeandleIntrinsicPolicy policy;
-  JeandleIntrinsicDecision decision = policy.decide(*desc, _method, _bytecodes.cur_bci());
+  JeandleIntrinsicDecision decision = policy.decide(*desc);
   if (!decision.supported) {
     return false;
   }
