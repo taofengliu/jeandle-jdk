@@ -698,9 +698,10 @@ bool JeandleIntrinsicLowering::lower_count_positives(
 }
 
 // _blackhole: consume all arguments via volatile inline asm to prevent DCE.
-// Each argument is passed through "r,~{memory}" volatile asm so LLVM cannot
+// Each argument is passed through "r" volatile asm so LLVM cannot
 // eliminate the computation that produced it.  Float/double are bitcast to
-// integer types first because "r" is an integer register constraint.
+// integer types first because "r" is an integer register constraint. Object
+// pointers are likewise ptrtoint'd to i64 before entering the register constraint.
 // The receiver (if any) is consumed last after all typed parameters.
 bool JeandleIntrinsicLowering::lower_blackhole(const JeandleIntrinsicDescriptor& desc,
                                                const JeandleIntrinsicDecision& decision) {
@@ -727,7 +728,7 @@ bool JeandleIntrinsicLowering::lower_blackhole(const JeandleIntrinsicDescriptor&
         val = builder.CreateBitCast(_interp->_jvm->dpop(), builder.getInt64Ty());
         break;
       case T_OBJECT: case T_ARRAY:
-        val = _interp->_jvm->apop();
+        val = builder.CreatePtrToInt(_interp->_jvm->apop(), builder.getInt64Ty());
         break;
       default:
         return false;

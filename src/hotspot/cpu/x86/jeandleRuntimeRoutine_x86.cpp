@@ -89,11 +89,12 @@ JRT_END
 //   1. push rbx        — save callee-saved register used as a temp by count_positives
 //   2. ecx ← esi       — save len to rcx BEFORE rsi is clobbered by the next move
 //   3. rsi ← rdi       — rsi = ba_start (ary1)
-//   4. count_positives(rsi, rcx, rax, rbx, xmm1, xmm2) — generates inline counting code
+//   4. count_positives(rsi, rcx, rax, rbx, xmm1, xmm2, k1, k2) — generates inline counting code
 //   5. pop rbx; ret    — restore rbx and return (result in rax)
 //
 // xmm0-xmm7 are caller-saved in SysV AMD64 ABI; count_positives uses xmm1/xmm2 as
-// TEMP (caller-saved), so no XMM save/restore is needed.
+// TEMP (caller-saved), so no XMM save/restore is needed. k1/k2 are also volatile
+// under the x86-64 psABI and are only used when count_positives selects its EVEX path.
 void JeandleRuntimeRoutine::generate_count_positives_adapter() {
 #ifndef AMD64
   // 32-bit x86 builds: C2_MacroAssembler::count_positives uses 64-bit registers
@@ -124,7 +125,7 @@ void JeandleRuntimeRoutine::generate_count_positives_adapter() {
   // Emit the inline SIMD counting code.
   // C2_MacroAssembler::count_positives initialises rax = len first (optimistic),
   // then subtracts as it finds negative bytes; result returned in rax.
-  masm.count_positives(rsi, rcx, rax, rbx, xmm1, xmm2);
+  masm.count_positives(rsi, rcx, rax, rbx, xmm1, xmm2, k1, k2);
 
   // Epilogue.
   masm.pop(rbx);
