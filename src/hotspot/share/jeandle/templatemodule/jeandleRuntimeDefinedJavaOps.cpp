@@ -264,7 +264,29 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("KlassArray.base_offset_in_bytes",                  int32_type, static_cast<uint64_t>(Array<Klass*>::base_offset_in_bytes()));
   define_global("KlassArray.length_offset_in_bytes",                int32_type, static_cast<uint64_t>(Array<Klass*>::length_offset_in_bytes()));
   define_global("arrayOopDesc.length_offset_in_bytes",              int32_type, static_cast<uint64_t>(arrayOopDesc::length_offset_in_bytes()));
+  // Per-element-type array base offsets. Consumed by the LLVM-side
+  // partial escape analyzer via VMConstants::fromModule (see
+  // jeandle-llvm/llvm/include/llvm/IR/Jeandle/VMConstants.h). The naming
+  // convention must match jBasicTypeName() on the LLVM side.
+  define_global("arrayOopDesc.base_offset_in_bytes.boolean",        int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_BOOLEAN)));
+  define_global("arrayOopDesc.base_offset_in_bytes.byte",           int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_BYTE)));
+  define_global("arrayOopDesc.base_offset_in_bytes.char",           int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_CHAR)));
+  define_global("arrayOopDesc.base_offset_in_bytes.short",          int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_SHORT)));
   define_global("arrayOopDesc.base_offset_in_bytes.int",            int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_INT)));
+  define_global("arrayOopDesc.base_offset_in_bytes.long",           int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_LONG)));
+  define_global("arrayOopDesc.base_offset_in_bytes.float",          int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_FLOAT)));
+  define_global("arrayOopDesc.base_offset_in_bytes.double",         int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_DOUBLE)));
+  define_global("arrayOopDesc.base_offset_in_bytes.object",         int32_type, static_cast<uint64_t>(arrayOopDesc::base_offset_in_bytes(T_OBJECT)));
+  // Per-element-type array element size in bytes. Same delivery model.
+  define_global("arrayOopDesc.element_size.boolean",                int32_type, static_cast<uint64_t>(type2aelembytes(T_BOOLEAN)));
+  define_global("arrayOopDesc.element_size.byte",                   int32_type, static_cast<uint64_t>(type2aelembytes(T_BYTE)));
+  define_global("arrayOopDesc.element_size.char",                   int32_type, static_cast<uint64_t>(type2aelembytes(T_CHAR)));
+  define_global("arrayOopDesc.element_size.short",                  int32_type, static_cast<uint64_t>(type2aelembytes(T_SHORT)));
+  define_global("arrayOopDesc.element_size.int",                    int32_type, static_cast<uint64_t>(type2aelembytes(T_INT)));
+  define_global("arrayOopDesc.element_size.long",                   int32_type, static_cast<uint64_t>(type2aelembytes(T_LONG)));
+  define_global("arrayOopDesc.element_size.float",                  int32_type, static_cast<uint64_t>(type2aelembytes(T_FLOAT)));
+  define_global("arrayOopDesc.element_size.double",                 int32_type, static_cast<uint64_t>(type2aelembytes(T_DOUBLE)));
+  define_global("arrayOopDesc.element_size.object",                 int32_type, static_cast<uint64_t>(type2aelembytes(T_OBJECT)));
   define_global("Klass.access_flags_offset",                        int32_type, static_cast<uint64_t>(Klass::access_flags_offset()));
   define_global("Klass.secondary_super_cache_offset",               int32_type, static_cast<uint64_t>(Klass::secondary_super_cache_offset()));
   define_global("Klass.secondary_supers_offset",                    int32_type, static_cast<uint64_t>(Klass::secondary_supers_offset()));
@@ -314,4 +336,6 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
 
   define_global("VMOptions.UseTLAB",                                int1_type, static_cast<uint64_t>(UseTLAB));
   define_global("VMOptions.ZeroTLAB",                               int1_type, static_cast<uint64_t>(ZeroTLAB));
+  define_global("VMOptions.UseCompressedClassPointers",             int1_type, static_cast<uint64_t>(UseCompressedClassPointers));
+  define_global("VMOptions.UseCompressedOops",                      int1_type, static_cast<uint64_t>(UseCompressedOops));
 }

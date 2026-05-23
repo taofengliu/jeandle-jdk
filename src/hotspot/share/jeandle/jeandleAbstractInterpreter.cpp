@@ -3097,6 +3097,20 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
 
   _jvm->push_lock(lock);
 
+  // R10.X1a: bytecode-level lock depth of the just-pushed monitor. After
+  // push_lock above, this lock occupies the topmost slot of the
+  // JeandleVMState lock stack; its 0-based depth is `locks_size() - 1`.
+  // This is the Java-bytecode-level monitor depth — stable across analyzer
+  // re-visits of the same bytecode within a loop fixpoint, which is what
+  // jeandle-llvm's PEA needs for its depth-aware lock cascade
+  // (PartialEscape.h:MonitorIdRef / PartialEscapeAnalysis.cpp:LockEnter).
+  // Mirrors Graal's MonitorIdNode.getLockDepth() from
+  // jdk.graal.compiler.nodes.java.MonitorIdNode.
+  int lock_depth = _jvm->locks_size() - 1;
+  if (lock_depth < 0) {
+    lock_depth = 0;  // defensive — shared_lock is only invoked after push.
+  }
+
   int cur_bci = _bytecodes.cur_bcp() == nullptr ? -1 : _bytecodes.cur_bci();
 
   llvm::BasicBlock* monitorenter_slow_path = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitorenter_slow_path", _llvm_func);
@@ -3118,6 +3132,18 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
   } else {
     assert(LockingMode == LM_LIGHTWEIGHT, "");
     call = call_java_op("jeandle.monitorenter_with_lightweight_lock", {lock.object().value(), lock.lock()});
+  }
+  // R10.X1a: tag the monitorenter call with !jeandle.lock_depth so
+  // jeandle-llvm's PEA pass can read the Java-bytecode-level monitor depth
+  // for its narrow lock cascade rule (R10.X1c) and merge-time stack-identity
+  // check (R10.X1b). Format: a single i32 holding the 0-based depth.
+  // When this metadata is absent (e.g. lit-only LLVM tests), the PEA pass
+  // falls back to its analyzer-run-monotonic Order proxy.
+  {
+    llvm::MDNode* lock_depth_md = llvm::MDNode::get(*_context, {
+        llvm::ConstantAsMetadata::get(_ir_builder.getInt32(lock_depth))
+    });
+    call->setMetadata("jeandle.lock_depth", lock_depth_md);
   }
   _ir_builder.CreateCondBr(call, monitor_entered, monitorenter_slow_path);
 

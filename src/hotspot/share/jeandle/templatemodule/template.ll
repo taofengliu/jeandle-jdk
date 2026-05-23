@@ -41,7 +41,29 @@
 
 ; Byte offsets of arrayOopDesc structure fields.
 @arrayOopDesc.length_offset_in_bytes = external global i32
-@arrayOopDesc.base_offset_in_bytes.int = external global i32
+; Per-element-type array base offset. Consumed by the LLVM-side partial escape
+; analyzer (VMConstants::fromModule) so it can compute element addresses for
+; virtualised arrays. The .int member predates the others.
+@arrayOopDesc.base_offset_in_bytes.boolean = external global i32
+@arrayOopDesc.base_offset_in_bytes.byte    = external global i32
+@arrayOopDesc.base_offset_in_bytes.char    = external global i32
+@arrayOopDesc.base_offset_in_bytes.short   = external global i32
+@arrayOopDesc.base_offset_in_bytes.int     = external global i32
+@arrayOopDesc.base_offset_in_bytes.long    = external global i32
+@arrayOopDesc.base_offset_in_bytes.float   = external global i32
+@arrayOopDesc.base_offset_in_bytes.double  = external global i32
+@arrayOopDesc.base_offset_in_bytes.object  = external global i32
+; Per-element-type array element size in bytes. Same delivery model; consumed
+; by VMConstants::fromModule alongside the base offsets.
+@arrayOopDesc.element_size.boolean = external global i32
+@arrayOopDesc.element_size.byte    = external global i32
+@arrayOopDesc.element_size.char    = external global i32
+@arrayOopDesc.element_size.short   = external global i32
+@arrayOopDesc.element_size.int     = external global i32
+@arrayOopDesc.element_size.long    = external global i32
+@arrayOopDesc.element_size.float   = external global i32
+@arrayOopDesc.element_size.double  = external global i32
+@arrayOopDesc.element_size.object  = external global i32
 
 ; Byte offsets for Klass structure fields.
 @Klass.access_flags_offset = external global i32
@@ -65,6 +87,9 @@
 ; Global vm options
 @VMOptions.UseTLAB = external global i1
 @VMOptions.ZeroTLAB = external global i1
+; Heap layout switches consumed by VMConstants::fromModule on the LLVM side.
+@VMOptions.UseCompressedClassPointers = external global i1
+@VMOptions.UseCompressedOops = external global i1
 
 ; Byte offsets for BasicLock structure fields.
 @BasicLock.displaced_header_offset_in_bytes = external global i32
