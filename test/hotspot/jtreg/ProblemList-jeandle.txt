@@ -359,7 +359,6 @@ runtime/ClassUnload/UnloadTestWithVerifyDuringGC.java                           
 # timeout
 ###
 
-
 compiler/loopopts/TestRemoveEmptyLoop.java                                                     linux-aarch64,linux-x64
 
 ###
