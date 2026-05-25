@@ -62,7 +62,7 @@ class JeandleCompilation : public StackObj {
 
   // Error related:
   void report_error(const char* msg) {
-    if (msg != nullptr) {
+    if (msg != nullptr && _error_msg == nullptr) {
       _error_msg = msg;
     }
   }
@@ -99,6 +99,7 @@ class JeandleCompilation : public StackObj {
   std::unique_ptr<llvm::LLVMContext> _context;
   std::unique_ptr<llvm::Module> _llvm_module;
   std::string _comp_start_time;
+  uint _trap_hist[MethodData::_trap_hist_limit];
 
   JeandleCompiledCode _code; // Compiled code.
 

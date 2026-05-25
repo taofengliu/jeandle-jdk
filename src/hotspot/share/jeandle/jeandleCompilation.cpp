@@ -182,9 +182,11 @@ JeandleCompilation::JeandleCompilation(llvm::TargetMachine* target_machine,
   _llvm_module->setTargetTriple(_target_machine->getTargetTriple());
   JeandleCallVM::generate_call_VM(name, routine_address, func_type, *_llvm_module, _code);
 
-  // Verify module, if failes, crashes in debug builds and only reports compilation error in release builds.
-  bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
-  JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed in Jeandle stub compilation");
+  // Verify module in debug builds.
+  DEBUG_ONLY({
+    bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
+    JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed in Jeandle stub compilation");
+  });
 
   if (JeandleDumpRuntimeStubs) {
     dump_ir(false);
@@ -192,6 +194,12 @@ JeandleCompilation::JeandleCompilation(llvm::TargetMachine* target_machine,
 
   // Optimize.
   llvm::jeandle::optimize(*_llvm_module, llvm::OptimizationLevel::O3);
+
+  // Verify module in debug builds after optimization.
+  DEBUG_ONLY({
+    bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
+    JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed after optimization in Jeandle stub compilation");
+  });
 
   if (JeandleDumpRuntimeStubs) {
     dump_ir(true);
@@ -265,6 +273,8 @@ void JeandleCompilation::initialize() {
   _env->debug_info()->set_oopmaps(new OopMapSet());
   _env->set_dependencies(new Dependencies(_env));
 
+  Copy::zero_to_bytes(_trap_hist, sizeof(_trap_hist));
+
   set_has_monitors(false);
 
   // Get timestamp to mark dump files.
@@ -307,7 +317,7 @@ void JeandleCompilation::compile_java_method() {
   // Build basic blocks. Then fill basic blocks with LLVM IR.
   {
     JeandleTraceTime tt_abstract_interpreter("Jeandle Abstract Interpret", abstract_interpreter_timer);
-    JeandleAbstractInterpreter interpret(_method, _entry_bci, *_llvm_module, _code);
+    JeandleAbstractInterpreter interpret(_method, _entry_bci, *_llvm_module, _code, _trap_hist);
   }
 
   if (JeandleDumpIR) {
@@ -316,9 +326,11 @@ void JeandleCompilation::compile_java_method() {
 
   RETURN_VOID_ON_JEANDLE_ERROR();
 
-  // Verify module, if failes, crashes in debug builds and only reports compilation error in release builds.
-  bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
-  JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed in Jeandle compilation");
+  // Verify module in debug builds.
+  DEBUG_ONLY({
+    bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
+    JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed in Jeandle compilation");
+  });
 
   // Scope the VM callback recorder to the optimization step.
   // Each concurrent compilation gets its own recorder via thread-local storage.
@@ -332,6 +344,12 @@ void JeandleCompilation::compile_java_method() {
     JeandleTraceTime tt_optimize("Jeandle LLVM Optimize", llvm_optimizer_timer);
     llvm::jeandle::optimize(*_llvm_module, llvm::OptimizationLevel::O3);
   }
+
+  // Verify module in debug builds after optimization.
+  DEBUG_ONLY({
+    bool is_failed = llvm::verifyModule(*_llvm_module, &llvm::errs());
+    JEANDLE_ERROR_ASSERT_AND_RET_VOID_ON_FAIL(!is_failed, "module verify failed after optimization in Jeandle compilation");
+  });
 
   // Dump the VM callback log for this compilation.
   if (JeandleRecordVMCallbacks) {
