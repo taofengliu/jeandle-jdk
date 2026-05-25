@@ -271,6 +271,29 @@ void JeandleCompilation::initialize() {
   _comp_start_time = std::to_string(duration.count());
 }
 
+static void ensure_gc_barrier_declarations(llvm::Module& module) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::Type* void_type = llvm::Type::getVoidTy(context);
+  llvm::PointerType* oop_type =
+      llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+
+  llvm::FunctionType* pre_barrier_type =
+      llvm::FunctionType::get(void_type, {oop_type}, false);
+  llvm::Function* pre_barrier = llvm::cast<llvm::Function>(
+      module.getOrInsertFunction("jeandle.pre_barrier", pre_barrier_type).getCallee());
+  pre_barrier->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+  pre_barrier->addFnAttr(llvm::Attribute::NoInline);
+  pre_barrier->addFnAttr("lower-phase", "1");
+
+  llvm::FunctionType* post_barrier_type =
+      llvm::FunctionType::get(void_type, {oop_type, oop_type}, false);
+  llvm::Function* post_barrier = llvm::cast<llvm::Function>(
+      module.getOrInsertFunction("jeandle.post_barrier", post_barrier_type).getCallee());
+  post_barrier->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+  post_barrier->addFnAttr(llvm::Attribute::NoInline);
+  post_barrier->addFnAttr("lower-phase", "1");
+}
+
 void JeandleCompilation::setup_llvm_module(llvm::MemoryBuffer* template_buffer) {
   // Get template module from the global memory buffer.
   llvm::Expected<std::unique_ptr<llvm::Module>> module_or_error =
@@ -282,6 +305,7 @@ void JeandleCompilation::setup_llvm_module(llvm::MemoryBuffer* template_buffer) 
   _llvm_module->setModuleIdentifier(JeandleFuncSig::method_name(_method));
   _llvm_module->setDataLayout(*_data_layout);
   _llvm_module->setTargetTriple(_target_machine->getTargetTriple());
+  ensure_gc_barrier_declarations(*_llvm_module);
 
   llvm::NamedMDNode* metadata_node = _llvm_module->getOrInsertNamedMetadata(llvm::jeandle::Metadata::JavaMethodCompilation);
   assert(metadata_node != nullptr, "invalid metadata node");
