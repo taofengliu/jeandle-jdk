@@ -125,8 +125,8 @@ bool JeandleVMState::update_phi_nodes(JeandleVMState* income_jvm, llvm::BasicBlo
   llvm::SmallVector<TypedValue>& income_stack = income_jvm->_stack;
 
   if (is_osr) {
-    // For OSR compilation, monitor objects may originate from multiple incoming 
-    // control flow paths (e.g., the OSR entry and the outer loop). 
+    // For OSR compilation, monitor objects may originate from multiple incoming
+    // control flow paths (e.g., the OSR entry and the outer loop).
     // We create PHI nodes to ensure monitor object consistency across these paths.
     for (size_t i = 0; i < income_jvm->locks_size(); i++) {
       assert(!income_jvm->lock_at(i).is_null(), "null lock");
@@ -733,8 +733,8 @@ void JeandleAbstractInterpreter::initialize_VM_state_from_osr_buffer(JeandleVMSt
 
   // OSR Compilation Bailouts:
   // In HotSpot, OSR is restricted to loop headers where the operand stack is empty.
-  // This is because SharedRuntime::OSR_migration_begin is designed to migrate 
-  // only locals and monitors from the interpreter frame; it does not currently account for 
+  // This is because SharedRuntime::OSR_migration_begin is designed to migrate
+  // only locals and monitors from the interpreter frame; it does not currently account for
   // copying operand stack slots into the OSR buffer.
   if (osr_entry_block->stack_size() != 0) {
     JEANDLE_REPORT_ERROR_AND_RET_VOID("OSR starts with non-empty stack");
@@ -888,7 +888,7 @@ void JeandleAbstractInterpreter::check_interpreter_type(ciTypeFlow::Block* osr_e
     // Set the name of current_block.
     current_block->setName("osr_entry_check_local_" + std::to_string(index));
 
-    // Create a block for the success path. 
+    // Create a block for the success path.
     llvm::BasicBlock* next_block = llvm::BasicBlock::Create(*_context, "", _llvm_func);
 
     llvm::Value* cond = nullptr;
@@ -3224,7 +3224,7 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
 
   _jvm->push_lock(lock);
 
-  // R10.X1a: bytecode-level lock depth of the just-pushed monitor. After
+  // bytecode-level lock depth of the just-pushed monitor. After
   // push_lock above, this lock occupies the topmost slot of the
   // JeandleVMState lock stack; its 0-based depth is `locks_size() - 1`.
   // This is the Java-bytecode-level monitor depth — stable across analyzer
@@ -3260,7 +3260,7 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
     assert(LockingMode == LM_LIGHTWEIGHT, "");
     call = call_java_op("jeandle.monitorenter_with_lightweight_lock", {lock.object().value(), lock.lock()});
   }
-  // R10.X1a: tag the monitorenter call with !jeandle.lock_depth so
+  // tag the monitorenter call with !jeandle.lock_depth so
   // jeandle-llvm's PEA pass can read the Java-bytecode-level monitor depth
   // for its narrow lock cascade rule (R10.X1c) and merge-time stack-identity
   // check (R10.X1b). Format: a single i32 holding the 0-based depth.
