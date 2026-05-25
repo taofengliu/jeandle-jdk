@@ -3262,8 +3262,8 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
   }
   // tag the monitorenter call with !jeandle.lock_depth so
   // jeandle-llvm's PEA pass can read the Java-bytecode-level monitor depth
-  // for its narrow lock cascade rule (R10.X1c) and merge-time stack-identity
-  // check (R10.X1b). Format: a single i32 holding the 0-based depth.
+  // for its narrow lock cascade rule and merge-time stack-identity
+  // check. Format: a single i32 holding the 0-based depth.
   // When this metadata is absent (e.g. lit-only LLVM tests), the PEA pass
   // falls back to its analyzer-run-monotonic Order proxy.
   {
