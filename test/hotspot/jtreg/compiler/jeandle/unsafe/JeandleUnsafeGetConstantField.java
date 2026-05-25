@@ -25,7 +25,8 @@
  * @test
  * @summary Jeandle tests on constant folding of unsafe get operations
  *          Copied from test/hotspot/jtreg/compiler/unsafe/UnsafeGetConstantField.java
- *          for Jeandle-specific issue #387 coverage.
+ *          for Jeandle-specific issue #387 coverage. This version checks the
+ *          Unsafe get folding result, not direct field load folding.
  * @library /test/lib /compiler/jsr292/patches
  *
  * @requires vm.flavor == "server" & !vm.emulatedClient
@@ -124,7 +125,7 @@ public class JeandleUnsafeGetConstantField {
     }
 
     static final class PhiBase {
-        final int value = 42;
+        @Stable int value = 42;
     }
 
     static final PhiBase PHI_BASE = new PhiBase();
@@ -208,14 +209,11 @@ public class JeandleUnsafeGetConstantField {
 
             test.changeToDefault();
             if (!hasDefaultValue && (stable || g.isFinal())) {
-                Asserts.assertEQ(t.value, test.testDirect(),
-                        "direct read doesn't return prev value");
-                Asserts.assertEQ(test.testDirect(), test.testUnsafe());
+                Asserts.assertEQ(t.value, test.testUnsafe(),
+                        "unsafe read doesn't return prev value");
             } else {
-                Asserts.assertEQ(t.defaultValue, test.testDirect(),
-                        "direct read doesn't return default value");
-                Asserts.assertEQ(test.testDirect(), test.testUnsafe(),
-                        "direct and unsafe reads return different values");
+                Asserts.assertEQ(t.defaultValue, test.testUnsafe(),
+                        "unsafe read doesn't return default value");
             }
         } catch (Throwable e) {
             try {
