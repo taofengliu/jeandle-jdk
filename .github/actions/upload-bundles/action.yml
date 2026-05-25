@@ -57,7 +57,7 @@ runs:
         if [[ "$jdk_bundle_tar_gz" != "" ]]; then
           mv "$jdk_bundle_tar_gz" "bundles/jdk-${{ inputs.platform }}${{ inputs.debug-suffix }}.tar.gz"
         fi
-        if [[ "$symbols_bundle" != "" ]]; then
+        if [[ "$symbols_bundle" != "" && '${{ inputs.debug-suffix }}' != "" ]]; then
           mv "$symbols_bundle" "bundles/symbols-${{ inputs.platform }}${{ inputs.debug-suffix }}.tar.gz"
         fi
         if [[ "$tests_bundle" != "" ]]; then
