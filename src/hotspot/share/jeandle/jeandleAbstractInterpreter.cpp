@@ -3247,8 +3247,6 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
   // re-visits of the same bytecode within a loop fixpoint, which is what
   // jeandle-llvm's PEA needs for its depth-aware lock cascade
   // (PartialEscape.h:MonitorIdRef / PartialEscapeAnalysis.cpp:LockEnter).
-  // Mirrors Graal's MonitorIdNode.getLockDepth() from
-  // jdk.graal.compiler.nodes.java.MonitorIdNode.
   int lock_depth = _jvm->locks_size() - 1;
   if (lock_depth < 0) {
     lock_depth = 0;  // defensive — shared_lock is only invoked after push.
