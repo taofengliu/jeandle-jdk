@@ -102,18 +102,12 @@ runs:
         # Export the paths
 
         jdk_dir="$GITHUB_WORKSPACE/$(dirname $(find bundles/jdk -name bin -type d))"
-        if [[ -d bundles/symbols ]]; then
-          symbols_dir="$GITHUB_WORKSPACE/$(dirname $(find bundles/symbols -name bin -type d))"
-        else
-          symbols_dir=
-        fi
+        symbols_dir="$GITHUB_WORKSPACE/$(dirname $(find bundles/symbols -name bin -type d))"
         tests_dir="$GITHUB_WORKSPACE/bundles/tests"
 
         if [[ '${{ runner.os }}' == 'Windows' ]]; then
           jdk_dir="$(cygpath $jdk_dir)"
-          if [[ "$symbols_dir" != "" ]]; then
-            symbols_dir="$(cygpath $symbols_dir)"
-          fi
+          symbols_dir="$(cygpath $symbols_dir)"
           tests_dir="$(cygpath $tests_dir)"
         fi
 

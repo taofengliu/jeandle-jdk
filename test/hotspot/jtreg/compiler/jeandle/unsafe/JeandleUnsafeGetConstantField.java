@@ -23,10 +23,12 @@
 
 /*
  * @test
- * @summary Jeandle tests on constant folding of unsafe get operations
+ * @summary Jeandle tests on constant folding of unsafe get operations.
  *          Copied from test/hotspot/jtreg/compiler/unsafe/UnsafeGetConstantField.java
- *          for Jeandle-specific issue #387 coverage. This version checks the
- *          Unsafe get folding result, not direct field load folding.
+ *          for Jeandle-specific issue #387 coverage. This version adds Jeandle
+ *          checks that Unsafe get folding handles final and @Stable fields,
+ *          including constant oop values that flow through control-flow merge.
+ *          Stable array element folding is intentionally left out of this test.
  * @library /test/lib /compiler/jsr292/patches
  *
  * @requires vm.flavor == "server" & !vm.emulatedClient
