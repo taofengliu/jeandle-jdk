@@ -27,21 +27,14 @@
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "memory/allocation.hpp"
 
-// Stable, human-readable label for the chosen lowering shape.  This is the same set of
-// strings the previous JeandleLoweringMode enum produced, derived directly from the
-// impl_kind plus the descriptor's exception-edge / GC-state / deopt facts.
 static const char* lowering_mode_name(const JeandleIntrinsicDecision& decision,
                                       const JeandleIntrinsicDescriptor& desc) {
   const bool needs_unwind_edge = desc.needs_exception_edge();
   switch (decision.impl_kind) {
     case JeandleIntrinsicImplKind::IRInstruction:
     case JeandleIntrinsicImplKind::LLVMBuiltinCall:
-      // No pure-IR descriptor (PureIRInstruction / PureLLVMBuiltin) sets
-      // needs_exception_edge=true (validated in validate_descriptor); the
-      // override below preserves the original semantics in case a future
-      // descriptor introduces such a combination.
       return needs_unwind_edge ? "managed-runtime-invoke" : "pure-llvm";
-    case JeandleIntrinsicImplKind::HotSpotStub:
+    case JeandleIntrinsicImplKind::HotspotStub:
     case JeandleIntrinsicImplKind::SharedRuntime:
       if (needs_unwind_edge) return "managed-runtime-invoke";
       return (desc.needs_gc_state() || desc.may_deopt())
@@ -55,22 +48,16 @@ static const char* lowering_mode_name(const JeandleIntrinsicDecision& decision,
   return "unknown";
 }
 
-static const char* barrier_kind_name(JeandleMemoryBarrierKind kind) {
-  switch (kind) {
-    case JeandleMemoryBarrierKind::None:              return "none";
-    case JeandleMemoryBarrierKind::WeakReferentLoad:  return "weak-referent-load";
-    case JeandleMemoryBarrierKind::RawReferentRead:   return "raw-referent-read";
-    case JeandleMemoryBarrierKind::CardMarkPost:      return "card-mark-post";
-    case JeandleMemoryBarrierKind::VolatileLoad:      return "volatile-load";
-    case JeandleMemoryBarrierKind::VolatileStore:     return "volatile-store";
-  }
-  return "unknown";
+static const char* barrier_kind_name(const JeandleIntrinsicDescriptor& desc) {
+  if (desc.weak_referent_load_barrier()) return "weak-referent-load";
+  if (desc.raw_referent_read_barrier()) return "raw-referent-read";
+  if (desc.card_mark_post_barrier()) return "card-mark-post";
+  if (desc.volatile_load_barrier()) return "volatile-load";
+  if (desc.volatile_store_barrier()) return "volatile-store";
+  return "none";
 }
 
 // Attach a single-string metadata node to any instruction.
-// Used for jeandle.* annotations so they do not contaminate the function
-// attribute group (which would break tests expecting a solo "gc-leaf-function"
-// attribute set).
 static void set_str_metadata(llvm::Instruction& inst, llvm::StringRef key, llvm::StringRef value) {
   llvm::LLVMContext& ctx = inst.getContext();
   inst.setMetadata(key, llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, value)}));
@@ -90,27 +77,19 @@ void JeandleIntrinsicIRSemantics::annotate_instruction(llvm::Instruction& inst,
                                                        const JeandleIntrinsicDescriptor& desc,
                                                        const JeandleIntrinsicDecision& decision,
                                                        const JeandleIntrinsicEntrypoint* entry) {
-  // Observability labels (see class header for the forward-contract rationale).
-  // No LLVM pass consumes these today; they live in IR dumps as a stable plug
-  // point for a future GC-aware / barrier-aware pass.  Stored as named
-  // metadata so they do not pollute function-attribute groups.
   set_str_metadata(inst, "jeandle.intrinsic.id",
                    std::to_string(vmIntrinsics::as_int(desc.id)));
   set_str_metadata(inst, "jeandle.lowering.mode",
                    lowering_mode_name(decision, desc));
   set_str_metadata(inst, "jeandle.semantic.barrier_kind",
-                   barrier_kind_name(desc.barrier_kind));
+                   barrier_kind_name(desc));
 
   if (auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
     llvm::LLVMContext& ctx = inst.getContext();
-    // Real behavioural contract: gc-leaf-function is a function attribute read
-    // by RewriteStatepointsForGC to skip statepoint insertion.  This is the
-    // one IR fact in this file that LLVM actually acts on today.
     if (decision.ir_plan.attach_gc_leaf_attr || (entry != nullptr && entry->is_gc_leaf)) {
       call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
     }
     if (entry != nullptr && entry->well_known_name != nullptr) {
-      // Observability label, same forward-contract rationale as the three above.
       set_str_metadata(inst, "jeandle.runtime.entry", entry->well_known_name);
     }
   }

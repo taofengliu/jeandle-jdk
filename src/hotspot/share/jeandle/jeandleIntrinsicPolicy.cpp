@@ -22,41 +22,19 @@
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 
-// Whether the chosen impl_kind crosses a runtime call boundary that the IR-level
-// pipeline (statepoints, deopt bundles) must observe.
-static bool is_managed_runtime_call(JeandleIntrinsicImplKind impl_kind,
-                                    const JeandleIntrinsicDescriptor& desc) {
-  if (impl_kind != JeandleIntrinsicImplKind::HotSpotStub &&
-      impl_kind != JeandleIntrinsicImplKind::SharedRuntime) {
-    return false;
-  }
-  return desc.needs_gc_state() || desc.may_deopt();
-}
-
 static JeandleIRSemanticPlan make_plan(const JeandleIntrinsicDescriptor& desc,
                                        JeandleIntrinsicImplKind impl_kind) {
   const bool is_pure_llvm = (impl_kind == JeandleIntrinsicImplKind::IRInstruction ||
                              impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall);
-  const bool is_managed   = is_managed_runtime_call(impl_kind, desc);
-  const bool is_leaf_call = (impl_kind == JeandleIntrinsicImplKind::HotSpotStub ||
-                             impl_kind == JeandleIntrinsicImplKind::SharedRuntime) && !is_managed;
+  const bool is_runtime_call = (impl_kind == JeandleIntrinsicImplKind::HotspotStub ||
+                                impl_kind == JeandleIntrinsicImplKind::SharedRuntime);
 
   JeandleIRSemanticPlan plan{};
 
-  // attach_deopt_bundle is required when:
-  //   - the intrinsic itself can deopt;
-  //   - the call site can safepoint: every safepoint is a potential deopt point,
-  //     so it must carry interpreter state. RewriteStatepointsForGC does not need
-  //     that state for its own work (GC root relocation); it merely threads the
-  //     "deopt" bundle into the gc.statepoint's deopt section for HotSpot to use
-  //     at runtime if the safepoint deopts.
-  //   - the call crosses a managed-runtime boundary (call or invoke);
-  //   - the call needs an exception edge (the unwind path crosses Java EH).
-  // JavaOps follow the same uniform rule: a JavaOp that promises (via its
-  // descriptor) not to deopt / safepoint / throw gets no bundle, allowing LLVM
-  // attribute-based DCE and aliasing before inlining.
+  // Any safepoint-capable, deopt-capable, or throwing path needs interpreter
+  // state so HotSpot can deopt or unwind from the emitted call site.
   plan.attach_deopt_bundle = desc.may_deopt() || desc.needs_gc_state() ||
-                             is_managed || desc.needs_exception_edge();
+                             desc.needs_exception_edge();
 
   // gc-leaf-function asserts that this call site does not enter a safepoint;
   // RewriteStatepointsForGC reads it to skip statepoint insertion. It says
@@ -65,7 +43,7 @@ static JeandleIRSemanticPlan make_plan(const JeandleIntrinsicDescriptor& desc,
   plan.attach_gc_leaf_attr = !desc.needs_gc_state() &&
                              !desc.may_deopt() &&
                              !desc.needs_exception_edge() &&
-                             (is_pure_llvm || is_leaf_call);
+                             (is_pure_llvm || is_runtime_call);
 
   plan.needs_exception_edge = desc.needs_exception_edge();
   return plan;
@@ -84,7 +62,7 @@ static JeandleIntrinsicDecision unsupported(const JeandleIntrinsicDescriptor& de
 // Pick the best available HotSpot runtime path, preferring the dedicated stub
 // over the generic SharedRuntime entry.  Returns Unsupported if neither exists.
 static JeandleIntrinsicImplKind try_hotspot_path(const JeandleIntrinsicCapabilities& caps) {
-  if (caps.has_hotspot_stub)   return JeandleIntrinsicImplKind::HotSpotStub;
+  if (caps.has_hotspot_stub)   return JeandleIntrinsicImplKind::HotspotStub;
   if (caps.has_shared_runtime) return JeandleIntrinsicImplKind::SharedRuntime;
   return JeandleIntrinsicImplKind::Unsupported;
 }
@@ -110,13 +88,13 @@ JeandleIntrinsicDecision JeandleIntrinsicPolicy::decide(const JeandleIntrinsicDe
       // Unconditionally supported, no capability query needed.
       return make_decision(desc, JeandleIntrinsicImplKind::LLVMBuiltinCall);
 
-    case JeandleLoweringKind::RuntimeLeafCall:
+    case JeandleLoweringKind::RuntimeCall:
     case JeandleLoweringKind::GuardedHybrid: {
-      // RuntimeLeafCall and GuardedHybrid share identical policy logic: a HotSpot
+      // RuntimeCall and GuardedHybrid share identical policy logic: a HotSpot
       // path wins only when it is preferred AND an actual runtime path exists,
       // otherwise the LLVM builtin. The two descriptor kinds differ only in the
       // lowering function body — a GuardedHybrid lowering (e.g. lower_pow_hybrid)
-      // emits its own fast/slow guard, a RuntimeLeafCall lowering is a straight
+      // emits its own fast/slow guard, a RuntimeCall lowering is a straight
       // call — which policy does not influence. The distinct names are kept as a
       // descriptor-level semantic label.
       JeandleIntrinsicCapabilities caps = JeandleIntrinsicSupport::query(desc);

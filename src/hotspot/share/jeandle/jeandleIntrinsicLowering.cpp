@@ -238,31 +238,6 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
   }
 }
 
-// Pop one operand off the JVM stack picking the right typed pop. Used by the
-// table-driven lowering helpers below where the type is data, not code.
-// Takes JeandleVMState* directly so the helper itself does not need friend
-// access to JeandleAbstractInterpreter's private _jvm.
-static llvm::Value* pop_by_type(JeandleVMState* jvm, BasicType bt) {
-  switch (bt) {
-    case T_INT:    return jvm->ipop();
-    case T_LONG:   return jvm->lpop();
-    case T_FLOAT:  return jvm->fpop();
-    case T_DOUBLE: return jvm->dpop();
-    default: ShouldNotReachHere(); return nullptr;
-  }
-}
-
-// Push a value back onto the JVM stack picking the right typed push.
-static void push_by_type(JeandleVMState* jvm, BasicType bt, llvm::Value* v) {
-  switch (bt) {
-    case T_INT:    jvm->ipush(v); break;
-    case T_LONG:   jvm->lpush(v); break;
-    case T_FLOAT:  jvm->fpush(v); break;
-    case T_DOUBLE: jvm->dpush(v); break;
-    default: ShouldNotReachHere();
-  }
-}
-
 // Spec rows for lower_pure_math: every PureMath intrinsic boils down to
 // CreateIntrinsic(<type>, <llvm intrinsic>, <pop>[, poison flag]) + push.
 // Adding a new pure-math intrinsic = adding one row here, no code.
@@ -317,7 +292,7 @@ bool JeandleIntrinsicLowering::lower_pure_math(const JeandleIntrinsicDescriptor&
     llvm::IRBuilder<>& builder = _interp->_ir_builder;
 
     llvm::SmallVector<llvm::Value*, 2> args;
-    args.push_back(pop_by_type(_interp->_jvm,spec.operand_type));
+    args.push_back(_interp->_jvm->pop(spec.operand_type));
     if (spec.needs_poison_flag) {
       args.push_back(builder.getInt1(false));
     }
@@ -331,7 +306,7 @@ bool JeandleIntrinsicLowering::lower_pure_math(const JeandleIntrinsicDescriptor&
       // e.g. Long.bitCount(long): ctpop gives i64, push as i32.
       result = builder.CreateTrunc(call, JeandleType::java2llvm(spec.result_type, ctx));
     }
-    push_by_type(_interp->_jvm,spec.result_type, result);
+    _interp->_jvm->push(spec.result_type, result);
     return true;
   }
   return false;
@@ -344,14 +319,14 @@ bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescrip
     llvm::LLVMContext& ctx = *_interp->_context;
     llvm::IRBuilder<>& builder = _interp->_ir_builder;
 
-    llvm::Value* src = pop_by_type(_interp->_jvm,spec.src_type);
+    llvm::Value* src = _interp->_jvm->pop(spec.src_type);
     llvm::Value* cast = builder.CreateBitCast(src, JeandleType::java2llvm(spec.dst_type, ctx));
     // CreateBitCast may constant-fold to a llvm::Constant when the source is
     // a constant; only annotate if we actually emitted an instruction.
     if (llvm::Instruction* inst = llvm::dyn_cast<llvm::Instruction>(cast)) {
       annotate_generated_instruction(*inst, desc, decision);
     }
-    push_by_type(_interp->_jvm,spec.dst_type, cast);
+    _interp->_jvm->push(spec.dst_type, cast);
     return true;
   }
   return false;
@@ -398,7 +373,7 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
   llvm::Value* base = _interp->_jvm->dpop();
 
   // Constant fast path: pow(x, 2.0) => x * x.
-  // This overrides the policy decision (IRInstruction instead of LLVMBuiltinCall/HotSpotStub);
+  // This overrides the policy decision (IRInstruction instead of LLVMBuiltinCall/HotspotStub);
   // refine() produces accurate metadata for the emitted instruction.
   if (is_double_constant(exp, 2.0,
                                                          _interp->_module.getDataLayout())) {
@@ -442,7 +417,7 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
 
     builder.SetInsertPoint(slow_block);
     JeandleIntrinsicDecision runtime_decision = JeandleIntrinsicPolicy::refine(
-        decision, desc, JeandleIntrinsicImplKind::HotSpotStub);
+        decision, desc, JeandleIntrinsicImplKind::HotspotStub);
     llvm::Value* slow = emit_runtime_call(desc, runtime_decision, runtime_entry, {base, exp});
     builder.CreateBr(merge_block);
 
@@ -456,7 +431,7 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
   }
 
   // General path: use the impl_kind that policy already resolved.
-  // For LLVMBuiltinCall policy chose llvm.pow; for HotSpotStub/SharedRuntime delegate to runtime.
+  // For LLVMBuiltinCall policy chose llvm.pow; for HotspotStub/SharedRuntime delegate to runtime.
   if (decision.impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall) {
     llvm::Function* pow_fn =
       llvm::Intrinsic::getOrInsertDeclaration(&_interp->_module, llvm::Intrinsic::pow,
@@ -484,6 +459,7 @@ bool JeandleIntrinsicLowering::lower_get_class(const JeandleIntrinsicDescriptor&
 
 bool JeandleIntrinsicLowering::lower_reference_get(const JeandleIntrinsicDescriptor& desc,
                                                    const JeandleIntrinsicDecision& decision) {
+  assert(desc.weak_referent_load_barrier(), "Reference.get must preserve weak referent load barriers");
   llvm::Value* reference = _interp->_jvm->apop();
   _interp->_jvm->apush(emit_java_op_call(desc, decision, {reference}));
   return true;
@@ -641,6 +617,7 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(
 
 bool JeandleIntrinsicLowering::lower_reference_refers_to(const JeandleIntrinsicDescriptor& desc,
                                                           const JeandleIntrinsicDecision& decision) {
+  assert(desc.raw_referent_read_barrier(), "refersTo0 must remain a raw referent read");
   // Stack order: ..., reference (this), obj — pop in reverse
   llvm::Value* obj = _interp->_jvm->apop();
   llvm::Value* reference = _interp->_jvm->apop();
@@ -652,7 +629,7 @@ bool JeandleIntrinsicLowering::lower_reference_refers_to(const JeandleIntrinsicD
 // StringCoding.countPositives(byte[] ba, int off, int len) → int
 //
 // Computes ba_start = &ba[off] and delegates to count_positives_impl(ba_start, len)
-// via a RuntimeLeafCall (gc-leaf, no safepoint, no exception).
+// via a RuntimeCall (gc-leaf, no safepoint, no exception).
 //
 // Stack order (top-of-stack first): len (int), off (int), ba (aref).
 // No receiver — static method.

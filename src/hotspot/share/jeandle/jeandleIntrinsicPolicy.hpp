@@ -32,14 +32,12 @@ enum class JeandleIntrinsicImplKind {
   LLVMBuiltinCall,  // call to a named llvm.* builtin or platform-specific LLVM target intrinsic
                     // (e.g. llvm.fabs, llvm.ctpop, llvm.x86.sse2.pause, llvm.aarch64.hint)
   // Non-pure-IR kinds: cross call boundaries or delegate to the runtime
-  HotSpotStub,
-  SharedRuntime,
+  HotspotStub,      // dedicated HotSpot stub routine, when StubRoutines exposes one
+  SharedRuntime,    // generic SharedRuntime C entry used as the runtime fallback
   JavaOperation
 };
 
-// IR-level annotations consumed when emitting the chosen lowering.  These three flags
-// are derived from impl_kind + descriptor.semantics; there is no separate "mode" enum
-// because the impl_kind already captures the lowering shape.
+// IR-level annotations derived from impl_kind plus descriptor control/memory flags.
 struct JeandleIRSemanticPlan {
   bool attach_deopt_bundle;
   bool attach_gc_leaf_attr;

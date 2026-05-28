@@ -37,17 +37,8 @@ enum JeandleControlFlag : uint8_t {
 };
 
 // Memory-effect facts about an intrinsic.  Combined into descriptor.memory_flags
-// with bitwise OR.  barrier_kind is a separate descriptor field because it is a
-// multi-valued enum tied to GC barrier semantics, orthogonal to the data-flow
-// direction encoded here.
-//
-// Direction bits (MEM_READ / MEM_WRITE) describe the LLVM-visible memory
-// effects of the intrinsic's lowered call site, and are translated into LLVM
-// `memory()` call-site attributes by JeandleIntrinsicLowering when the call is
-// a leaf path (no safepoint / deopt / exception edge).  MEM_ORDERING_ONLY
-// marks fences and similar primitives that constrain ordering without
-// transferring data; it is mutually exclusive with MEM_READ / MEM_WRITE.
-enum JeandleMemoryFlag : uint8_t {
+// with bitwise OR and translated into LLVM call-site memory attributes where safe.
+enum JeandleMemoryFlag : uint16_t {
   MEM_NONE              = 0,
   // The call reads LLVM-visible memory.  Combined with MEM_WRITE for RMW.
   MEM_READ              = 1u << 0,
@@ -56,8 +47,18 @@ enum JeandleMemoryFlag : uint8_t {
   // The call only constrains memory ordering (fence-like).  Mutually exclusive
   // with MEM_READ / MEM_WRITE.
   MEM_ORDERING_ONLY     = 1u << 2,
-  // The lowered IR/call must remain visible to GC-aware statepoint/barrier code.
+  // The lowered IR/call must remain visible to GC-aware statepoint code.
   MEM_NEEDS_GC_STATE    = 1u << 3,
+  MEM_BARRIER_WEAK_REFERENT_LOAD = 1u << 4, // Weak referent load with GC barrier.
+  MEM_BARRIER_RAW_REFERENT_READ  = 1u << 5, // Raw referent read without GC barrier.
+  MEM_BARRIER_CARD_MARK_POST     = 1u << 6, // Post-write card table mark.
+  MEM_BARRIER_VOLATILE_LOAD      = 1u << 7, // Volatile load acquire semantics.
+  MEM_BARRIER_VOLATILE_STORE     = 1u << 8, // Volatile store release semantics.
+  MEM_BARRIER_MASK = MEM_BARRIER_WEAK_REFERENT_LOAD |
+                     MEM_BARRIER_RAW_REFERENT_READ  |
+                     MEM_BARRIER_CARD_MARK_POST     |
+                     MEM_BARRIER_VOLATILE_LOAD      |
+                     MEM_BARRIER_VOLATILE_STORE,
 };
 
 // What lowering paths a descriptor *declares* it can take.  Combined into
@@ -71,20 +72,11 @@ enum JeandleSupportFlag : uint8_t {
   SUPPORT_LLVM_INTRIN   = 1u << 1,
 };
 
-enum class JeandleMemoryBarrierKind {
-  None,
-  WeakReferentLoad,  // Reference.get: GC-specific load barrier required
-  RawReferentRead,   // Reference.refersTo0: intentional raw read, bypasses GC barrier
-  CardMarkPost,      // post-write card table mark
-  VolatileLoad,      // acquire semantics
-  VolatileStore,     // release semantics
-};
-
 enum class JeandleLoweringKind {
   PureIRInstruction, // lower to a bare LLVM IR instruction (bitcast, fence)
   PureLLVMBuiltin,   // lower to a named llvm.* builtin or LLVM target intrinsic
-  RuntimeLeafCall,   // emit a runtime/stub call that does not safepoint or throw
-  GuardedHybrid,     // policy-identical to RuntimeLeafCall; the lowering function
+  RuntimeCall,       // emit a runtime/stub call selected by policy/support checks
+  GuardedHybrid,     // policy-identical to RuntimeCall; the lowering function
                      // body additionally emits a fast/slow guard (e.g. pow(x,2))
   JavaOperation      // delegate complex semantics to a JavaOp runtime glue method
 };
@@ -99,9 +91,7 @@ struct JeandleIntrinsicDescriptor {
   // Bitmask of JeandleControlFlag.
   uint8_t control_flags;
   // Bitmask of JeandleMemoryFlag.
-  uint8_t memory_flags;
-  // GC barrier shape required by the intrinsic, if any.
-  JeandleMemoryBarrierKind barrier_kind;
+  uint16_t memory_flags;
   // Coarse lowering family selected before capability/fallback refinement.
   JeandleLoweringKind lowering_kind;
   // Bitmask of JeandleSupportFlag declaring which lowering paths exist.
@@ -119,6 +109,13 @@ struct JeandleIntrinsicDescriptor {
   bool writes_memory()         const { return (memory_flags  & MEM_WRITE) != 0; }
   bool only_orders_memory()    const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
   bool needs_gc_state()        const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
+  uint16_t barrier_semantics() const { return memory_flags & MEM_BARRIER_MASK; }
+  bool has_barrier_semantics() const { return barrier_semantics() != 0; }
+  bool weak_referent_load_barrier() const { return (memory_flags & MEM_BARRIER_WEAK_REFERENT_LOAD) != 0; }
+  bool raw_referent_read_barrier()  const { return (memory_flags & MEM_BARRIER_RAW_REFERENT_READ) != 0; }
+  bool card_mark_post_barrier()     const { return (memory_flags & MEM_BARRIER_CARD_MARK_POST) != 0; }
+  bool volatile_load_barrier()      const { return (memory_flags & MEM_BARRIER_VOLATILE_LOAD) != 0; }
+  bool volatile_store_barrier()     const { return (memory_flags & MEM_BARRIER_VOLATILE_STORE) != 0; }
   bool supports_hotspot_stub() const { return (support_flags & SUPPORT_HOTSPOT_STUB) != 0; }
   bool supports_llvm_intrin()  const { return (support_flags & SUPPORT_LLVM_INTRIN) != 0; }
 };
