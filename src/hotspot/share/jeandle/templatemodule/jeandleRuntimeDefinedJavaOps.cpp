@@ -20,6 +20,7 @@
 
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/IRBuilder.h"
 
 #include "jeandle/templatemodule/jeandleRuntimeDefinedJavaOps.hpp"
@@ -68,6 +69,19 @@ namespace {
 // But we can pass the external deopt bundle into this empty one via inlining.
 llvm::OperandBundleDef create_empty_deopt_bundle() {
   return llvm::OperandBundleDef("deopt", llvm::SmallVector<llvm::Value*>{});
+}
+
+// C2 emits Op_MemBarCPUOrder after Reference.referent loads to keep the load
+// from being commoned across safepoints, where GC may clear the field. Use an
+// empty side-effecting asm with a memory clobber as the LLVM compiler barrier;
+// it should not lower to a hardware fence.
+void emit_reference_referent_cpu_order_barrier(llvm::IRBuilder<>& ir_builder,
+                                               llvm::LLVMContext& context) {
+  llvm::FunctionType* barrier_ty =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
+  llvm::InlineAsm* barrier =
+      llvm::InlineAsm::get(barrier_ty, "", "~{memory}", /*hasSideEffects=*/true);
+  ir_builder.CreateCall(barrier);
 }
 
 DEF_JAVA_OP(current_thread, 0, llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))
@@ -251,6 +265,7 @@ DEF_JAVA_OP(reference_refers_to, 1, llvm::Type::getInt32Ty(context),
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
   // Raw load: no atomic ordering, no GC barrier.
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
+  emit_reference_referent_cpu_order_barrier(ir_builder, context);
   llvm::Value* is_equal = ir_builder.CreateICmpEQ(referent, compare_to);
   // JVM boolean on the operand stack is i32
   llvm::Value* result = ir_builder.CreateZExt(is_equal, ir_builder.getInt32Ty());
@@ -272,6 +287,7 @@ DEF_JAVA_OP(reference_get, 1,
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
   referent->setAtomic(llvm::AtomicOrdering::Acquire);
+  emit_reference_referent_cpu_order_barrier(ir_builder, context);
   if (UseG1GC) {
     llvm::Function* barrier_func = template_module.getFunction("jeandle.g1_pre_barrier_loaded");
     assert(barrier_func != nullptr, "jeandle.g1_pre_barrier_loaded not found");
