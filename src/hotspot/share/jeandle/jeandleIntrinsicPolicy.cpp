@@ -31,13 +31,20 @@ static JeandleIRSemanticPlan make_plan(const JeandleIntrinsicDescriptor& desc,
 
   JeandleIRSemanticPlan plan{};
 
-  // Any safepoint-capable, deopt-capable, or throwing path needs interpreter
-  // state so HotSpot can deopt or unwind from the emitted call site.
+
+  // attach_deopt_bundle is required when:
+  //   - the intrinsic itself can deopt;
+  //   - the call site can safepoint: every safepoint is a potential deopt point,
+  //     so it must carry interpreter state.
+  //   - the call needs an exception edge (the unwind path crosses Java EH).
+  // JavaOps follow the same uniform rule: a JavaOp that promises (via its
+  // descriptor) not to deopt / safepoint / throw gets no bundle, allowing LLVM
+  // attribute-based DCE and aliasing before inlining.
   plan.attach_deopt_bundle = desc.may_deopt() || desc.needs_gc_state() ||
                              desc.needs_exception_edge();
 
   // gc-leaf-function asserts that this call site does not enter a safepoint;
-  // RewriteStatepointsForGC reads it to skip statepoint insertion. It says
+  // RewriteStatepointsForGC reads it to skip statepoint rewriting. It says
   // nothing about memory reads / writes (those are described separately via
   // MEM_READ / MEM_WRITE for LLVM `memory()` attribute generation).
   plan.attach_gc_leaf_attr = !desc.needs_gc_state() &&
