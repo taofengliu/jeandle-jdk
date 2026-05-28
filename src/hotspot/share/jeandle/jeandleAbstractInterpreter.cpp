@@ -125,8 +125,8 @@ bool JeandleVMState::update_phi_nodes(JeandleVMState* income_jvm, llvm::BasicBlo
   llvm::SmallVector<TypedValue>& income_stack = income_jvm->_stack;
 
   if (is_osr) {
-    // For OSR compilation, monitor objects may originate from multiple incoming 
-    // control flow paths (e.g., the OSR entry and the outer loop). 
+    // For OSR compilation, monitor objects may originate from multiple incoming
+    // control flow paths (e.g., the OSR entry and the outer loop).
     // We create PHI nodes to ensure monitor object consistency across these paths.
     for (size_t i = 0; i < income_jvm->locks_size(); i++) {
       assert(!income_jvm->lock_at(i).is_null(), "null lock");
@@ -733,8 +733,8 @@ void JeandleAbstractInterpreter::initialize_VM_state_from_osr_buffer(JeandleVMSt
 
   // OSR Compilation Bailouts:
   // In HotSpot, OSR is restricted to loop headers where the operand stack is empty.
-  // This is because SharedRuntime::OSR_migration_begin is designed to migrate 
-  // only locals and monitors from the interpreter frame; it does not currently account for 
+  // This is because SharedRuntime::OSR_migration_begin is designed to migrate
+  // only locals and monitors from the interpreter frame; it does not currently account for
   // copying operand stack slots into the OSR buffer.
   if (osr_entry_block->stack_size() != 0) {
     JEANDLE_REPORT_ERROR_AND_RET_VOID("OSR starts with non-empty stack");
@@ -888,7 +888,7 @@ void JeandleAbstractInterpreter::check_interpreter_type(ciTypeFlow::Block* osr_e
     // Set the name of current_block.
     current_block->setName("osr_entry_check_local_" + std::to_string(index));
 
-    // Create a block for the success path. 
+    // Create a block for the success path.
     llvm::BasicBlock* next_block = llvm::BasicBlock::Create(*_context, "", _llvm_func);
 
     llvm::Value* cond = nullptr;
@@ -2592,6 +2592,7 @@ void JeandleAbstractInterpreter::do_array_load(BasicType basic_type) {
               T_OBJECT, llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace));
 
       // Attach element type metadata if the array's type is known.
+      // TODO: maybe we can do this in LLVM side, then we can use context-sensitive type information of array.
       if (llvm::Instruction* load_inst = llvm::dyn_cast<llvm::Instruction>(load_value)) {
         llvm::jeandle::JavaType array_type = llvm::jeandle::getJavaType(array_ref);
         if (array_type.isKnown()) {
@@ -3345,14 +3346,7 @@ void JeandleAbstractInterpreter::null_check(llvm::Value* obj) {
 
   llvm::jeandle::JavaType obj_type = llvm::jeandle::getJavaType(obj);
 
-  // Directly trigger an uncommon trap for null checks on an unloaded oop type,
-  // and let the interpreter handle the subsequent loading and initialization.
-  if (obj_type.isKnown()) {
-    builtin_throw(Deoptimization::Reason_null_check, null_check_fail);
-  } else {
-    uncommon_trap(Deoptimization::Reason_null_check,
-                  Deoptimization::Action_maybe_recompile, null_check_fail);
-  }
+  builtin_throw(Deoptimization::Reason_null_check, null_check_fail);
 
   _ir_builder.SetInsertPoint(null_check_pass);
   _block->set_tail_llvm_block(null_check_pass);
