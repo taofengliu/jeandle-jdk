@@ -183,7 +183,7 @@ bool jeandle_is_effectively_final(uintptr_t klass_ptr) {
   return false;
 }
 
-// R12.P4a: returns true iff the klass declares (or inherits) a non-trivial
+// returns true iff the klass declares (or inherits) a non-trivial
 // finalize() override. PEA refuses to virtualize allocations of such
 // classes because HotSpot must register the finalizer at the original
 // allocation site; eliding the alloc would skip that registration and
@@ -198,7 +198,7 @@ bool jeandle_has_finalizer(uintptr_t klass_ptr) {
   return InstanceKlass::cast(k)->has_finalizer();
 }
 
-// R12.P4b: returns true iff the klass is safe to virtualize. Mirrors
+// returns true iff the klass is safe to virtualize. Mirrors
 // Graal's MetaAccessExtensionProvider.canVirtualize: identity-sensitive
 // classes (java.lang.ref.Reference subtypes, java.lang.Thread subtypes,
 // and any other class whose lifecycle is observable through global
