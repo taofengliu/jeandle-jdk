@@ -187,8 +187,7 @@ bool jeandle_is_effectively_final(uintptr_t klass_ptr) {
 // finalize() override. PEA refuses to virtualize allocations of such
 // classes because HotSpot must register the finalizer at the original
 // allocation site; eliding the alloc would skip that registration and
-// break finalize() semantics. Mirrors Graal's NewInstanceNode +
-// RegisterFinalizerNode interaction. For null klass inputs we return
+// break finalize() semantics. For null klass inputs we return
 // false defensively (PEA will already short-circuit on a missing klass,
 // but extra safety is cheap).
 bool jeandle_has_finalizer(uintptr_t klass_ptr) {
@@ -198,8 +197,7 @@ bool jeandle_has_finalizer(uintptr_t klass_ptr) {
   return InstanceKlass::cast(k)->has_finalizer();
 }
 
-// returns true iff the klass is safe to virtualize. Mirrors
-// Graal's MetaAccessExtensionProvider.canVirtualize: identity-sensitive
+// returns true iff the klass is safe to virtualize: identity-sensitive
 // classes (java.lang.ref.Reference subtypes, java.lang.Thread subtypes,
 // and any other class whose lifecycle is observable through global
 // runtime state) cannot have their allocations elided because the
