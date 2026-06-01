@@ -23,57 +23,41 @@
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Value.h"
 
-#include "jeandle/jeandleIntrinsicPolicy.hpp"
+#include "jeandle/jeandleIntrinsicCallInfo.hpp"
 
 class JeandleAbstractInterpreter;
-
 struct JeandleIntrinsicEntrypoint;
 
-// Translates an intrinsic decision into LLVM IR-level facts: operand bundles,
-// call attributes, and metadata.  This is its own layer in the framework,
-// peer to Policy and Lowering rather than a continuation of Policy:
+// Translates a lowered intrinsic into LLVM IR-level facts consumed by downstream
+// passes: the deopt operand bundle and the gc-leaf-function attribute.
 //
-//   Policy answers "which impl_kind should we use here".
-//   IRSemantics answers "given that impl_kind, what IR-level facts must be
-//   attached so downstream LLVM passes behave correctly and so the lowering
-//   contract is observable in IR dumps".
-//   Lowering answers "now emit the actual instructions".
+//   - build_operand_bundles attaches the "deopt" bundle carrying interpreter
+//     state for a potential deopt at the call's safepoint; RewriteStatepointsForGC
+//     threads it into gc.statepoint.
+//   - annotate_instruction stamps the "gc-leaf-function" attribute, read by
+//     RewriteStatepointsForGC to skip statepoint rewriting on leaf calls.
 //
-// IRSemantics evolves on its own axis: new GC-aware metadata, new alias/
-// noalias attributes, new keys synchronised with jeandle-llvm passes — all
-// land here without touching Policy or the descriptor.  It depends on the
-// LLVM headers and on AbstractInterpreter; Policy stays ciMethod-only.
-//
-// Two kinds of facts are attached to the emitted IR here:
-//
-//   1. Behavioural contracts consumed by LLVM passes today.
-//      - The "gc-leaf-function" function attribute is read by
-//        RewriteStatepointsForGC to skip statepoint rewriting on leaf calls.
-//      - The "deopt" operand bundle (built by build_operand_bundles) carries the
-//        interpreter state for a potential deopt at the call's safepoint.
-//        RewriteStatepointsForGC threads it into the gc.statepoint's deopt
-//        section; HotSpot consumes it at runtime only if the safepoint deopts.
-//
-//   2. Observability labels reserved as a forward contract for GC-aware /
-//      barrier-aware LLVM passes that have not yet been written:
-//        jeandle.intrinsic.id, jeandle.lowering.mode,
-//        jeandle.semantic.barrier_kind, jeandle.runtime.entry.
-//      These have no LLVM-side consumer today; they appear in IR dumps and
-//      serve as a stable place for a future pass (e.g. one that reads
-//      barrier_kind to emit collector-specific barriers) to plug in without
-//      re-threading the descriptor through the lowering layer.  Treat them as
-//      part of the IR contract: keep the strings stable, do not relocate.
+// annotate_instruction does NOT currently emit any jeandle.* metadata.  The
+// descriptor carries barrier_kind as the GC barrier semantic that a future late
+// GC-barrier LLVM pass will need (analogous to the array GC barrier late
+// insertion), but how that semantic is threaded to LLVM is not decided yet, so
+// nothing is stamped (see the TODO in the .cpp).  The observability-only keys
+// (jeandle.intrinsic.id / jeandle.lowering.mode / jeandle.runtime.entry) were
+// dropped in the call-shape refactor as they had no consumer.
 class JeandleIntrinsicIRSemantics : public AllStatic {
  public:
-  static llvm::SmallVector<llvm::OperandBundleDef, 1> build_operand_bundles(JeandleAbstractInterpreter* interp,
-                                                                             const JeandleIRSemanticPlan& plan);
+  static llvm::SmallVector<llvm::OperandBundleDef, 1> build_operand_bundles(
+      JeandleAbstractInterpreter* interp, bool attach_deopt_bundle);
   static void annotate_instruction(llvm::Instruction& inst,
                                    const JeandleIntrinsicDescriptor& desc,
-                                   const JeandleIntrinsicDecision& decision,
                                    const JeandleIntrinsicEntrypoint* entry = nullptr);
+  // Translate the call_info's memory flags into an LLVM `memory()` call-site
+  // attribute.  The caller (emit_callsite) applies it only on the plain-call
+  // path; the helper itself is also a no-op for any call that could safepoint
+  // (gc-state / deopt / exception edge).
+  static void apply_memory_attr(llvm::CallBase* call, const JeandleCallInfo& ci);
 };
 
 #endif // SHARE_JEANDLE_INTRINSIC_IR_SEMANTICS_HPP

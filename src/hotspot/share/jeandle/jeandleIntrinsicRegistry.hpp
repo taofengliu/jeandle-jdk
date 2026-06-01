@@ -11,6 +11,10 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #ifndef SHARE_JEANDLE_INTRINSIC_REGISTRY_HPP
@@ -23,101 +27,81 @@
 
 class ciMethod;
 
-// Control-flow facts about an intrinsic.  Combined into descriptor.control_flags
-// with bitwise OR.  Intentionally an unscoped enum so descriptors can write
-// `CTRL_MAY_DEOPT | CTRL_NEEDS_EXCEPTION_EDGE` without operator overloads, and
-// so unset entries can simply write CTRL_NONE.
-enum JeandleControlFlag : uint8_t {
-  CTRL_NONE                 = 0,
-  // The intrinsic lowering can transfer control to uncommon_trap/deopt.
-  CTRL_MAY_DEOPT            = 1u << 0,
-  // The intrinsic may throw a Java exception from the lowered path and needs
-  // invoke-style exception continuation handling, not just deopt replay.
-  CTRL_NEEDS_EXCEPTION_EDGE = 1u << 1,
+// Defined in jeandleIntrinsicCallInfo.hpp.  That header pulls in LLVM types
+// (Intrinsic::ID, FunctionCallee), so it is kept out of this descriptor header:
+// the base descriptor stays LLVM-free and only holds a pointer to the call info.
+struct JeandleCallInfo;
+
+// Coarse lowering family — selects which lowering routine handles the intrinsic:
+//
+//   PureLLVM — bare LLVM IR / inline-asm / uncommon_trap.  Emits no semantic
+//              call site, so it carries no JeandleCallInfo (call_info == nullptr).
+//   Hybrid   — a hand-written lowering that wraps a call site in guards or
+//              fast paths (Math.pow, StringCoding.countPositives).
+//   Call     — fixed shape "pop args -> call the callee once -> push result",
+//              handled generically by emit_simple_call_intrinsic.
+//
+// Hybrid and Call both emit a call site and therefore always carry a
+// JeandleCallInfo (call_info != nullptr).
+enum class JeandleLoweringKind : uint8_t {
+  PureLLVM,
+  Hybrid,
+  Call
 };
 
-// Memory-effect facts about an intrinsic.  Combined into descriptor.memory_flags
-// with bitwise OR and translated into LLVM call-site memory attributes where safe.
-enum JeandleMemoryFlag : uint16_t {
-  MEM_NONE              = 0,
-  // The call reads LLVM-visible memory.  Combined with MEM_WRITE for RMW.
-  MEM_READ              = 1u << 0,
-  // The call writes LLVM-visible memory.
-  MEM_WRITE             = 1u << 1,
-  // The call only constrains memory ordering (fence-like).  Mutually exclusive
-  // with MEM_READ / MEM_WRITE.
-  MEM_ORDERING_ONLY     = 1u << 2,
-  // The lowered IR/call must remain visible to GC-aware statepoint code.
-  MEM_NEEDS_GC_STATE    = 1u << 3,
-  MEM_BARRIER_WEAK_REFERENT_LOAD = 1u << 4, // Weak referent load with GC barrier.
-  MEM_BARRIER_RAW_REFERENT_READ  = 1u << 5, // Raw referent read without GC barrier.
-  MEM_BARRIER_CARD_MARK_POST     = 1u << 6, // Post-write card table mark.
-  MEM_BARRIER_VOLATILE_LOAD      = 1u << 7, // Volatile load acquire semantics.
-  MEM_BARRIER_VOLATILE_STORE     = 1u << 8, // Volatile store release semantics.
-  MEM_BARRIER_MASK = MEM_BARRIER_WEAK_REFERENT_LOAD |
-                     MEM_BARRIER_RAW_REFERENT_READ  |
-                     MEM_BARRIER_CARD_MARK_POST     |
-                     MEM_BARRIER_VOLATILE_LOAD      |
-                     MEM_BARRIER_VOLATILE_STORE,
-};
-
-// What lowering paths a descriptor *declares* it can take.  Combined into
-// descriptor.support_flags with bitwise OR.  Per-VM availability of those paths
-// (stub installed, CPU feature present) is a runtime check in JeandleIntrinsicSupport.
-enum JeandleSupportFlag : uint8_t {
-  SUPPORT_NONE          = 0,
-  // A HotSpot-generated stub or SharedRuntime fallback is an available impl.
-  SUPPORT_HOTSPOT_STUB  = 1u << 0,
-  // LLVM has a builtin or direct IR representation for this intrinsic.
-  SUPPORT_LLVM_INTRIN   = 1u << 1,
-};
-
-enum class JeandleLoweringKind {
-  PureIRInstruction, // lower to a bare LLVM IR instruction (bitcast, fence)
-  PureLLVMBuiltin,   // lower to a named llvm.* builtin or LLVM target intrinsic
-  RuntimeCall,       // emit a runtime/stub call selected by policy/support checks
-  GuardedHybrid,     // policy-identical to RuntimeCall; the lowering function
-                     // body additionally emits a fast/slow guard (e.g. pow(x,2))
-  JavaOperation      // delegate complex semantics to a JavaOp runtime glue method
+// GC barrier semantic of an intrinsic.  This is *annotation only*: it never
+// drives lowering branch selection.  It is reserved data for a future late
+// GC-barrier LLVM pass (analogous to the array GC barrier late insertion) that
+// would insert the collector-specific barrier — e.g. the G1 SATB pre-barrier for
+// a weak referent load — after optimization and before JavaOperationLower(1)
+// inlines the JavaOp body.  How the kind is threaded to LLVM (named metadata on
+// the call site? an operand bundle? a marker intrinsic?) is NOT decided yet, so
+// nothing is emitted from it today (validate_descriptor only checks it for
+// consistency); meanwhile the G1 pre-barrier stays inside the JavaOp body for
+// correctness.  It is lowering-independent (a future inlined load/store could
+// carry the same kind), so it lives on the base descriptor, not in
+// JeandleCallInfo.  See jeandle-docs/intrinsics/pending-barrier-semantic-stability.md.
+// Barriers are mutually exclusive, so a scoped enum models them better than a bitmask.
+enum class JeandleBarrierKind : uint8_t {
+  None,
+  WeakReferentLoad,  // weak/soft referent load needing a keep-alive (SATB) barrier
+  RawReferentRead,   // raw referent identity read, no barrier (suppression marker)
+  CardMarkPost,      // post-write card-table mark
+  VolatileLoad,      // volatile load acquire
+  VolatileStore,     // volatile store release
 };
 
 using JeandleTrapReasonMask = uint32_t;
 static_assert(Deoptimization::Reason_LIMIT <= 32,
               "JeandleTrapReasonMask must be widened");
 
+// Base descriptor: one row per intrinsic Jeandle can lower.  It holds only the
+// admission-time facts (identity, lowering family, trap throttle).  Everything
+// tied to emitting a call site — control/memory semantics, callee identity and
+// operand-stack shape — lives in JeandleCallInfo, reached through call_info.
+//
+// call_info is nullptr for pure-IR PureLLVM intrinsics and non-null for every
+// Call / Hybrid intrinsic.
 struct JeandleIntrinsicDescriptor {
   // VM intrinsic ID being described.  This is also the O(1) lookup-table key.
-  vmIntrinsics::ID id;
-  // Bitmask of JeandleControlFlag.
-  uint8_t control_flags;
-  // Bitmask of JeandleMemoryFlag.
-  uint16_t memory_flags;
-  // Coarse lowering family selected before capability/fallback refinement.
-  JeandleLoweringKind lowering_kind;
-  // Bitmask of JeandleSupportFlag declaring which lowering paths exist.
-  uint8_t support_flags;
-  // JavaOp symbol used only by JavaOperation descriptors; nullptr otherwise.
-  const char* java_op_name;
+  vmIntrinsics::ID       id;
+  // Coarse lowering family; see JeandleLoweringKind.
+  JeandleLoweringKind    lowering_kind;
   // Deoptimization reasons that throttle admission when too many traps occurred
-  // at the invoke site.  Zero means no trap-based throttling.
-  JeandleTrapReasonMask trap_throttle_mask;
+  // at the invoke site.  Zero means no trap-based throttling.  Read at admission
+  // time (JeandleAbstractInterpreter::try_lower_intrinsic), independent of any
+  // call site, so it stays on the base descriptor.
+  JeandleTrapReasonMask  trap_throttle_mask;
+  // Call-site semantics + callee + stack shape.  nullptr iff lowering_kind is
+  // PureLLVM.
+  const JeandleCallInfo* call_info;
+  // GC barrier semantic source: reserved data for a future late GC-barrier pass.
+  // Not emitted anywhere today and never drives lowering.  Defaulted so rows that
+  // omit it read as JeandleBarrierKind::None.
+  JeandleBarrierKind     barrier_kind = JeandleBarrierKind::None;
 
-  // Inline accessors so consumers can read named flags without bit-twiddling.
-  bool may_deopt()             const { return (control_flags & CTRL_MAY_DEOPT) != 0; }
-  bool needs_exception_edge()  const { return (control_flags & CTRL_NEEDS_EXCEPTION_EDGE) != 0; }
-  bool reads_memory()          const { return (memory_flags  & MEM_READ) != 0; }
-  bool writes_memory()         const { return (memory_flags  & MEM_WRITE) != 0; }
-  bool only_orders_memory()    const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
-  bool needs_gc_state()        const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
-  uint16_t barrier_semantics() const { return memory_flags & MEM_BARRIER_MASK; }
-  bool has_barrier_semantics() const { return barrier_semantics() != 0; }
-  bool weak_referent_load_barrier() const { return (memory_flags & MEM_BARRIER_WEAK_REFERENT_LOAD) != 0; }
-  bool raw_referent_read_barrier()  const { return (memory_flags & MEM_BARRIER_RAW_REFERENT_READ) != 0; }
-  bool card_mark_post_barrier()     const { return (memory_flags & MEM_BARRIER_CARD_MARK_POST) != 0; }
-  bool volatile_load_barrier()      const { return (memory_flags & MEM_BARRIER_VOLATILE_LOAD) != 0; }
-  bool volatile_store_barrier()     const { return (memory_flags & MEM_BARRIER_VOLATILE_STORE) != 0; }
-  bool supports_hotspot_stub() const { return (support_flags & SUPPORT_HOTSPOT_STUB) != 0; }
-  bool supports_llvm_intrin()  const { return (support_flags & SUPPORT_LLVM_INTRIN) != 0; }
+  bool has_call_info() const { return call_info != nullptr; }
+  bool has_barrier()   const { return barrier_kind != JeandleBarrierKind::None; }
 };
 
 class JeandleIntrinsicRegistry : public AllStatic {

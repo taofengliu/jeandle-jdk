@@ -24,26 +24,25 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Module.h"
 
-#include "jeandle/jeandleIntrinsicPolicy.hpp"
-
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "classfile/vmIntrinsics.hpp"
 #include "memory/allocation.hpp"
 
+// Materialized runtime callee plus the IR-level facts a lowering needs to emit a
+// call to it.  The libm math family is resolved directly from JeandleCallInfo's
+// stub_callee_fn / shared_callee_fn function pointers (see
+// JeandleIntrinsicLowering::resolve_runtime_callee), so it no longer needs a
+// resolver here.  countPositives keeps a dedicated resolver because it chooses
+// between a SIMD adapter stub and a scalar fallback that do not follow the
+// id-based naming convention.
 struct JeandleIntrinsicEntrypoint {
   llvm::FunctionCallee callee;
   llvm::CallingConv::ID calling_conv;
   bool is_gc_leaf;
-  const char* well_known_name;
 };
 
 class JeandleIntrinsicEntrypoints : public AllStatic {
  public:
-  static bool resolve_math(vmIntrinsics::ID id,
-                           JeandleIntrinsicImplKind impl_kind,
-                           llvm::Module& module,
-                           JeandleIntrinsicEntrypoint& out);
-
   static bool resolve_count_positives(llvm::Module& module,
                                       JeandleIntrinsicEntrypoint& out);
 };

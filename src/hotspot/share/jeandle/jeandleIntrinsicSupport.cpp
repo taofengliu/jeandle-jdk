@@ -21,6 +21,7 @@
 
 #include "jeandle/jeandle_globals.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
+#include "jeandle/jeandleIntrinsicCallInfo.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "classfile/vmIntrinsics.hpp"
@@ -96,10 +97,13 @@ static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleIntrinsicCapabilitie
 }
 
 JeandleIntrinsicCapabilities JeandleIntrinsicSupport::query(const JeandleIntrinsicDescriptor& desc) {
+  assert(desc.call_info != nullptr,
+         "capability query is only meaningful for Call/Hybrid intrinsics");
+  const JeandleCallInfo& ci = *desc.call_info;
   JeandleIntrinsicCapabilities caps{};
-  caps.has_llvm_builtin  = desc.supports_llvm_intrin() && cpu_supports_llvm_builtin(desc.id);
+  caps.has_llvm_builtin  = ci.supports_llvm_intrin() && cpu_supports_llvm_builtin(desc.id);
   caps.hotspot_preferred = JeandleUseHotspotIntrinsics;
-  if (desc.supports_hotspot_stub()) {
+  if (ci.supports_hotspot_stub()) {
     probe_hotspot_stubs(desc.id, caps);
   }
   return caps;

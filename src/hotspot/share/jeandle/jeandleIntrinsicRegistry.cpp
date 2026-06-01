@@ -11,13 +11,11 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
- *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
+#include "jeandle/jeandleIntrinsicCallInfo.hpp"
+#include "jeandle/jeandleRuntimeRoutine.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "ci/ciMethod.hpp"
@@ -25,105 +23,186 @@
 // =============================================================================
 // How to add a new intrinsic to Jeandle
 // -----------------------------------------------------------------------------
-// The framework has four touch points: descriptor (this file), support, policy,
-// and lowering. A new intrinsic almost always touches descriptor + lowering and
-// sometimes support; policy is rarely changed.
+// Two layers describe an intrinsic:
 //
-// 1. Pick a JeandleLoweringKind that fits the intrinsic's shape:
-//      PureIRInstruction — bare LLVM IR (bitcast, fence). No runtime path.
-//      PureLLVMBuiltin   — named llvm.* builtin or target intrinsic (sqrt, abs,
-//                          ctpop). No runtime path.
-//      RuntimeCall       — call into a HotSpot stub or SharedRuntime entry.
-//      GuardedHybrid     — runtime path is preferred when available but the
-//                          lower_* helper itself emits a fast/slow guard
-//                          (e.g. lower_pow_hybrid).
-//      JavaOperation     — call into a Jeandle-defined JavaOp; supply
-//                          java_op_name. Use this for intrinsics that need
-//                          full IR-level semantics (GC barriers, type checks).
+//   JeandleIntrinsicDescriptor (base, registry.hpp) — admission-time facts:
+//       id, lowering_kind, trap_throttle_mask, call_info, barrier_kind.
+//   JeandleCallInfo (callinfo.hpp) — everything needed only when the lowering
+//       emits a call site: control/memory/support flags, callee identity and
+//       operand-stack shape.
 //
-// 2. Add a JeandleIntrinsicDescriptor entry to _intrinsic_table below.
-//    Field guide (see JeandleIntrinsicDescriptor for full definitions):
-//      id              — vmIntrinsics::_xxx, must satisfy vmIntrinsics::is_valid_id
-//      lowering_kind   — one of the kinds above
-//      support_flags   — bitmask of SUPPORT_LLVM_INTRIN / SUPPORT_HOTSPOT_STUB.
-//      needs_gc_state  — true if the call may observe heap state during a GC
-//                        (forces statepoint bundle attachment).
-//      may_deopt       — true if the lowering may emit uncommon_trap.
-//      needs_exception_edge — true if the call can throw a Java exception and
-//                        must be lowered as `invoke`.
-//      trap_throttle_mask — bitmask of Deoptimization::DeoptReason values that
-//                        cause the intrinsic to be marked Unsupported when the
-//                        caller has hit too_many_traps at this bci.
-//      java_op_name    — required iff lowering_kind == JavaOperation.
+// Most intrinsics are ONE LINE in a table macro below.  Each table macro is
+// expanded twice (X-macro): once to define a `static constexpr JeandleCallInfo
+// ci_<name>`, once to emit the base-descriptor row pointing at it.  Pick the
+// table by *shape*:
 //
-// 3. jeandleIntrinsicSupport.cpp — add a probe for the HotSpot stub or
-//    SharedRuntime entry if support_flags advertises one. Pure IR and pure
-//    JavaOp intrinsics need no change here.
+//   JEANDLE_CALL_LLVM_BUILTIN_TABLE — Call lowered to a single llvm.* builtin,
+//       one operand in / one result out, same type.  `V(name, intrinsic, type)`.
+//       CPU-feature gating (floor/ceil/rint) lives in Support::query, not here.
+//   JEANDLE_CALL_RUNTIME_STUB_TABLE — Call backed by a HotSpot runtime stub /
+//       SharedRuntime routine, with the llvm builtin as fallback; the stub /
+//       SharedRuntime resolvers are derived from `name` by token paste.
+//       `V(name, intrinsic, well_known)`.  NOTE: currently models the single
+//       "double in -> double out" shape only (libm math today); a differently
+//       shaped runtime-stub intrinsic needs its own row/table.
+//   JEANDLE_CALL_JAVAOP_TABLE — Call delegating to a JavaOp.
+//       `V(name, java_op, ctrl, mem, barrier, arg_count, result, arg_types...)`.
+//   JEANDLE_PURE_TABLE — PureLLVM (bare IR / inline-asm / uncommon_trap); no
+//       call site, call_info == nullptr.  `V(name)`.
 //
-// 4. jeandleIntrinsicPolicy.cpp — usually no change. decide() already handles
-//    every JeandleLoweringKind. Only touch it if you introduce a new strategy.
-//
-// 5. jeandleIntrinsicLowering.cpp — add `case vmIntrinsics::_yourId:` to lower()
-//    routing to an existing lower_* helper (when the body shape is already
-//    covered) or write a new leaf handler. Reuse the shared emit helpers
-//    (emit_runtime_call / emit_runtime_invoke / emit_java_op_call /
-//    emit_java_op_invoke / annotate_generated_instruction) where possible.
-//
-// 6. For JavaOperation intrinsics: define the JavaOp body in either
-//    templatemodule/template.ll or jeandleRuntimeDefinedJavaOps.cpp.
-//
-// 7. Add a jtreg test under test/hotspot/jtreg/compiler/jeandle/. The
-//    `jeandle.lowering.mode` metadata attached by annotate_generated_instruction
-//    is a stable hook for IR-level assertions.
+// Intrinsics that do not fit a table (Hybrid bodies, trap-throttled PureLLVM) are
+// written out explicitly right after the tables.  After adding a row:
+//   - Support::query (jeandleIntrinsicSupport.cpp) — only if a runtime/CPU-gated
+//     path is advertised.
+//   - Lowering (jeandleIntrinsicLowering.cpp) — Call needs no code; Hybrid /
+//     PureLLVM add a `case` routed to a lower_* helper.
+//   - JavaOp callees — define the body in template.ll / jeandleRuntimeDefinedJavaOps.cpp.
+//   - A jtreg test under test/hotspot/jtreg/compiler/jeandle/.
 // =============================================================================
 
 static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptReason reason) {
   return JeandleTrapReasonMask(1u) << static_cast<uint>(reason);
 }
 
+// ---- One-line intrinsic tables (see the header comment for the column guide) ----
+
+// Call lowered to a single llvm.* builtin: one operand in, one result out, same
+// type.  Columns:
+//   vm_name       — vmIntrinsics::_<vm_name> (also the ci_<vm_name> symbol)
+//   llvm_builtin  — llvm::Intrinsic::<llvm_builtin> id
+//   operand_type  — BasicType of the single operand AND the result (same type)
+#define JEANDLE_CALL_LLVM_BUILTIN_TABLE(V) \
+  /*   vm_name      llvm_builtin  operand_type */ \
+  V(dabs,         fabs,  T_DOUBLE)         \
+  V(fabs,         fabs,  T_FLOAT)          \
+  V(bitCount_i,   ctpop, T_INT)            \
+  V(dsqrt,        sqrt,  T_DOUBLE)         \
+  V(dsqrt_strict, sqrt,  T_DOUBLE)         \
+  V(floor,        floor, T_DOUBLE)         \
+  V(ceil,         ceil,  T_DOUBLE)         \
+  V(rint,         rint,  T_DOUBLE)
+
+// Call backed by a HotSpot runtime stub / SharedRuntime routine (one double in,
+// one double out — libm math is the only user today).  The stub and SharedRuntime
+// resolvers are derived from vm_name by token paste (StubRoutines_<vm_name>_callee
+// / SharedRuntime_<vm_name>_callee); the llvm builtin is the fallback when no
+// runtime path is available/preferred.  Columns:
+//   vm_name       — vmIntrinsics::_<vm_name>; also drives the resolver names
+//   llvm_builtin  — llvm::Intrinsic::<llvm_builtin> id (builtin fallback)
+#define JEANDLE_CALL_RUNTIME_STUB_TABLE(V) \
+  /*   vm_name  llvm_builtin */  \
+  V(dsin,   sin)   \
+  V(dcos,   cos)   \
+  V(dtan,   tan)   \
+  V(dlog,   log)   \
+  V(dlog10, log10) \
+  V(dexp,   exp)
+
+// Call delegating to a JavaOp.  Columns:
+//   vm_name, java_op_name, control_flags, memory_flags, barrier_kind,
+//   arg_count, result_type, arg_types... (in call-argument order)
+#define JEANDLE_CALL_JAVAOP_TABLE(V)                                                                     \
+  V(getClass,                   "jeandle.get_class",          CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, None,             1, T_OBJECT, T_OBJECT)            \
+  V(Reference_get,              "jeandle.reference_get",      CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, WeakReferentLoad, 1, T_OBJECT, T_OBJECT)            \
+  V(Reference_refersTo0,        "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead,  2, T_INT,    T_OBJECT, T_OBJECT)  \
+  V(PhantomReference_refersTo0, "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead,  2, T_INT,    T_OBJECT, T_OBJECT)  \
+  V(newArray,                   "jeandle.new_array",          CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE,          None,             2, T_OBJECT, T_OBJECT, T_INT)
+
+#define JEANDLE_PURE_TABLE(V)    \
+  V(iabs)                        \
+  V(labs)                        \
+  V(bitCount_l)                  \
+  V(floatToRawIntBits)           \
+  V(intBitsToFloat)              \
+  V(doubleToRawLongBits)         \
+  V(longBitsToDouble)            \
+  V(loadFence)                   \
+  V(storeFence)                  \
+  V(fullFence)                   \
+  V(onSpinWait)                  \
+  V(blackhole)
+
+// ---- Pass 1: define a JeandleCallInfo per Call/JavaOp row. ----
+#define JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO(VM_NAME, LLVM_BUILTIN, OPERAND_TYPE)    \
+  static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
+    CTRL_NONE, MEM_NONE, SUPPORT_LLVM_INTRIN,                                         \
+    JeandleCalleeKind::LLVMBuiltin, nullptr, llvm::Intrinsic::LLVM_BUILTIN,           \
+    nullptr, nullptr, { OPERAND_TYPE }, 1, OPERAND_TYPE };
+JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO)
+#undef JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO
+
+#define JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
+  static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
+    CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,                  \
+    JeandleCalleeKind::HotspotStubOrLibm, nullptr, llvm::Intrinsic::LLVM_BUILTIN,     \
+    &JeandleRuntimeRoutine::StubRoutines_##VM_NAME##_callee,                          \
+    &JeandleRuntimeRoutine::SharedRuntime_##VM_NAME##_callee,                         \
+    { T_DOUBLE }, 1, T_DOUBLE };
+JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO)
+#undef JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO
+
+#define JEANDLE_DEFINE_JAVAOP_CALL_INFO(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS,         \
+                                        MEMORY_FLAGS, BARRIER, ARG_COUNT, RESULT_TYPE, ...) \
+  static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
+    CONTROL_FLAGS, MEMORY_FLAGS, SUPPORT_NONE,                                        \
+    JeandleCalleeKind::JavaOp, JAVA_OP_NAME, llvm::Intrinsic::not_intrinsic,          \
+    nullptr, nullptr, { __VA_ARGS__ }, ARG_COUNT, RESULT_TYPE };
+JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
+#undef JEANDLE_DEFINE_JAVAOP_CALL_INFO
+
+// --- Hybrid: hand-written bodies; arg_types/result_type are documentary (the
+//     body pops/pushes itself), but flags + callee resolvers are consumed. ---
+static constexpr JeandleCallInfo ci_dpow = {
+  CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,
+  JeandleCalleeKind::HotspotStubOrLibm, nullptr, llvm::Intrinsic::pow,
+  &JeandleRuntimeRoutine::StubRoutines_dpow_callee,
+  &JeandleRuntimeRoutine::SharedRuntime_dpow_callee,
+  { T_DOUBLE, T_DOUBLE }, 2, T_DOUBLE };
+// countPositives resolves its callee through resolve_count_positives() inside the
+// body, so callee_kind is None; only the flags are consumed (via emit_runtime_call).
+static constexpr JeandleCallInfo ci_count_positives = {
+  CTRL_MAY_DEOPT, MEM_READ, SUPPORT_HOTSPOT_STUB,
+  JeandleCalleeKind::None, nullptr, llvm::Intrinsic::not_intrinsic, nullptr, nullptr,
+  { }, 0, T_INT };
+
 #ifdef ASSERT
 static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
   assert(desc.id != vmIntrinsics::_none && vmIntrinsics::is_valid_id(desc.id),
          "invalid Jeandle intrinsic id");
-  assert((desc.lowering_kind != JeandleLoweringKind::PureIRInstruction &&
-          desc.lowering_kind != JeandleLoweringKind::PureLLVMBuiltin) ||
-         !desc.needs_exception_edge(),
-         "pure-IR lowering kinds cannot require an exception edge");
-  assert(desc.trap_throttle_mask == 0 || desc.may_deopt(),
-         "trap throttling requires a deopt-capable intrinsic");
-  assert(desc.lowering_kind != JeandleLoweringKind::JavaOperation || desc.java_op_name != nullptr,
-         "JavaOperation descriptor must have a non-null java_op_name");
-  assert(desc.java_op_name == nullptr || desc.java_op_name[0] != '\0',
+  const JeandleCallInfo* ci = desc.call_info;
+  // call_info is present iff the lowering emits a call site (Call or Hybrid).
+  assert((desc.lowering_kind == JeandleLoweringKind::PureLLVM) == (ci == nullptr),
+         "call_info must be present iff lowering_kind is Call/Hybrid");
+  if (ci == nullptr) {
+    return;
+  }
+  assert(ci->arg_count <= 3, "arg_count exceeds arg_types capacity");
+  assert(ci->callee_kind != JeandleCalleeKind::JavaOp || ci->java_op_name != nullptr,
+         "JavaOp callee requires a non-null java_op_name");
+  assert(ci->java_op_name == nullptr || ci->java_op_name[0] != '\0',
          "empty JavaOp name string");
-  assert(!desc.only_orders_memory() || (!desc.reads_memory() && !desc.writes_memory()),
+  assert(ci->callee_kind != JeandleCalleeKind::HotspotStubOrLibm ||
+         (ci->stub_callee_fn != nullptr || ci->shared_callee_fn != nullptr || ci->supports_llvm_intrin()),
+         "HotspotStubOrLibm needs a runtime resolver or a builtin fallback");
+  assert(!ci->only_orders_memory() || (!ci->reads_memory() && !ci->writes_memory()),
          "MEM_ORDERING_ONLY is mutually exclusive with MEM_READ / MEM_WRITE");
-  assert(desc.barrier_semantics() == 0 ||
-         (desc.barrier_semantics() & (desc.barrier_semantics() - 1)) == 0,
-         "barrier semantics are mutually exclusive");
-  assert(!desc.weak_referent_load_barrier() ||
-         (desc.reads_memory() && desc.needs_gc_state() && !desc.writes_memory()),
-         "weak referent load barrier requires read-only GC-visible memory");
-  assert(!desc.raw_referent_read_barrier() ||
-         (desc.reads_memory() && desc.needs_gc_state() && !desc.writes_memory()),
-         "raw referent read barrier requires read-only GC-visible memory");
-  assert(!desc.card_mark_post_barrier() ||
-         (desc.writes_memory() && desc.needs_gc_state()),
-         "card mark post barrier requires GC-visible memory writes");
-  assert(!desc.volatile_load_barrier() ||
-         (desc.reads_memory() && !desc.writes_memory()),
-         "volatile load barrier requires read-only memory effects");
-  assert(!desc.volatile_store_barrier() ||
-         desc.writes_memory(),
-         "volatile store barrier requires memory writes");
+  // The referent-reading intrinsics must keep read-only GC-visible memory so the
+  // JavaOp body (and a future late barrier pass) can apply or deliberately
+  // suppress the GC load barrier.  The barrier_kind is the metadata hook for
+  // that pass and must match the intrinsic.
   switch (desc.id) {
     case vmIntrinsics::_Reference_get:
-      assert(desc.weak_referent_load_barrier(),
-             "Reference.get requires weak referent load barrier semantics");
+      assert(ci->reads_memory() && ci->needs_gc_state() && !ci->writes_memory(),
+             "referent read requires read-only GC-visible memory");
+      assert(desc.barrier_kind == JeandleBarrierKind::WeakReferentLoad,
+             "Reference.get requires weak referent load barrier annotation");
       break;
     case vmIntrinsics::_Reference_refersTo0:
     case vmIntrinsics::_PhantomReference_refersTo0:
-      assert(desc.raw_referent_read_barrier(),
-             "refersTo0 requires raw referent read barrier semantics");
+      assert(ci->reads_memory() && ci->needs_gc_state() && !ci->writes_memory(),
+             "referent read requires read-only GC-visible memory");
+      assert(desc.barrier_kind == JeandleBarrierKind::RawReferentRead,
+             "refersTo0 requires raw referent read barrier annotation");
       break;
     default:
       break;
@@ -142,239 +221,43 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
   }
 
  private:
-  // Descriptor fields, in order:
-  //   id
-  //   control_flags  (bitmask of CTRL_*)
-  //   memory_flags   (bitmask of MEM_*)
-  //   lowering_kind
-  //   support_flags  (bitmask of SUPPORT_*)
-  //   java_op_name
-  //   trap_throttle_mask
-  //
-  // Flag literals are self-describing at the call site, so the table reads as a
-  // declarative list of facts about each intrinsic without consulting struct
-  // definitions for what each bool position means.
+  // Base descriptor rows.  Call/JavaOp/Pure rows come from the one-line tables
+  // (pass 2 of the X-macro); Hybrid and trap-throttled Pure rows that don't fit a
+  // table are written out explicitly.  Field order: id, lowering_kind,
+  // trap_throttle_mask, call_info, barrier_kind.
   static constexpr JeandleIntrinsicDescriptor _intrinsic_table[] = {
-    { vmIntrinsics::_dabs,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_fabs,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_iabs,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_labs,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_bitCount_i,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_bitCount_l,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_dsqrt,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_dsqrt_strict,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_LLVM_INTRIN,                nullptr },
+    // ---- Call: LLVM builtin + runtime-stub (all trap-free, barrier-free) ----
+#define JEANDLE_ROW_CALL(VM_NAME, ...) \
+    { vmIntrinsics::_##VM_NAME, JeandleLoweringKind::Call, 0, &ci_##VM_NAME },
+    JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_ROW_CALL)
+    JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_ROW_CALL)
+#undef JEANDLE_ROW_CALL
 
-    // Rounding: GuardedHybrid because a native instruction is required for
-    // correctness/performance (SSE4.1 ROUNDSD on x86, FRINT* on AArch64).
-    // JeandleIntrinsicSupport::query() checks the CPU feature at decision time;
-    // if absent, any_path() returns false and the call is not intrinsified.
-    { vmIntrinsics::_floor,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::GuardedHybrid,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_ceil,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::GuardedHybrid,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_rint,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::GuardedHybrid,
-      SUPPORT_LLVM_INTRIN,                nullptr },
+    // ---- Call: JavaOp (barrier_kind carried from the table) ----
+#define JEANDLE_ROW_JAVAOP(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS, MEMORY_FLAGS, \
+                           BARRIER, ARG_COUNT, RESULT_TYPE, ...) \
+    { vmIntrinsics::_##VM_NAME, JeandleLoweringKind::Call, 0, &ci_##VM_NAME, JeandleBarrierKind::BARRIER },
+    JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_ROW_JAVAOP)
+#undef JEANDLE_ROW_JAVAOP
 
-    { vmIntrinsics::_floatToRawIntBits,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_intBitsToFloat,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_doubleToRawLongBits,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_LLVM_INTRIN,                nullptr },
-    { vmIntrinsics::_longBitsToDouble,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_LLVM_INTRIN,                nullptr },
+    // ---- Hybrid: hand-written bodies ----
+    { vmIntrinsics::_dpow,                  JeandleLoweringKind::Hybrid, 0, &ci_dpow },
+    { vmIntrinsics::_countPositives,        JeandleLoweringKind::Hybrid,
+      trap_reason_mask(Deoptimization::Reason_intrinsic), &ci_count_positives },
 
-    { vmIntrinsics::_dsin,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dcos,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dtan,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dlog,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dlog10,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dexp,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
-    { vmIntrinsics::_dpow,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::GuardedHybrid,
-      SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN, nullptr },
+    // ---- PureLLVM (no call site, call_info == nullptr) ----
+#define JEANDLE_ROW_PURE(VM_NAME) \
+    { vmIntrinsics::_##VM_NAME, JeandleLoweringKind::PureLLVM, 0, nullptr },
+    JEANDLE_PURE_TABLE(JEANDLE_ROW_PURE)
+#undef JEANDLE_ROW_PURE
 
-    // System hints
-    { vmIntrinsics::_onSpinWait,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_NONE,                       nullptr },
-
-    // _blackhole: optimizer constraint — consume all arguments to prevent DCE, return void.
-    // Uses volatile inline asm per argument so LLVM cannot eliminate the argument computations.
-    // PureLLVMBuiltin: always supported, no deopt, no memory effects.
-    { vmIntrinsics::_blackhole,
-      CTRL_NONE,                          MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_NONE,                       nullptr },
-
-    // Preconditions.checkIndex(int index, int length, BiFunction exceptionFactory) -> int
-    //
-    // Emits a single unsigned comparison (ICMP_UGE) that covers both index < 0 and
-    // index >= length in one check, then branches to a DeoptTrap on failure.
-    // The BiFunction callback argument is popped and discarded in the fast path; if
-    // the guard fires the interpreter re-executes the full method and invokes it.
-    //
-    // C2 behaviour reference: library_call.cpp checks too_many_traps for both
-    // Reason_intrinsic (length < 0) and Reason_range_check (index OOB); we
-    // mirror the same site throttle via trap_throttle_mask.
-    { vmIntrinsics::_Preconditions_checkIndex,
-      CTRL_MAY_DEOPT,                     MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_NONE,                       nullptr,
+    // ---- PureLLVM with trap throttling (don't fit the bare Pure table) ----
+    { vmIntrinsics::_Preconditions_checkIndex,     JeandleLoweringKind::PureLLVM,
       trap_reason_mask(Deoptimization::Reason_intrinsic) |
-          trap_reason_mask(Deoptimization::Reason_range_check) },
-
-    // Preconditions.checkIndex(long index, long length, BiFunction exceptionFactory) -> long
-    // Identical trap semantics to the int variant; only the value width differs.
-    { vmIntrinsics::_Preconditions_checkLongIndex,
-      CTRL_MAY_DEOPT,                     MEM_NONE,
-      JeandleLoweringKind::PureLLVMBuiltin,
-      SUPPORT_NONE,                       nullptr,
+          trap_reason_mask(Deoptimization::Reason_range_check), nullptr },
+    { vmIntrinsics::_Preconditions_checkLongIndex, JeandleLoweringKind::PureLLVM,
       trap_reason_mask(Deoptimization::Reason_intrinsic) |
-          trap_reason_mask(Deoptimization::Reason_range_check) },
-
-    // Object.getClass(): loads the java.lang.Class mirror via the klass's OopHandle.
-    // TypeSemantic + JavaOperation: the two-level load (klass → OopHandle → mirror)
-    // is implemented as jeandle.get_class.
-    //
-    // Memory: MEM_READ | MEM_NEEDS_GC_STATE — three loads (header, OopHandle,
-    // mirror oop); the OopStorage load must stay visible to GC statepoint code.
-    //
-    // Receiver null-check responsibility: invokevirtual/invokeinterface bytecodes
-    // already null-check the receiver before dispatch, so this lowering path
-    // assumes a non-null object on the stack.  If getClass is ever lowered via a
-    // non-invoke path (inlined JavaOp, direct IR), a null check must be added at
-    // that callsite or inside the JavaOp itself.
-    //
-    { vmIntrinsics::_getClass,
-      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE,
-      JeandleLoweringKind::JavaOperation,
-      SUPPORT_NONE,                       "jeandle.get_class" },
-
-    // Reference.get(): returns the referent and applies the needed GC load barrier in the JavaOp.
-    // CTRL_NONE — no speculative guard; attach_deopt_bundle is plan-driven by
-    // MEM_NEEDS_GC_STATE, not by deoptimization semantics.
-    { vmIntrinsics::_Reference_get,
-      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE | MEM_BARRIER_WEAK_REFERENT_LOAD,
-      JeandleLoweringKind::JavaOperation,
-      SUPPORT_NONE,                       "jeandle.reference_get" },
-
-    // Reference.refersTo0(): raw referent pointer identity comparison (no GC barrier).
-    { vmIntrinsics::_Reference_refersTo0,
-      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE | MEM_BARRIER_RAW_REFERENT_READ,
-      JeandleLoweringKind::JavaOperation,
-      SUPPORT_NONE,                       "jeandle.reference_refers_to" },
-
-    // Memory fences: lower to LLVM fence instructions (acquire / release / seq_cst).
-    { vmIntrinsics::_loadFence,
-      CTRL_NONE,                          MEM_ORDERING_ONLY,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_NONE,                       nullptr },
-    { vmIntrinsics::_storeFence,
-      CTRL_NONE,                          MEM_ORDERING_ONLY,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_NONE,                       nullptr },
-    { vmIntrinsics::_fullFence,
-      CTRL_NONE,                          MEM_ORDERING_ONLY,
-      JeandleLoweringKind::PureIRInstruction,
-      SUPPORT_NONE,                       nullptr },
-
-    // PhantomReference.refersTo0 shares semantics with Reference.refersTo0:
-    // raw referent read (no GC barrier), pointer identity comparison.
-    { vmIntrinsics::_PhantomReference_refersTo0,
-      CTRL_NONE,                          MEM_READ | MEM_NEEDS_GC_STATE | MEM_BARRIER_RAW_REFERENT_READ,
-      JeandleLoweringKind::JavaOperation,
-      SUPPORT_NONE,                       "jeandle.reference_refers_to" },
-
-    // Array.newInstance(Class<?> componentType, int length) → Object
-    //
-    // The JavaOp jeandle.new_array loads the cached array klass from the
-    // component-type mirror and calls new_array on the fast path; if the klass is
-    // not yet cached it falls back to Reflection::reflect_new_array.
-    //
-    // CTRL_NEEDS_EXCEPTION_EDGE: NegativeArraySizeException / NullPointerException /
-    //   IllegalArgumentException may be thrown by the runtime.
-    // MEM_READ | MEM_WRITE (no MEM_NEEDS_GC_STATE): reads klass mirror, writes
-    //   the newly allocated object header/elements; the runtime call handles
-    //   allocation-time GC interaction, no per-lowering barrier required.
-    { vmIntrinsics::_newArray,
-      CTRL_NEEDS_EXCEPTION_EDGE,          MEM_READ | MEM_WRITE,
-      JeandleLoweringKind::JavaOperation,
-      SUPPORT_NONE,                       "jeandle.new_array" },
-
-    // StringCoding.countPositives(byte[] ba, int off, int len) → int
-    //
-    // Returns the number of leading bytes in ba[off..off+len) with bit 7 clear.
-    // RuntimeCall: at startup, generate_count_positives_adapter() installs a
-    // platform-native SIMD stub adapter; if absent the entrypoint layer falls back
-    // to the scalar count_positives_impl.
-    //
-    // CTRL_MAY_DEOPT: precondition guards (null, off<0, len<0, off+len>length)
-    //   emit uncommon_trap(Reason_intrinsic) which requires a deopt bundle so the
-    //   interpreter can re-execute and throw IOOBE.
-    { vmIntrinsics::_countPositives,
-      CTRL_MAY_DEOPT,                     MEM_READ,
-      JeandleLoweringKind::RuntimeCall,
-      SUPPORT_HOTSPOT_STUB,               nullptr,
-      trap_reason_mask(Deoptimization::Reason_intrinsic) },
+          trap_reason_mask(Deoptimization::Reason_range_check), nullptr },
   };
 };
 

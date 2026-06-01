@@ -25,66 +25,15 @@ static llvm::CallingConv::ID runtime_cc() {
   return llvm::CallingConv::C;
 }
 
-bool JeandleIntrinsicEntrypoints::resolve_math(vmIntrinsics::ID id,
-                                               JeandleIntrinsicImplKind impl_kind,
-                                               llvm::Module& module,
-                                               JeandleIntrinsicEntrypoint& out) {
-  out.calling_conv = runtime_cc();
-  out.is_gc_leaf = true;
-  out.well_known_name = nullptr;
-  switch (id) {
-    case vmIntrinsics::_dsin:
-      out.well_known_name = "math.dsin";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dsin_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dsin_callee(module);
-      return true;
-    case vmIntrinsics::_dcos:
-      out.well_known_name = "math.dcos";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dcos_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dcos_callee(module);
-      return true;
-    case vmIntrinsics::_dtan:
-      out.well_known_name = "math.dtan";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dtan_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dtan_callee(module);
-      return true;
-    case vmIntrinsics::_dlog:
-      out.well_known_name = "math.dlog";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dlog_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dlog_callee(module);
-      return true;
-    case vmIntrinsics::_dlog10:
-      out.well_known_name = "math.dlog10";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dlog10_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dlog10_callee(module);
-      return true;
-    case vmIntrinsics::_dexp:
-      out.well_known_name = "math.dexp";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dexp_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dexp_callee(module);
-      return true;
-    case vmIntrinsics::_dpow:
-      out.well_known_name = "math.dpow";
-      out.callee = impl_kind == JeandleIntrinsicImplKind::HotspotStub ?
-        JeandleRuntimeRoutine::StubRoutines_dpow_callee(module) :
-        JeandleRuntimeRoutine::SharedRuntime_dpow_callee(module);
-      return true;
-    default:
-      return false;
-  }
-}
-
+// The libm math routines (dsin/dcos/.../dpow) are resolved property-driven from
+// JeandleCallInfo's stub_callee_fn / shared_callee_fn function pointers in
+// JeandleIntrinsicLowering::resolve_runtime_callee — there is no id-switch here.
+// Only countPositives keeps a dedicated resolver because it picks between a SIMD
+// adapter stub and a scalar fallback that share no naming convention with the id.
 bool JeandleIntrinsicEntrypoints::resolve_count_positives(llvm::Module& module,
                                                           JeandleIntrinsicEntrypoint& out) {
-  out.calling_conv    = runtime_cc();
-  out.is_gc_leaf      = true;
-  out.well_known_name = "count_positives";
+  out.calling_conv = runtime_cc();
+  out.is_gc_leaf   = true;
   // Prefer the platform SIMD adapter when available; fall back to the scalar C++ wrapper.
   if (JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr) {
     out.callee = JeandleRuntimeRoutine::JeandleRuntime_count_positives_adapter_callee(module);

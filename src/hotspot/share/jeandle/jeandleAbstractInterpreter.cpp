@@ -30,7 +30,6 @@
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleCompiledCall.hpp"
 #include "jeandle/jeandleIntrinsicLowering.hpp"
-#include "jeandle/jeandleIntrinsicPolicy.hpp"
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleType.hpp"
@@ -1961,14 +1960,13 @@ bool JeandleAbstractInterpreter::try_lower_intrinsic(const ciMethod* target) {
     }
   }
 
-  JeandleIntrinsicPolicy policy;
-  JeandleIntrinsicDecision decision = policy.decide(*desc);
-  if (!decision.supported) {
-    return false;
-  }
-
+  // A descriptor exists but the lowering may still decline (no stub installed or
+  // CPU feature missing): lower() returns false and we treat that as a normal
+  // invoke rather than a hard failure.  Any capability/feature check inside
+  // lower() runs before the operand stack is touched, so a decline is side-effect
+  // free.
   JeandleIntrinsicLowering lowering(this);
-  return lowering.lower(*desc, decision, target);
+  return lowering.lower(*desc, target);
 }
 
 // Generate IR for calling into llvm FunctionCallee, without exception handling.

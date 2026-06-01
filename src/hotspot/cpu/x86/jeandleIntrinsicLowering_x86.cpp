@@ -26,14 +26,13 @@
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 
 bool JeandleIntrinsicLowering::lower_spin_wait_hint(
-    const JeandleIntrinsicDescriptor& desc,
-    const JeandleIntrinsicDecision& decision) {
+    const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   // x86-64: PAUSE instruction — spin-wait hint that improves performance
   // and reduces power consumption in busy-wait loops.
   llvm::CallInst* call = builder.CreateIntrinsic(
       llvm::Intrinsic::x86_sse2_pause, llvm::ArrayRef<llvm::Type*>{}, {});
-  annotate_generated_instruction(*call, desc, decision);
+  annotate_generated_instruction(*call, desc);
   // void return: nothing to push on the JVM operand stack
   return true;
 }

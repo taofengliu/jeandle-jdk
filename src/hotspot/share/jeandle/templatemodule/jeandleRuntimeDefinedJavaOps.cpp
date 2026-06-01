@@ -20,7 +20,6 @@
 
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/IRBuilder.h"
 
 #include "jeandle/templatemodule/jeandleRuntimeDefinedJavaOps.hpp"
@@ -71,18 +70,17 @@ llvm::OperandBundleDef create_empty_deopt_bundle() {
   return llvm::OperandBundleDef("deopt", llvm::SmallVector<llvm::Value*>{});
 }
 
-// C2 emits Op_MemBarCPUOrder after Reference.referent loads to keep the load
-// from being commoned across safepoints, where GC may clear the field. Use an
-// empty side-effecting asm with a memory clobber as the LLVM compiler barrier;
-// it should not lower to a hardware fence.
-void emit_reference_referent_cpu_order_barrier(llvm::IRBuilder<>& ir_builder,
-                                               llvm::LLVMContext& context) {
-  llvm::FunctionType* barrier_ty =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-  llvm::InlineAsm* barrier =
-      llvm::InlineAsm::get(barrier_ty, "", "~{memory}", /*hasSideEffects=*/true);
-  ir_builder.CreateCall(barrier);
-}
+// TODO(reinstate-cpuorder-barrier): commit 8c2d124 ("Add CPUOrder barrier for
+// Reference intrinsics") emitted an empty side-effecting inline asm
+// (`asm sideeffect "", "~{memory}"`) after Reference.referent loads, mirroring
+// C2's Op_MemBarCPUOrder.  It is reverted here because jeandle-llvm's
+// RewriteStatepointsForGC (RewriteStatepointsForGC.cpp, NeedsRewrite predicate)
+// lacks the `isInlineAsm()` skip that its sibling pass PlaceSafepoints has, so it
+// wraps the barrier asm in a gc.statepoint and aborts with "Cannot take the
+// address of an inline asm!" while compiling Reference.refersToImpl.  This is a
+// pre-existing LLVM-side gap (not related to the intrinsic call-shape refactor).
+// Re-apply 8c2d124 once jeandle-llvm RS4GC skips inline asm (add
+// `if (Call->isInlineAsm()) return false;` after the callsGCLeafFunction check).
 
 DEF_JAVA_OP(current_thread, 0, llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))
   llvm::NamedMDNode* thread_register = template_module.getNamedMetadata(llvm::jeandle::Metadata::CurrentThread);
@@ -265,7 +263,8 @@ DEF_JAVA_OP(reference_refers_to, 1, llvm::Type::getInt32Ty(context),
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
   // Raw load: no atomic ordering, no GC barrier.
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
-  emit_reference_referent_cpu_order_barrier(ir_builder, context);
+  // TODO(reinstate-cpuorder-barrier): emit_reference_referent_cpu_order_barrier
+  // call reverted — see the note on that function (LLVM RS4GC inline-asm gap).
   llvm::Value* is_equal = ir_builder.CreateICmpEQ(referent, compare_to);
   // JVM boolean on the operand stack is i32
   llvm::Value* result = ir_builder.CreateZExt(is_equal, ir_builder.getInt32Ty());
@@ -287,7 +286,8 @@ DEF_JAVA_OP(reference_get, 1,
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
   referent->setAtomic(llvm::AtomicOrdering::Acquire);
-  emit_reference_referent_cpu_order_barrier(ir_builder, context);
+  // TODO(reinstate-cpuorder-barrier): emit_reference_referent_cpu_order_barrier
+  // call reverted — see the note on that function (LLVM RS4GC inline-asm gap).
   if (UseG1GC) {
     llvm::Function* barrier_func = template_module.getFunction("jeandle.g1_pre_barrier_loaded");
     assert(barrier_func != nullptr, "jeandle.g1_pre_barrier_loaded not found");

@@ -19,55 +19,49 @@
 
 #include "jeandle/jeandleIntrinsicIRSemantics.hpp"
 
-#include <string>
-
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleIntrinsicEntrypoints.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "memory/allocation.hpp"
 
-static const char* lowering_mode_name(const JeandleIntrinsicDecision& decision,
-                                      const JeandleIntrinsicDescriptor& desc) {
-  const bool needs_unwind_edge = desc.needs_exception_edge();
-  switch (decision.impl_kind) {
-    case JeandleIntrinsicImplKind::IRInstruction:
-    case JeandleIntrinsicImplKind::LLVMBuiltinCall:
-      return needs_unwind_edge ? "managed-runtime-invoke" : "pure-llvm";
-    case JeandleIntrinsicImplKind::HotspotStub:
-    case JeandleIntrinsicImplKind::SharedRuntime:
-      if (needs_unwind_edge) return "managed-runtime-invoke";
-      return (desc.needs_gc_state() || desc.may_deopt())
-                 ? "managed-runtime-call"
-                 : "leaf-runtime-call";
-    case JeandleIntrinsicImplKind::JavaOperation:
-      return "java-op-call";
-    case JeandleIntrinsicImplKind::Unsupported:
-      return "unsupported";
+// Translate the call_info's memory flags into an LLVM `memory()` call-site
+// attribute.  Only applied when the call is safe from LLVM's reordering
+// perspective: no GC-state observation, no deopt, no exception edge — anything
+// that could imply a safepoint or surprise the optimizer must be excluded.
+//
+// LLVM builtin intrinsics (@llvm.sqrt, @llvm.fabs, ...) already carry the correct
+// memory attribute upstream, so this only adds value for *external* runtime stubs
+// whose body LLVM cannot see, enabling LICM / GVN / DCE on hot pure libm calls
+// and read-only array scans.
+void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const JeandleCallInfo& ci) {
+  if (ci.needs_gc_state() || ci.may_deopt() || ci.needs_exception_edge()) {
+    return;
   }
-  return "unknown";
-}
-
-static const char* barrier_kind_name(const JeandleIntrinsicDescriptor& desc) {
-  if (desc.weak_referent_load_barrier()) return "weak-referent-load";
-  if (desc.raw_referent_read_barrier()) return "raw-referent-read";
-  if (desc.card_mark_post_barrier()) return "card-mark-post";
-  if (desc.volatile_load_barrier()) return "volatile-load";
-  if (desc.volatile_store_barrier()) return "volatile-store";
-  return "none";
-}
-
-// Attach a single-string metadata node to any instruction.
-static void set_str_metadata(llvm::Instruction& inst, llvm::StringRef key, llvm::StringRef value) {
-  llvm::LLVMContext& ctx = inst.getContext();
-  inst.setMetadata(key, llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, value)}));
+  if (ci.only_orders_memory()) {
+    // Ordering-only intrinsics are fences (PureLLVM, no call_info) and never
+    // reach here; guard anyway in case a future descriptor pairs MEM_ORDERING_ONLY
+    // with a call-shaped lowering.
+    return;
+  }
+  const bool reads = ci.reads_memory();
+  const bool writes = ci.writes_memory();
+  if (!reads && !writes) {
+    call->setDoesNotAccessMemory();   // memory(none)
+  } else if (reads && !writes) {
+    call->setOnlyReadsMemory();        // memory(read)
+  } else if (!reads && writes) {
+    call->setOnlyWritesMemory();       // memory(write)
+  }
+  // reads && writes: default IR semantics already cover read+write — adding the
+  // attribute would narrow nothing.
 }
 
 llvm::SmallVector<llvm::OperandBundleDef, 1>
 JeandleIntrinsicIRSemantics::build_operand_bundles(JeandleAbstractInterpreter* interp,
-                                                   const JeandleIRSemanticPlan& plan) {
+                                                   bool attach_deopt_bundle) {
   llvm::SmallVector<llvm::OperandBundleDef, 1> bundles;
-  if (plan.attach_deopt_bundle) {
+  if (attach_deopt_bundle) {
     bundles.push_back(interp->create_current_deopt_bundle());
   }
   return bundles;
@@ -75,22 +69,31 @@ JeandleIntrinsicIRSemantics::build_operand_bundles(JeandleAbstractInterpreter* i
 
 void JeandleIntrinsicIRSemantics::annotate_instruction(llvm::Instruction& inst,
                                                        const JeandleIntrinsicDescriptor& desc,
-                                                       const JeandleIntrinsicDecision& decision,
                                                        const JeandleIntrinsicEntrypoint* entry) {
-  set_str_metadata(inst, "jeandle.intrinsic.id",
-                   std::to_string(vmIntrinsics::as_int(desc.id)));
-  set_str_metadata(inst, "jeandle.lowering.mode",
-                   lowering_mode_name(decision, desc));
-  set_str_metadata(inst, "jeandle.semantic.barrier_kind",
-                   barrier_kind_name(desc));
-
-  if (auto* call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+  // TODO(barrier-hook): desc.barrier_kind carries the GC barrier semantic that a
+  // future late GC-barrier LLVM pass needs (analogous to the array GC barrier
+  // late insertion).  How that semantic is threaded to LLVM is NOT decided yet
+  // (named metadata on the call site? an operand bundle? a marker intrinsic?), so
+  // nothing is emitted here.  Until that contract is settled, the G1 SATB
+  // pre-barrier for Reference.get stays inside the JavaOp body for correctness.
+  // When the contract lands, emit it from desc.barrier_kind here.
+  //
+  // The observability-only metadata (jeandle.intrinsic.id / jeandle.lowering.mode
+  // / jeandle.runtime.entry) was dropped in the call-shape refactor; it had no
+  // consumer.  Only the functional gc-leaf-function attribute remains below.
+  auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+  if (call == nullptr) {
+    return;
+  }
+  // gc-leaf-function asserts the call does not enter a safepoint.  Call/Hybrid
+  // intrinsics derive it from their call_info (plus the runtime entry's own leaf
+  // flag); PureLLVM intrinsics only ever emit leaf calls (llvm.abs/ctpop,
+  // blackhole inline asm, llvm.assume), so they are always gc-leaf.
+  const bool gc_leaf = desc.has_call_info()
+      ? (desc.call_info->attach_gc_leaf() || (entry != nullptr && entry->is_gc_leaf))
+      : true;
+  if (gc_leaf) {
     llvm::LLVMContext& ctx = inst.getContext();
-    if (decision.ir_plan.attach_gc_leaf_attr || (entry != nullptr && entry->is_gc_leaf)) {
-      call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
-    }
-    if (entry != nullptr && entry->well_known_name != nullptr) {
-      set_str_metadata(inst, "jeandle.runtime.entry", entry->well_known_name);
-    }
+    call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
   }
 }

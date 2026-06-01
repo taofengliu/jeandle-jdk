@@ -25,10 +25,11 @@
 #include "llvm/IR/InlineAsm.h"
 
 #include "jeandle/jeandleAbstractInterpreter.hpp"
+#include "jeandle/jeandleIntrinsicCallInfo.hpp"
 #include "jeandle/jeandleIntrinsicIRSemantics.hpp"
-#include "jeandle/jeandleIntrinsicPolicy.hpp"
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 #include "jeandle/jeandleIntrinsicEntrypoints.hpp"
+#include "jeandle/jeandleIntrinsicSupport.hpp"
 #include "jeandle/jeandleType.hpp"
 #include "jeandle/jeandleUtils.hpp"
 
@@ -67,184 +68,209 @@ static void add_string_attr(llvm::CallBase& call, llvm::StringRef key, llvm::Str
 
 void JeandleIntrinsicLowering::annotate_generated_instruction(llvm::Instruction& inst,
                                                               const JeandleIntrinsicDescriptor& desc,
-                                                              const JeandleIntrinsicDecision& decision,
                                                               const JeandleIntrinsicEntrypoint* entry) const {
-  JeandleIntrinsicIRSemantics::annotate_instruction(inst, desc, decision, entry);
+  JeandleIntrinsicIRSemantics::annotate_instruction(inst, desc, entry);
 }
 
 // Mirror PR #430's call-site type-info attachment for object-returning intrinsics:
-// the regular invoke() path runs this via attach_java_klass_ret_attr at
-// jeandleAbstractInterpreter.cpp around line 1593, but intrinsic dispatch returns
-// from invoke() before that point. Centralizing here keeps every CallBase the
-// emit helpers produce on the same JavaKlass / JavaKlassExact contract as the
-// regular path, so TypeCheckElimination sees the same return-type information.
+// the regular invoke() path runs this via attach_java_klass_ret_attr, but intrinsic
+// dispatch returns from invoke() before that point.  Centralizing here keeps every
+// CallBase the emit helpers produce on the same JavaKlass / JavaKlassExact contract.
 void JeandleIntrinsicLowering::attach_callee_return_klass_attr(llvm::CallBase* call) const {
   if (_target == nullptr) {
     return;
   }
   attach_java_klass_ret_attr(call,
-                                   _target->signature()->return_type(),
-                                   *_interp->_context);
-}
-
-// Translate descriptor memory flags into an LLVM `memory()` call-site attribute.
-// Only applied when the call is safe from LLVM's reordering perspective: no GC
-// state observation, no deopt, no exception edge — anything that could imply a
-// safepoint or surprise the optimizer must be excluded.
-//
-// LLVM builtin intrinsics (`@llvm.sqrt`, `@llvm.fabs`, ...) already carry the
-// correct memory attribute in their upstream definition; this helper only adds
-// value for *external* runtime stubs whose body LLVM cannot see, enabling LICM
-// / GVN / DCE on hot pure libm calls and read-only array scans.
-static void apply_memory_attr(llvm::CallBase* site, const JeandleIntrinsicDescriptor& desc) {
-  if (desc.needs_gc_state() || desc.may_deopt() || desc.needs_exception_edge()) {
-    return;
-  }
-  if (desc.only_orders_memory()) {
-    // Ordering-only intrinsics are fences, lowered to LLVM `fence` instructions
-    // and never reach emit_callsite. Guard anyway in case a future descriptor
-    // pairs MEM_ORDERING_ONLY with a call-shaped lowering.
-    return;
-  }
-  const bool reads = desc.reads_memory();
-  const bool writes = desc.writes_memory();
-  if (!reads && !writes) {
-    site->setDoesNotAccessMemory();   // memory(none)
-  } else if (reads && !writes) {
-    site->setOnlyReadsMemory();        // memory(read)
-  } else if (!reads && writes) {
-    site->setOnlyWritesMemory();       // memory(write)
-  }
-  // reads && writes: default IR semantics already cover read+write — adding the
-  // attribute would narrow nothing.
+                             _target->signature()->return_type(),
+                             *_interp->_context);
 }
 
 llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDescriptor& desc,
-                                                        const JeandleIntrinsicDecision& decision,
                                                         llvm::FunctionCallee callee,
                                                         llvm::CallingConv::ID calling_conv,
                                                         llvm::ArrayRef<llvm::Value*> args,
                                                         const JeandleIntrinsicEntrypoint* entry) {
+  const JeandleCallInfo* ci = desc.call_info;
+  assert(ci != nullptr, "emit_callsite requires call_info (Call/Hybrid only)");
   llvm::SmallVector<llvm::OperandBundleDef, 1> bundles =
-    JeandleIntrinsicIRSemantics::build_operand_bundles(_interp, decision.ir_plan);
+    JeandleIntrinsicIRSemantics::build_operand_bundles(_interp, ci->attach_deopt_bundle());
   llvm::CallBase* site;
-  if (decision.ir_plan.needs_exception_edge) {
+  if (ci->needs_exception_edge()) {
     site = _interp->create_call_ex(callee, args, calling_conv, bundles);
   } else {
-    // Plain call: lowering chose this path because the intrinsic raises no Java
-    // exception. Mark the site nounwind so LLVM does not conservatively treat it
-    // as a potential unwind point (the callee body is opaque here, so nounwind
-    // cannot be inferred).
+    // Plain call: the intrinsic raises no Java exception.  Mark nounwind so LLVM
+    // does not conservatively treat it as a potential unwind point.
     site = _interp->create_call(callee, args, calling_conv, bundles);
     site->setDoesNotThrow();
-    apply_memory_attr(site, desc);
+    JeandleIntrinsicIRSemantics::apply_memory_attr(site, *ci);
   }
-  annotate_generated_instruction(*site, desc, decision, entry);
+  annotate_generated_instruction(*site, desc, entry);
   attach_callee_return_klass_attr(site);
   return site;
 }
 
 llvm::CallBase* JeandleIntrinsicLowering::emit_runtime_call(const JeandleIntrinsicDescriptor& desc,
-                                                            const JeandleIntrinsicDecision& decision,
                                                             const JeandleIntrinsicEntrypoint& entry,
                                                             llvm::ArrayRef<llvm::Value*> args) {
-  return emit_callsite(desc, decision, entry.callee, entry.calling_conv, args, &entry);
+  return emit_callsite(desc, entry.callee, entry.calling_conv, args, &entry);
 }
 
 llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrinsicDescriptor& desc,
-                                                            const JeandleIntrinsicDecision& decision,
                                                             llvm::ArrayRef<llvm::Value*> args) {
-  assert(desc.java_op_name != nullptr, "JavaOp lowering requires a JavaOp symbol");
-  llvm::Function* java_op = _interp->_module.getFunction(desc.java_op_name);
+  const JeandleCallInfo* ci = desc.call_info;
+  assert(ci != nullptr && ci->java_op_name != nullptr, "JavaOp lowering requires a JavaOp symbol");
+  llvm::Function* java_op = _interp->_module.getFunction(ci->java_op_name);
   assert(java_op != nullptr, "invalid JavaOp");
-  llvm::CallBase* site = emit_callsite(desc, decision, java_op,
-                                       llvm::CallingConv::Hotspot_JIT, args);
-  add_string_attr(*site, "jeandle.java_op", desc.java_op_name);
+  llvm::CallBase* site = emit_callsite(desc, java_op, llvm::CallingConv::Hotspot_JIT, args);
+  add_string_attr(*site, "jeandle.java_op", ci->java_op_name);
   return site;
 }
 
-bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
-                                     const JeandleIntrinsicDecision& decision,
-                                     const ciMethod* target) {
-  _target = target;
-  // Dispatch on the precise intrinsic ID, mirroring C2's
-  // LibraryCallKit::try_to_inline. Intrinsics that share a lowering shape route
-  // to the same lower_* helper; that helper may switch on the ID again for the
-  // per-intrinsic details.
-  switch (desc.id) {
-    case vmIntrinsics::_dabs:
-    case vmIntrinsics::_fabs:
-    case vmIntrinsics::_iabs:
-    case vmIntrinsics::_labs:
-    case vmIntrinsics::_bitCount_i:
-    case vmIntrinsics::_bitCount_l:
-    case vmIntrinsics::_dsqrt:
-    case vmIntrinsics::_dsqrt_strict:
-    case vmIntrinsics::_floor:
-    case vmIntrinsics::_ceil:
-    case vmIntrinsics::_rint:
-      return lower_pure_math(desc, decision);
-
-    case vmIntrinsics::_floatToRawIntBits:
-    case vmIntrinsics::_intBitsToFloat:
-    case vmIntrinsics::_doubleToRawLongBits:
-    case vmIntrinsics::_longBitsToDouble:
-      return lower_type_coercion(desc, decision);
-
-    case vmIntrinsics::_dpow:
-      return lower_pow_hybrid(desc, decision);
-
-    case vmIntrinsics::_dsin:
-    case vmIntrinsics::_dcos:
-    case vmIntrinsics::_dtan:
-    case vmIntrinsics::_dlog:
-    case vmIntrinsics::_dlog10:
-    case vmIntrinsics::_dexp:
-      return lower_libm_math(desc, decision);
-
-    case vmIntrinsics::_loadFence:
-    case vmIntrinsics::_storeFence:
-    case vmIntrinsics::_fullFence:
-      return lower_barrier_semantic(desc, decision);
-
-    case vmIntrinsics::_onSpinWait:
-      return lower_spin_wait_hint(desc, decision);
-
-    case vmIntrinsics::_Preconditions_checkIndex:
-    case vmIntrinsics::_Preconditions_checkLongIndex:
-      return lower_preconditions_check_index(desc, decision);
-
-    case vmIntrinsics::_blackhole:
-      return lower_blackhole(desc, decision);
-
-    case vmIntrinsics::_getClass:
-      return lower_get_class(desc, decision);
-
-    case vmIntrinsics::_Reference_get:
-      return lower_reference_get(desc, decision);
-
-    case vmIntrinsics::_Reference_refersTo0:
-    case vmIntrinsics::_PhantomReference_refersTo0:
-      return lower_reference_refers_to(desc, decision);
-
-    case vmIntrinsics::_countPositives:
-      return lower_count_positives(desc, decision);
-
-    case vmIntrinsics::_newArray:
-      return lower_new_array(desc, decision);
-
-    default:
-      return false;
+// Property-driven runtime-stub resolution: pick the HotSpot stub / SharedRuntime
+// routine from call_info's resolver function pointers, or signal a builtin
+// fallback.  Never switches on the intrinsic id.
+bool JeandleIntrinsicLowering::resolve_runtime_callee(const JeandleIntrinsicDescriptor& desc,
+                                                      JeandleIntrinsicEntrypoint& entry,
+                                                      bool& has_entry) {
+  const JeandleCallInfo* ci = desc.call_info;
+  has_entry = false;
+  JeandleIntrinsicCapabilities caps = JeandleIntrinsicSupport::query(desc);
+  if (caps.hotspot_preferred && caps.any_runtime()) {
+    JeandleRuntimeCalleeFn fn = nullptr;
+    if (caps.has_hotspot_stub && ci->stub_callee_fn != nullptr) {
+      fn = ci->stub_callee_fn;
+    } else if (caps.has_shared_runtime && ci->shared_callee_fn != nullptr) {
+      fn = ci->shared_callee_fn;
+    }
+    if (fn != nullptr) {
+      entry.callee = fn(_interp->_module);
+      entry.calling_conv = llvm::CallingConv::C;
+      entry.is_gc_leaf = true;
+      has_entry = true;
+      return true;
+    }
   }
+  // Builtin fallback: caller emits CreateIntrinsic from ci->llvm_intrin_id.
+  if (caps.has_llvm_builtin) {
+    return true;
+  }
+  return false;
 }
 
-// Spec rows for lower_pure_math: every PureMath intrinsic boils down to
-// CreateIntrinsic(<type>, <llvm intrinsic>, <pop>[, poison flag]) + push.
-// Adding a new pure-math intrinsic = adding one row here, no code.
-//
-// result_type may differ from operand_type (e.g. Long.bitCount: ctpop on i64,
-// result is i32) — that asymmetry alone signals "trunc the result", no extra
-// flag needed.
+bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsicDescriptor& desc) {
+  const JeandleCallInfo* ci = desc.call_info;
+  assert(ci != nullptr, "Call lowering requires call_info");
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+
+  // Resolve the callee form before popping args, so a CPU-feature miss can
+  // decline cleanly without disturbing the operand stack.
+  bool is_java_op = false;
+  bool use_builtin = false;                       // emit via CreateIntrinsic(llvm_intrin_id)
+  JeandleIntrinsicEntrypoint entry;
+  bool has_entry = false;                          // runtime stub / SharedRuntime
+
+  switch (ci->callee_kind) {
+    case JeandleCalleeKind::JavaOp:
+      is_java_op = true;
+      break;
+    case JeandleCalleeKind::LLVMBuiltin:
+      if (!JeandleIntrinsicSupport::query(desc).has_llvm_builtin) {
+        return false;  // e.g. floor/ceil/rint without SSE4.1 -> NormalInvoke fallback
+      }
+      use_builtin = true;
+      break;
+    case JeandleCalleeKind::HotspotStubOrLibm:
+      if (!resolve_runtime_callee(desc, entry, has_entry)) {
+        return false;
+      }
+      use_builtin = !has_entry;
+      break;
+    case JeandleCalleeKind::None:
+      return false;  // a Call descriptor must name a generic callee
+  }
+
+  // Pop args in reverse: arg_types[arg_count-1] is on top of the operand stack.
+  llvm::SmallVector<llvm::Value*, 3> args;
+  args.resize(ci->arg_count);
+  for (int i = (int)ci->arg_count - 1; i >= 0; --i) {
+    args[i] = _interp->_jvm->pop(ci->arg_types[i]);
+  }
+
+  llvm::Value* result = nullptr;
+  if (is_java_op) {
+    result = emit_java_op_call(desc, args);
+  } else if (use_builtin) {
+    llvm::CallInst* call = builder.CreateIntrinsic(
+        JeandleType::java2llvm(ci->arg_types[0], ctx), ci->llvm_intrin_id, args);
+    annotate_generated_instruction(*call, desc);
+    result = call;
+  } else {
+    result = emit_runtime_call(desc, entry, args);
+  }
+
+  if (ci->result_type != T_VOID) {
+    _interp->_jvm->push(ci->result_type, result);
+  }
+  return true;
+}
+
+bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
+                                     const ciMethod* target) {
+  _target = target;
+  // Dispatch on the lowering family.  Call is fully data-driven; Hybrid and
+  // PureLLVM dispatch on the precise id to a hand-written leaf handler.
+  switch (desc.lowering_kind) {
+    case JeandleLoweringKind::Call:
+      return emit_simple_call_intrinsic(desc);
+
+    case JeandleLoweringKind::Hybrid:
+      switch (desc.id) {
+        case vmIntrinsics::_dpow:           return lower_pow_hybrid(desc);
+        case vmIntrinsics::_countPositives: return lower_count_positives(desc);
+        default:                            return false;
+      }
+
+    case JeandleLoweringKind::PureLLVM:
+      switch (desc.id) {
+        case vmIntrinsics::_iabs:
+        case vmIntrinsics::_labs:
+        case vmIntrinsics::_bitCount_l:
+          return lower_pure_math(desc);
+
+        case vmIntrinsics::_floatToRawIntBits:
+        case vmIntrinsics::_intBitsToFloat:
+        case vmIntrinsics::_doubleToRawLongBits:
+        case vmIntrinsics::_longBitsToDouble:
+          return lower_type_coercion(desc);
+
+        case vmIntrinsics::_loadFence:
+        case vmIntrinsics::_storeFence:
+        case vmIntrinsics::_fullFence:
+          return lower_barrier_semantic(desc);
+
+        case vmIntrinsics::_onSpinWait:
+          return lower_spin_wait_hint(desc);
+
+        case vmIntrinsics::_Preconditions_checkIndex:
+        case vmIntrinsics::_Preconditions_checkLongIndex:
+          return lower_preconditions_check_index(desc);
+
+        case vmIntrinsics::_blackhole:
+          return lower_blackhole(desc);
+
+        default:
+          return false;
+      }
+  }
+  return false;
+}
+
+// Spec rows for lower_pure_math: PureLLVM math intrinsics that deviate from the
+// plain Call shape — llvm.abs needs a trailing i1 poison flag, and Long.bitCount
+// truncates an i64 ctpop result to i32.  (The plain shapes — dabs/fabs/dsqrt/
+// bitCount_i/floor/ceil/rint — are JeandleLoweringKind::Call, handled generically
+// by emit_simple_call_intrinsic.)
 struct PureMathSpec {
   vmIntrinsics::ID    vm_id;
   llvm::Intrinsic::ID llvm_id;
@@ -254,20 +280,37 @@ struct PureMathSpec {
 };
 
 static constexpr PureMathSpec kPureMathTable[] = {
-  { vmIntrinsics::_dabs,         llvm::Intrinsic::fabs,  T_DOUBLE, T_DOUBLE, false },
-  { vmIntrinsics::_fabs,         llvm::Intrinsic::fabs,  T_FLOAT,  T_FLOAT,  false },
-  { vmIntrinsics::_iabs,         llvm::Intrinsic::abs,   T_INT,    T_INT,    true  },
-  { vmIntrinsics::_labs,         llvm::Intrinsic::abs,   T_LONG,   T_LONG,   true  },
-  { vmIntrinsics::_bitCount_i,   llvm::Intrinsic::ctpop, T_INT,    T_INT,    false },
-  { vmIntrinsics::_bitCount_l,   llvm::Intrinsic::ctpop, T_LONG,   T_INT,    false },
-  { vmIntrinsics::_dsqrt,        llvm::Intrinsic::sqrt,  T_DOUBLE, T_DOUBLE, false },
-  { vmIntrinsics::_dsqrt_strict, llvm::Intrinsic::sqrt,  T_DOUBLE, T_DOUBLE, false },
-  // Rounding intrinsics: GuardedHybrid, impl_kind resolved to LLVMBuiltinCall
-  // by policy after JeandleIntrinsicSupport::query() confirmed CPU feature availability.
-  { vmIntrinsics::_floor,        llvm::Intrinsic::floor, T_DOUBLE, T_DOUBLE, false },
-  { vmIntrinsics::_ceil,         llvm::Intrinsic::ceil,  T_DOUBLE, T_DOUBLE, false },
-  { vmIntrinsics::_rint,         llvm::Intrinsic::rint,  T_DOUBLE, T_DOUBLE, false },
+  { vmIntrinsics::_iabs,       llvm::Intrinsic::abs,   T_INT,  T_INT, true  },
+  { vmIntrinsics::_labs,       llvm::Intrinsic::abs,   T_LONG, T_LONG, true  },
+  { vmIntrinsics::_bitCount_l, llvm::Intrinsic::ctpop, T_LONG, T_INT,  false },
 };
+
+bool JeandleIntrinsicLowering::lower_pure_math(const JeandleIntrinsicDescriptor& desc) {
+  for (const PureMathSpec& spec : kPureMathTable) {
+    if (spec.vm_id != desc.id) continue;
+    llvm::LLVMContext& ctx = *_interp->_context;
+    llvm::IRBuilder<>& builder = _interp->_ir_builder;
+
+    llvm::SmallVector<llvm::Value*, 2> args;
+    args.push_back(_interp->_jvm->pop(spec.operand_type));
+    if (spec.needs_poison_flag) {
+      args.push_back(builder.getInt1(false));
+    }
+
+    llvm::CallInst* call = builder.CreateIntrinsic(
+        JeandleType::java2llvm(spec.operand_type, ctx), spec.llvm_id, args);
+    annotate_generated_instruction(*call, desc);
+
+    llvm::Value* result = call;
+    if (spec.result_type != spec.operand_type) {
+      // e.g. Long.bitCount(long): ctpop gives i64, push as i32.
+      result = builder.CreateTrunc(call, JeandleType::java2llvm(spec.result_type, ctx));
+    }
+    _interp->_jvm->push(spec.result_type, result);
+    return true;
+  }
+  return false;
+}
 
 // Spec rows for lower_type_coercion: every Float/Int and Double/Long Raw-bits
 // intrinsic is a single bitcast between two scalar types.
@@ -284,36 +327,7 @@ static constexpr TypeCoercionSpec kTypeCoercionTable[] = {
   { vmIntrinsics::_longBitsToDouble,    T_LONG,   T_DOUBLE },
 };
 
-bool JeandleIntrinsicLowering::lower_pure_math(const JeandleIntrinsicDescriptor& desc,
-                                               const JeandleIntrinsicDecision& decision) {
-  for (const PureMathSpec& spec : kPureMathTable) {
-    if (spec.vm_id != desc.id) continue;
-    llvm::LLVMContext& ctx = *_interp->_context;
-    llvm::IRBuilder<>& builder = _interp->_ir_builder;
-
-    llvm::SmallVector<llvm::Value*, 2> args;
-    args.push_back(_interp->_jvm->pop(spec.operand_type));
-    if (spec.needs_poison_flag) {
-      args.push_back(builder.getInt1(false));
-    }
-
-    llvm::CallInst* call = builder.CreateIntrinsic(
-        JeandleType::java2llvm(spec.operand_type, ctx), spec.llvm_id, args);
-    annotate_generated_instruction(*call, desc, decision);
-
-    llvm::Value* result = call;
-    if (spec.result_type != spec.operand_type) {
-      // e.g. Long.bitCount(long): ctpop gives i64, push as i32.
-      result = builder.CreateTrunc(call, JeandleType::java2llvm(spec.result_type, ctx));
-    }
-    _interp->_jvm->push(spec.result_type, result);
-    return true;
-  }
-  return false;
-}
-
-bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescriptor& desc,
-                                                   const JeandleIntrinsicDecision& decision) {
+bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescriptor& desc) {
   for (const TypeCoercionSpec& spec : kTypeCoercionTable) {
     if (spec.vm_id != desc.id) continue;
     llvm::LLVMContext& ctx = *_interp->_context;
@@ -321,10 +335,10 @@ bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescrip
 
     llvm::Value* src = _interp->_jvm->pop(spec.src_type);
     llvm::Value* cast = builder.CreateBitCast(src, JeandleType::java2llvm(spec.dst_type, ctx));
-    // CreateBitCast may constant-fold to a llvm::Constant when the source is
-    // a constant; only annotate if we actually emitted an instruction.
+    // CreateBitCast may constant-fold to a llvm::Constant; only annotate an
+    // actual instruction.
     if (llvm::Instruction* inst = llvm::dyn_cast<llvm::Instruction>(cast)) {
-      annotate_generated_instruction(*inst, desc, decision);
+      annotate_generated_instruction(*inst, desc);
     }
     _interp->_jvm->push(spec.dst_type, cast);
     return true;
@@ -332,93 +346,64 @@ bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescrip
   return false;
 }
 
-bool JeandleIntrinsicLowering::lower_libm_math(const JeandleIntrinsicDescriptor& desc,
-                                               const JeandleIntrinsicDecision& decision) {
-  llvm::LLVMContext& ctx = *_interp->_context;
-  llvm::IRBuilder<>& builder = _interp->_ir_builder;
-
-  if (decision.impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall) {
-    llvm::Value* arg = _interp->_jvm->dpop();
-    llvm::Intrinsic::ID llvm_id = llvm::Intrinsic::not_intrinsic;
-    switch (desc.id) {
-      case vmIntrinsics::_dsin:   llvm_id = llvm::Intrinsic::sin; break;
-      case vmIntrinsics::_dcos:   llvm_id = llvm::Intrinsic::cos; break;
-      case vmIntrinsics::_dtan:   llvm_id = llvm::Intrinsic::tan; break;
-      case vmIntrinsics::_dlog:   llvm_id = llvm::Intrinsic::log; break;
-      case vmIntrinsics::_dlog10: llvm_id = llvm::Intrinsic::log10; break;
-      case vmIntrinsics::_dexp:   llvm_id = llvm::Intrinsic::exp; break;
-      default: return false;
-    }
-    llvm::CallInst* call = builder.CreateIntrinsic(JeandleType::java2llvm(T_DOUBLE, ctx), llvm_id, {arg});
-    annotate_generated_instruction(*call, desc, decision);
-    _interp->_jvm->dpush(call);
-    return true;
-  }
-
-  JeandleIntrinsicEntrypoint entry;
-  if (!JeandleIntrinsicEntrypoints::resolve_math(desc.id, decision.impl_kind, _interp->_module, entry)) {
-    return false;
-  }
-  llvm::Value* arg = _interp->_jvm->dpop();
-  _interp->_jvm->dpush(emit_runtime_call(desc, decision, entry, {arg}));
-  return true;
-}
-
-bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc,
-                                                const JeandleIntrinsicDecision& decision) {
+// Math.pow(base, exp): Hybrid — IR fast paths for the common constant exponents,
+// otherwise a runtime/builtin pow call resolved property-driven from call_info.
+bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc) {
+  const JeandleCallInfo* ci = desc.call_info;
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::Type* ret_ty = JeandleType::java2llvm(T_DOUBLE, ctx);
 
   llvm::Value* exp = _interp->_jvm->dpop();
   llvm::Value* base = _interp->_jvm->dpop();
 
   // Constant fast path: pow(x, 2.0) => x * x.
-  // This overrides the policy decision (IRInstruction instead of LLVMBuiltinCall/HotspotStub);
-  // refine() produces accurate metadata for the emitted instruction.
-  if (is_double_constant(exp, 2.0,
-                                                         _interp->_module.getDataLayout())) {
-    JeandleIntrinsicDecision refined = JeandleIntrinsicPolicy::refine(
-      decision, desc, JeandleIntrinsicImplKind::IRInstruction);
+  if (is_double_constant(exp, 2.0, _interp->_module.getDataLayout())) {
     llvm::Value* fast = builder.CreateFMul(base, base);
     if (llvm::Instruction* inst = llvm::dyn_cast<llvm::Instruction>(fast)) {
-      annotate_generated_instruction(*inst, desc, refined);
+      annotate_generated_instruction(*inst, desc);
     }
     _interp->_jvm->dpush(fast);
     return true;
   }
 
-  // Constant fast path: pow(x, 0.5) => llvm.sqrt(x) only for x > 0.0.
-  if (is_double_constant(exp, 0.5,
-                                                         _interp->_module.getDataLayout())) {
-    JeandleIntrinsicDecision sqrt_decision = JeandleIntrinsicPolicy::refine(
-      decision, desc, JeandleIntrinsicImplKind::LLVMBuiltinCall);
-    JeandleIntrinsicEntrypoint runtime_entry;
-    if (!JeandleIntrinsicEntrypoints::resolve_math(vmIntrinsics::_dpow, decision.impl_kind,
-                                                 _interp->_module, runtime_entry)) {
-      return false;
-    }
+  // Resolve the slow / general pow callee once (runtime stub / SharedRuntime, or
+  // the llvm.pow builtin fallback).
+  JeandleIntrinsicEntrypoint entry;
+  bool has_entry = false;
+  if (!resolve_runtime_callee(desc, entry, has_entry)) {
+    return false;
+  }
 
-    llvm::Type* ret_ty = JeandleType::java2llvm(T_DOUBLE, ctx);
+  // Emit a full pow(base, exp) call via the resolved path.
+  auto emit_slow = [&]() -> llvm::Value* {
+    if (has_entry) {
+      return emit_runtime_call(desc, entry, {base, exp});
+    }
+    llvm::Function* pow_fn = llvm::Intrinsic::getOrInsertDeclaration(
+        &_interp->_module, ci->llvm_intrin_id, {ret_ty});
+    llvm::CallInst* call = builder.CreateCall(pow_fn, {base, exp});
+    annotate_generated_instruction(*call, desc);
+    return call;
+  };
+
+  // Constant fast path: pow(x, 0.5) => x > 0.0 ? llvm.sqrt(x) : pow(x, 0.5).
+  if (is_double_constant(exp, 0.5, _interp->_module.getDataLayout())) {
     llvm::Value* zero = llvm::ConstantFP::get(ret_ty, 0.0);
-    llvm::BasicBlock* fast_block = llvm::BasicBlock::Create(ctx,
-        "pow_0dot5_fast", _interp->_llvm_func);
-    llvm::BasicBlock* slow_block = llvm::BasicBlock::Create(ctx,
-        "pow_0dot5_slow", _interp->_llvm_func);
-    llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(ctx,
-        "pow_0dot5_merge", _interp->_llvm_func);
+    llvm::BasicBlock* fast_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_fast", _interp->_llvm_func);
+    llvm::BasicBlock* slow_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_slow", _interp->_llvm_func);
+    llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_merge", _interp->_llvm_func);
 
     llvm::Value* base_gt_zero = builder.CreateFCmpOGT(base, zero, "pow.base_gt_zero");
     builder.CreateCondBr(base_gt_zero, fast_block, slow_block);
 
     builder.SetInsertPoint(fast_block);
     llvm::CallInst* fast = builder.CreateIntrinsic(ret_ty, llvm::Intrinsic::sqrt, {base});
-    annotate_generated_instruction(*fast, desc, sqrt_decision);
+    annotate_generated_instruction(*fast, desc);
     builder.CreateBr(merge_block);
 
     builder.SetInsertPoint(slow_block);
-    JeandleIntrinsicDecision runtime_decision = JeandleIntrinsicPolicy::refine(
-        decision, desc, JeandleIntrinsicImplKind::HotspotStub);
-    llvm::Value* slow = emit_runtime_call(desc, runtime_decision, runtime_entry, {base, exp});
+    llvm::Value* slow = emit_slow();
     builder.CreateBr(merge_block);
 
     builder.SetInsertPoint(merge_block);
@@ -430,43 +415,12 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
     return true;
   }
 
-  // General path: use the impl_kind that policy already resolved.
-  // For LLVMBuiltinCall policy chose llvm.pow; for HotspotStub/SharedRuntime delegate to runtime.
-  if (decision.impl_kind == JeandleIntrinsicImplKind::LLVMBuiltinCall) {
-    llvm::Function* pow_fn =
-      llvm::Intrinsic::getOrInsertDeclaration(&_interp->_module, llvm::Intrinsic::pow,
-                                              {JeandleType::java2llvm(T_DOUBLE, ctx)});
-    llvm::CallInst* call = builder.CreateCall(pow_fn, {base, exp});
-    annotate_generated_instruction(*call, desc, decision);
-    _interp->_jvm->dpush(call);
-    return true;
-  }
-
-  JeandleIntrinsicEntrypoint entry;
-  if (!JeandleIntrinsicEntrypoints::resolve_math(vmIntrinsics::_dpow, decision.impl_kind, _interp->_module, entry)) {
-    return false;
-  }
-  _interp->_jvm->dpush(emit_runtime_call(desc, decision, entry, {base, exp}));
+  // General path.
+  _interp->_jvm->dpush(emit_slow());
   return true;
 }
 
-bool JeandleIntrinsicLowering::lower_get_class(const JeandleIntrinsicDescriptor& desc,
-                                               const JeandleIntrinsicDecision& decision) {
-  llvm::Value* obj = _interp->_jvm->apop();
-  _interp->_jvm->apush(emit_java_op_call(desc, decision, {obj}));
-  return true;
-}
-
-bool JeandleIntrinsicLowering::lower_reference_get(const JeandleIntrinsicDescriptor& desc,
-                                                   const JeandleIntrinsicDecision& decision) {
-  assert(desc.weak_referent_load_barrier(), "Reference.get must preserve weak referent load barriers");
-  llvm::Value* reference = _interp->_jvm->apop();
-  _interp->_jvm->apush(emit_java_op_call(desc, decision, {reference}));
-  return true;
-}
-
-bool JeandleIntrinsicLowering::lower_barrier_semantic(const JeandleIntrinsicDescriptor& desc,
-                                                      const JeandleIntrinsicDecision& decision) {
+bool JeandleIntrinsicLowering::lower_barrier_semantic(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::AtomicOrdering ordering;
   switch (desc.id) {
@@ -477,48 +431,25 @@ bool JeandleIntrinsicLowering::lower_barrier_semantic(const JeandleIntrinsicDesc
   }
   _interp->_jvm->apop(); // Unsafe receiver (invokevirtual, no other args)
   llvm::FenceInst* fence = builder.CreateFence(ordering);
-  annotate_generated_instruction(*fence, desc, decision);
+  annotate_generated_instruction(*fence, desc);
   return true;
 }
 
 // Preconditions.checkIndex(int|long index, int|long length, BiFunction exceptionFactory)
 //   -> int|long
 //
-// The condition to guard is: index < 0 || index >= length
-//
-// Naive single unsigned compare (uint)index >= (uint)length only works when
-// length >= 0.  When length < 0 the unsigned value is huge so any non-negative
-// index passes the check — wrong.
-//
-// Correct guard: length < 0 || (uint)index >= (uint)length
-//   • length < 0 fires unconditionally when the caller passes a negative bound.
-//   • (uint)index >= (uint)length, given length >= 0, covers index < 0 (negative
-//     index becomes a large unsigned value) and index >= length.
-//
-// This aligns with C2: C2 uses the unsigned shortcut only after range analysis
-// has proved length >= 0; without that proof it guards length explicitly.
-// C1 uses two separate signed comparisons — semantically equivalent.
-//
-// On the pass path we emit two llvm.assume calls to tell the optimiser that the
-// return value (index) satisfies  0 <= index < length.  This allows LLVM to fold
-// downstream array bounds checks that use the same index.
-bool JeandleIntrinsicLowering::lower_preconditions_check_index(
-    const JeandleIntrinsicDescriptor& desc,
-    const JeandleIntrinsicDecision& decision) {
+// Guard: length < 0 || (uint)index >= (uint)length.  See the original commentary;
+// the two-level check distinguishes precondition failure (length < 0,
+// Reason_intrinsic) from a true range failure (Reason_range_check).
+bool JeandleIntrinsicLowering::lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
   int cur_bci = _interp->_bytecodes.cur_bci();
   bool is_long = desc.id == vmIntrinsics::_Preconditions_checkLongIndex;
 
-  // Stack (top-of-stack first): exceptionFactory (aref), length (int|long),
-  // index (int|long).
-  // Use logical-value peeks so the stack remains intact when uncommon_trap
-  // captures the deopt bundle via create_current_deopt_bundle() ->
-  // _jvm->deopt_args(). This is required for the long variant because Jeandle's
-  // operand stack models long values with an extra null high-slot placeholder.
-  // The actual pops are deferred to the pass path below, matching the pattern
-  // used by do_array_load / do_array_store / instanceof.
-  llvm::Value* exception_factory = _interp->_jvm->peek_value(0).value(); // BiFunction — not used in fast path
+  // Peek logical values so the operand stack stays intact for the deopt bundle
+  // captured by uncommon_trap; the real pops are deferred to the pass path.
+  llvm::Value* exception_factory = _interp->_jvm->peek_value(0).value();
   llvm::Value* length            = _interp->_jvm->peek_value(1).value();
   llvm::Value* index             = _interp->_jvm->peek_value(2).value();
   (void)exception_factory;
@@ -527,17 +458,6 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(
                                    : llvm::Type::getInt32Ty(ctx);
   llvm::Value* zero = llvm::ConstantInt::get(integer_ty, 0);
 
-  // Create the guard blocks.
-  //
-  // Two-level check to distinguish precondition failure (length < 0) from
-  // true range failure (index out of bounds), mirroring C2's distinction
-  // between Reason_intrinsic and Reason_range_check.
-  //
-  // Control flow:
-  //   entry ─(len<0)──► fail_pre  [Reason_intrinsic]
-  //         ─(len≥0)──► mid
-  //                       ─(idx oob)──► fail_range  [Reason_range_check]
-  //                       ─(in range)──► pass
   llvm::BasicBlock* pass = llvm::BasicBlock::Create(ctx,
       "bci_" + std::to_string(cur_bci) + "_checkIndex_pass", _interp->_llvm_func);
   llvm::BasicBlock* mid  = llvm::BasicBlock::Create(ctx,
@@ -547,56 +467,33 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(
   llvm::BasicBlock* fail_range = llvm::BasicBlock::Create(ctx,
       "bci_" + std::to_string(cur_bci) + "_checkIndex_fail_range", _interp->_llvm_func);
 
-  // First guard: length < 0 → precondition failure.
   llvm::Value* len_neg = builder.CreateICmp(llvm::CmpInst::ICMP_SLT, length, zero,
                                             "checkIndex.len_neg");
   llvm::BranchInst* br_len = builder.CreateCondBr(len_neg, fail_pre, mid);
-  annotate_generated_instruction(*br_len, desc, decision);
+  annotate_generated_instruction(*br_len, desc);
 
-  // mid: length >= 0 is guaranteed here; unsigned compare covers index < 0 and index >= length.
   builder.SetInsertPoint(mid);
   llvm::Value* idx_oob = builder.CreateICmp(llvm::CmpInst::ICMP_UGE, index, length,
                                             "checkIndex.idx_oob");
   llvm::BranchInst* br_idx = builder.CreateCondBr(idx_oob, fail_range, pass);
-  annotate_generated_instruction(*br_idx, desc, decision);
+  annotate_generated_instruction(*br_idx, desc);
 
-  // fail_pre: intrinsic precondition failed (length < 0).
-  // Mirrors C2's Reason_intrinsic path; too_many_traps of this reason triggers
-  // NormalInvoke fallback in decide() above.
   _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
                          Deoptimization::Action_maybe_recompile, fail_pre);
-
-  // fail_range: true range check failure (index out of bounds).
   _interp->uncommon_trap(Deoptimization::Reason_range_check,
                          Deoptimization::Action_maybe_recompile, fail_range);
 
-  // Pass path: guards passed — consume the three invokevirtual arguments, then
-  // push the validated index as the intrinsic's return value.
   builder.SetInsertPoint(pass);
   _interp->_block->set_tail_llvm_block(pass);
   _interp->_jvm->apop(); // exception_factory
   if (is_long) {
     _interp->_jvm->lpop(); // length
-    _interp->_jvm->lpop(); // index (value already captured via raw_peek above)
+    _interp->_jvm->lpop(); // index
   } else {
     _interp->_jvm->ipop(); // length
-    _interp->_jvm->ipop(); // index (value already captured via raw_peek above)
+    _interp->_jvm->ipop(); // index
   }
 
-  // Express  length >= 0, 0 <= index < length  as llvm.assume facts.
-  // These serve as supplementary hints for SCEV, LVI, and CVP:
-  //   - assume(length >= 0): supplements the control-flow fact established in
-  //     mid block; helps SCEV and LVI when length is used downstream.
-  //   - assume(index >= 0) + assume(index < length): let CVP eliminate a
-  //     boundary_check whose arr_len is GVN-proved equal to length.
-  //
-  // TODO: llvm.assume has fragile propagation semantics — these
-  // facts are block-local annotations that do not flow through def-use chains
-  // across calls or PHI merges.  A more robust future approach is to introduce
-  // a @llvm.jeandle.checked_index refined-value intrinsic (analogous to C2's
-  // ConstraintCastNode) that carries the range fact in the def-use chain itself,
-  // consumed by a dedicated Jeandle BCE pass.  Until then, the assumes below
-  // serve as the primary range-fact delivery mechanism.
   llvm::Value* len_nonneg = builder.CreateICmp(llvm::CmpInst::ICMP_SGE, length, zero,
                                                "checkIndex.len_nonneg");
   llvm::Value* non_neg    = builder.CreateICmp(llvm::CmpInst::ICMP_SGE, index, zero,
@@ -615,52 +512,28 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(
   return true;
 }
 
-bool JeandleIntrinsicLowering::lower_reference_refers_to(const JeandleIntrinsicDescriptor& desc,
-                                                          const JeandleIntrinsicDecision& decision) {
-  assert(desc.raw_referent_read_barrier(), "refersTo0 must remain a raw referent read");
-  // Stack order: ..., reference (this), obj — pop in reverse
-  llvm::Value* obj = _interp->_jvm->apop();
-  llvm::Value* reference = _interp->_jvm->apop();
-  // JavaOp returns i32 (JVM boolean convention); push as int
-  _interp->_jvm->ipush(emit_java_op_call(desc, decision, {reference, obj}));
-  return true;
-}
-
 // StringCoding.countPositives(byte[] ba, int off, int len) → int
 //
-// Computes ba_start = &ba[off] and delegates to count_positives_impl(ba_start, len)
-// via a RuntimeCall (gc-leaf, no safepoint, no exception).
-//
-// Stack order (top-of-stack first): len (int), off (int), ba (aref).
-// No receiver — static method.
-//
-// Guards (deopt → interpreter re-executes the call):
-//   ba != null  |  off >= 0  |  len >= 0  |  off + len <= ba.length
-bool JeandleIntrinsicLowering::lower_count_positives(
-    const JeandleIntrinsicDescriptor& desc,
-    const JeandleIntrinsicDecision& decision) {
+// Hybrid: precondition guards (deopt) + arrayBase/offset GEP, then a gc-leaf
+// RuntimeCall to the SIMD adapter (or scalar fallback) resolved by the
+// entrypoint layer.  Stack order (top first): len (int), off (int), ba (aref).
+bool JeandleIntrinsicLowering::lower_count_positives(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
 
-  // Peek without popping so the jvm stack is intact when string_range_check
-  // emits uncommon_trap calls (each trap captures the deopt bundle from the
-  // current stack state, which must still hold all three arguments).
-  llvm::Value* len = _interp->_jvm->raw_peek(0).value(); // top of stack
+  // Peek without popping so the deopt bundle captured by string_range_check sees
+  // all three arguments on the stack.
+  llvm::Value* len = _interp->_jvm->raw_peek(0).value();
   llvm::Value* off = _interp->_jvm->raw_peek(1).value();
   llvm::Value* ba  = _interp->_jvm->raw_peek(2).value();
 
-  // Emit guards: null-check ba, off >= 0, len >= 0, off + len <= ba.length.
-  // Any failing guard deopt-traps and the interpreter retries the invokestatic.
   _interp->string_range_check(ba, off, len);
 
-  // All guards passed — consume the three invokestatic arguments.
   _interp->_jvm->ipop(); // len
   _interp->_jvm->ipop(); // off
   _interp->_jvm->apop(); // ba
 
-  // Compute ba_start = ba + array_base_offset_in_bytes(T_BYTE) + off.
-  // array_base_offset is the size of the array object header; adding it gives
-  // a pointer to ba[0].  Adding off then yields ba[off].
+  // ba_start = ba + array_base_offset(T_BYTE) + off.
   llvm::Value* base_off   = builder.getInt32(arrayOopDesc::base_offset_in_bytes(T_BYTE));
   llvm::Value* array_base = builder.CreateInBoundsPtrAdd(ba, base_off, "ba_base");
   llvm::Value* ba_start   = builder.CreateInBoundsGEP(
@@ -670,24 +543,17 @@ bool JeandleIntrinsicLowering::lower_count_positives(
   if (!JeandleIntrinsicEntrypoints::resolve_count_positives(_interp->_module, entry)) {
     return false;
   }
-  _interp->_jvm->ipush(emit_runtime_call(desc, decision, entry, {ba_start, len}));
+  _interp->_jvm->ipush(emit_runtime_call(desc, entry, {ba_start, len}));
   return true;
 }
 
 // _blackhole: consume all arguments via volatile inline asm to prevent DCE.
-// Each argument is passed through "r" volatile asm so LLVM cannot
-// eliminate the computation that produced it.  Float/double are bitcast to
-// integer types first because "r" is an integer register constraint. Object
-// pointers are likewise ptrtoint'd to i64 before entering the register constraint.
-// The receiver (if any) is consumed last after all typed parameters.
-bool JeandleIntrinsicLowering::lower_blackhole(const JeandleIntrinsicDescriptor& desc,
-                                               const JeandleIntrinsicDecision& decision) {
+bool JeandleIntrinsicLowering::lower_blackhole(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
 
   ciSignature* sig = _target->signature();
 
-  // Pop parameters in reverse order (last param = top of stack).
   for (int i = sig->count() - 1; i >= 0; i--) {
     BasicType bt = sig->type_at(i)->basic_type();
     llvm::Value* val;
@@ -712,43 +578,16 @@ bool JeandleIntrinsicLowering::lower_blackhole(const JeandleIntrinsicDescriptor&
     }
     auto* fn_ty = llvm::FunctionType::get(
         llvm::Type::getVoidTy(ctx), {val->getType()}, false);
-    // No ~{memory} clobber: blackhole must keep SSA values live (prevent DCE)
-    // but must not act as a memory barrier. C2 models this as a control-only
-    // use with no memory effects; omitting ~{memory} preserves that contract
-    // so LLVM can still move loads/stores freely across the blackhole call.
-    auto* ia = llvm::InlineAsm::get(fn_ty, "", "r",
-                                    /*hasSideEffects=*/true);
+    // No ~{memory} clobber: blackhole keeps SSA values live (prevent DCE) but is
+    // not a memory barrier.
+    auto* ia = llvm::InlineAsm::get(fn_ty, "", "r", /*hasSideEffects=*/true);
     llvm::CallInst* call = builder.CreateCall(ia, {val});
-    annotate_generated_instruction(*call, desc, decision);
+    annotate_generated_instruction(*call, desc);
   }
 
-  // Consume the receiver for non-static blackhole calls.
   if (!_target->is_static()) {
     _interp->_jvm->apop();
   }
 
-  // void return: nothing to push on the JVM operand stack
-  return true;
-}
-
-// Array.newInstance(Class<?> componentType, int length) → Object
-//
-// Stack (top-of-stack first): length (int), componentType (oop).
-// Static method — no receiver.
-//
-// Delegates to jeandle.new_array(mirror, length) JavaOp which:
-//   1. Loads the cached array klass from the mirror with acquire ordering.
-//   2. Fast path (klass non-null): calls new_array_callee(klass, length, thread).
-//   3. Slow path (klass null):     calls new_array_from_mirror_callee(mirror, length, thread)
-//      which invokes Reflection::reflect_new_array — handles klass resolution, primitive
-//      types, dimension limits, NegativeArraySizeException, NullPointerException.
-//
-// emit_java_op_call internally emits an invoke when needs_exception_edge is set,
-// so exceptions propagate to the bytecode-level handler.
-bool JeandleIntrinsicLowering::lower_new_array(const JeandleIntrinsicDescriptor& desc,
-                                               const JeandleIntrinsicDecision& decision) {
-  llvm::Value* length = _interp->_jvm->ipop();
-  llvm::Value* mirror = _interp->_jvm->apop();
-  _interp->_jvm->apush(emit_java_op_call(desc, decision, {mirror, length}));
   return true;
 }

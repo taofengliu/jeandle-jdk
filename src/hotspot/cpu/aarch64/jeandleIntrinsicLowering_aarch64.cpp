@@ -26,8 +26,7 @@
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 
 bool JeandleIntrinsicLowering::lower_spin_wait_hint(
-    const JeandleIntrinsicDescriptor& desc,
-    const JeandleIntrinsicDecision& decision) {
+    const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   // AArch64: YIELD instruction via llvm.aarch64.hint with hint value 1.
   // The hint encoding is defined in the ARMv8 architecture reference manual;
@@ -35,7 +34,7 @@ bool JeandleIntrinsicLowering::lower_spin_wait_hint(
   // is in a spin-wait loop.
   llvm::CallInst* call = builder.CreateIntrinsic(
       llvm::Intrinsic::aarch64_hint, {}, {builder.getInt32(1)});
-  annotate_generated_instruction(*call, desc, decision);
+  annotate_generated_instruction(*call, desc);
   // void return: nothing to push on the JVM operand stack
   return true;
 }
