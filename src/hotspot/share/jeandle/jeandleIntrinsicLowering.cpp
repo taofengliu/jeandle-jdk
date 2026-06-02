@@ -60,12 +60,6 @@ static bool is_double_constant(llvm::Value* value, double expected,
   return fp_constant->getValueAPF().bitwiseIsEqual(expected_value);
 }
 
-static void add_string_attr(llvm::CallBase& call, llvm::StringRef key, llvm::StringRef value) {
-  llvm::LLVMContext& ctx = call.getContext();
-  call.addAttributeAtIndex(llvm::AttributeList::FunctionIndex,
-                           llvm::Attribute::get(ctx, key, value));
-}
-
 void JeandleIntrinsicLowering::annotate_generated_instruction(llvm::Instruction& inst,
                                                               const JeandleIntrinsicDescriptor& desc,
                                                               const JeandleIntrinsicEntrypoint* entry) const {
@@ -121,9 +115,10 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrins
   assert(ci != nullptr && ci->java_op_name != nullptr, "JavaOp lowering requires a JavaOp symbol");
   llvm::Function* java_op = _interp->_module.getFunction(ci->java_op_name);
   assert(java_op != nullptr, "invalid JavaOp");
-  llvm::CallBase* site = emit_callsite(desc, java_op, llvm::CallingConv::Hotspot_JIT, args);
-  add_string_attr(*site, "jeandle.java_op", ci->java_op_name);
-  return site;
+  // The JavaOp body is inlined later by jeandle-llvm's JavaOperationLower, which
+  // matches on the callee's "lower-phase" attribute — the call site itself needs
+  // no marker attribute.
+  return emit_callsite(desc, java_op, llvm::CallingConv::Hotspot_JIT, args);
 }
 
 // Property-driven runtime-stub resolution: pick the HotSpot stub / SharedRuntime

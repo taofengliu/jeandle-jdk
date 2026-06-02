@@ -78,8 +78,8 @@ class JeandleIntrinsicLowering : public StackObj {
   llvm::CallBase* emit_runtime_call(const JeandleIntrinsicDescriptor& desc,
                                     const JeandleIntrinsicEntrypoint& entry,
                                     llvm::ArrayRef<llvm::Value*> args);
-  // JavaOp call site. Thin facade over emit_callsite; additionally tags the site
-  // with the "jeandle.java_op" attribute.
+  // JavaOp call site. Thin facade over emit_callsite resolving the JavaOp symbol
+  // from call_info->java_op_name.
   llvm::CallBase* emit_java_op_call(const JeandleIntrinsicDescriptor& desc,
                                     llvm::ArrayRef<llvm::Value*> args);
   void annotate_generated_instruction(llvm::Instruction& inst,
