@@ -67,27 +67,27 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
 
 // ---- One-line intrinsic tables (see the header comment for the column guide) ----
 
-// Call lowered to a single llvm.* builtin: one operand in, one result out, same
-// type.  Columns:
+// Call lowered to a single llvm.* builtin.  Operand/result types come from the
+// intercepted method's signature at lowering time, not from the table.  Columns:
 //   vm_name       — vmIntrinsics::_<vm_name> (also the ci_<vm_name> symbol)
 //   llvm_builtin  — llvm::Intrinsic::<llvm_builtin> id
-//   operand_type  — BasicType of the single operand AND the result (same type)
 #define JEANDLE_CALL_LLVM_BUILTIN_TABLE(V) \
-  /*   vm_name      llvm_builtin  operand_type */ \
-  V(dabs,         fabs,  T_DOUBLE)         \
-  V(fabs,         fabs,  T_FLOAT)          \
-  V(bitCount_i,   ctpop, T_INT)            \
-  V(dsqrt,        sqrt,  T_DOUBLE)         \
-  V(dsqrt_strict, sqrt,  T_DOUBLE)         \
-  V(floor,        floor, T_DOUBLE)         \
-  V(ceil,         ceil,  T_DOUBLE)         \
-  V(rint,         rint,  T_DOUBLE)
+  /*   vm_name      llvm_builtin */ \
+  V(dabs,         fabs)  \
+  V(fabs,         fabs)  \
+  V(bitCount_i,   ctpop) \
+  V(dsqrt,        sqrt)  \
+  V(dsqrt_strict, sqrt)  \
+  V(floor,        floor) \
+  V(ceil,         ceil)  \
+  V(rint,         rint)
 
-// Call backed by a HotSpot runtime stub / SharedRuntime routine (one double in,
-// one double out — libm math is the only user today).  The stub and SharedRuntime
-// resolvers are derived from vm_name by token paste (StubRoutines_<vm_name>_callee
-// / SharedRuntime_<vm_name>_callee); the llvm builtin is the fallback when no
-// runtime path is available/preferred.  Columns:
+// Call backed by a HotSpot runtime stub / SharedRuntime routine.  The stub and
+// SharedRuntime resolvers are derived from vm_name by token paste
+// (StubRoutines_<vm_name>_callee / SharedRuntime_<vm_name>_callee); the llvm
+// builtin is the fallback when no runtime path is available/preferred.  Arg and
+// result types come from the method signature, so this table is shape-agnostic —
+// a future multi-arg stub (crc32, AES, ...) adds a row with no new columns.
 //   vm_name       — vmIntrinsics::_<vm_name>; also drives the resolver names
 //   llvm_builtin  — llvm::Intrinsic::<llvm_builtin> id (builtin fallback)
 #define JEANDLE_CALL_RUNTIME_STUB_TABLE(V) \
@@ -99,16 +99,15 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
   V(dlog10, log10) \
   V(dexp,   exp)
 
-// Call delegating to a JavaOp.  Columns:
-//   vm_name, java_op_name, control_flags, memory_flags, barrier_kind,
-//   arg_count, result_type, arg_types... (in call-argument order)
+// Call delegating to a JavaOp.  Stack shape comes from the method signature.
+//   Columns: vm_name, java_op_name, control_flags, memory_flags, barrier_kind
 // (Trap throttling is not a column — see the trap-throttle side-table below.)
 #define JEANDLE_CALL_JAVAOP_TABLE(V)                                                                     \
-  V(getClass,                   "jeandle.get_class",          CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, None,             1, T_OBJECT, T_OBJECT)            \
-  V(Reference_get,              "jeandle.reference_get",      CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, WeakReferentLoad, 1, T_OBJECT, T_OBJECT)            \
-  V(Reference_refersTo0,        "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead,  2, T_INT,    T_OBJECT, T_OBJECT)  \
-  V(PhantomReference_refersTo0, "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead,  2, T_INT,    T_OBJECT, T_OBJECT)  \
-  V(newArray,                   "jeandle.new_array",          CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE,          None,             2, T_OBJECT, T_OBJECT, T_INT)
+  V(getClass,                   "jeandle.get_class",          CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, None)             \
+  V(Reference_get,              "jeandle.reference_get",      CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, WeakReferentLoad) \
+  V(Reference_refersTo0,        "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead)  \
+  V(PhantomReference_refersTo0, "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead)  \
+  V(newArray,                   "jeandle.new_array",          CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE,          None)
 
 // PureLLVM: bare LLVM IR / inline-asm / uncommon_trap; no call site, so
 // call_info == nullptr.  Column: vm_name.  (Trap throttling — which a PureLLVM
@@ -131,41 +130,38 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
   V(Preconditions_checkLongIndex)
 
 // ---- Pass 1: define a JeandleCallInfo per Call/JavaOp row. ----
-#define JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO(VM_NAME, LLVM_BUILTIN, OPERAND_TYPE)    \
+#define JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
   static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
     CTRL_NONE, MEM_NONE, SUPPORT_LLVM_INTRIN,                                         \
     JeandleCalleeKind::LLVMBuiltin, nullptr, llvm::Intrinsic::LLVM_BUILTIN,           \
-    nullptr, nullptr, { OPERAND_TYPE }, 1, OPERAND_TYPE };
+    nullptr, nullptr };
 JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO)
 #undef JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO
 
 #define JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
   static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
     CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,                  \
-    JeandleCalleeKind::RuntimeStub, nullptr, llvm::Intrinsic::LLVM_BUILTIN,     \
+    JeandleCalleeKind::RuntimeStub, nullptr, llvm::Intrinsic::LLVM_BUILTIN,           \
     &JeandleRuntimeRoutine::StubRoutines_##VM_NAME##_callee,                          \
-    &JeandleRuntimeRoutine::SharedRuntime_##VM_NAME##_callee,                         \
-    { T_DOUBLE }, 1, T_DOUBLE };
+    &JeandleRuntimeRoutine::SharedRuntime_##VM_NAME##_callee };
 JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO)
 #undef JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO
 
 #define JEANDLE_DEFINE_JAVAOP_CALL_INFO(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS,         \
-                                        MEMORY_FLAGS, BARRIER, ARG_COUNT, RESULT_TYPE, ...) \
+                                        MEMORY_FLAGS, BARRIER)                        \
   static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
     CONTROL_FLAGS, MEMORY_FLAGS, SUPPORT_NONE,                                        \
     JeandleCalleeKind::JavaOp, JAVA_OP_NAME, llvm::Intrinsic::not_intrinsic,          \
-    nullptr, nullptr, { __VA_ARGS__ }, ARG_COUNT, RESULT_TYPE };
+    nullptr, nullptr };
 JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
 #undef JEANDLE_DEFINE_JAVAOP_CALL_INFO
 
 // --- Hybrid: hand-written JeandleCallInfo (the lowering body pops/pushes the
-//     stack itself, so arg_types/arg_count/result_type are documentary; the
-//     flags + callee resolvers ARE consumed).  No table macro — these are few and
-//     each is shaped differently — so spell out the field order here for reference:
+//     stack itself).  No table macro — these are few and each is shaped
+//     differently — so spell out the field order here for reference:
 //
 //   { control_flags, memory_flags, support_flags,
-//     callee_kind, java_op_name, llvm_intrin_id, stub_callee_fn, shared_callee_fn,
-//     arg_types[3], arg_count, result_type }
+//     callee_kind, java_op_name, llvm_intrin_id, stub_callee_fn, shared_callee_fn }
 //
 //   control_flags    — bitmask of JeandleControlFlag (CTRL_*)
 //   memory_flags     — bitmask of JeandleMemoryFlag (MEM_*)
@@ -174,23 +170,20 @@ JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
 //   java_op_name     — JavaOp symbol, else nullptr
 //   llvm_intrin_id   — llvm::Intrinsic::ID; not_intrinsic when unused
 //   stub/shared_fn   — runtime-callee resolvers (RuntimeStub), else nullptr
-//   arg_types/count  — call-argument shape (documentary for Hybrid)
-//   result_type      — pushed result type; T_VOID for none
 //
-//   Trap throttling is not a JeandleCallInfo field; it is in the id-keyed
+//   Operand-stack shape is not stored — a Hybrid body pops/pushes explicitly.
+//   Trap throttling is not a JeandleCallInfo field either; it is in the id-keyed
 //   trap-throttle side-table (kTrapThrottleTable below).
 static constexpr JeandleCallInfo ci_dpow = {
   CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,
   JeandleCalleeKind::RuntimeStub, nullptr, llvm::Intrinsic::pow,
   &JeandleRuntimeRoutine::StubRoutines_dpow_callee,
-  &JeandleRuntimeRoutine::SharedRuntime_dpow_callee,
-  { T_DOUBLE, T_DOUBLE }, 2, T_DOUBLE };
+  &JeandleRuntimeRoutine::SharedRuntime_dpow_callee };
 // countPositives resolves its callee through resolve_count_positives() inside the
 // body, so callee_kind is None; only the flags are consumed (via emit_runtime_call).
 static constexpr JeandleCallInfo ci_count_positives = {
   CTRL_MAY_DEOPT, MEM_READ, SUPPORT_HOTSPOT_STUB,
-  JeandleCalleeKind::None, nullptr, llvm::Intrinsic::not_intrinsic, nullptr, nullptr,
-  { }, 0, T_INT };
+  JeandleCalleeKind::None, nullptr, llvm::Intrinsic::not_intrinsic, nullptr, nullptr };
 
 #ifdef ASSERT
 static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
@@ -203,7 +196,6 @@ static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
   if (ci == nullptr) {
     return;
   }
-  assert(ci->arg_count <= 3, "arg_count exceeds arg_types capacity");
   assert(ci->callee_kind != JeandleCalleeKind::JavaOp || ci->java_op_name != nullptr,
          "JavaOp callee requires a non-null java_op_name");
   assert(ci->java_op_name == nullptr || ci->java_op_name[0] != '\0',
@@ -261,8 +253,7 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
 #undef JEANDLE_ROW_CALL
 
     // ---- Call: JavaOp (barrier_kind carried from the table) ----
-#define JEANDLE_ROW_JAVAOP(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS, MEMORY_FLAGS, \
-                           BARRIER, ARG_COUNT, RESULT_TYPE, ...) \
+#define JEANDLE_ROW_JAVAOP(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS, MEMORY_FLAGS, BARRIER) \
     { vmIntrinsics::_##VM_NAME, JeandleLoweringKind::Call, &ci_##VM_NAME, JeandleBarrierKind::BARRIER },
     JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_ROW_JAVAOP)
 #undef JEANDLE_ROW_JAVAOP

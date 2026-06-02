@@ -122,13 +122,13 @@ struct JeandleCallInfo {
   JeandleRuntimeCalleeFn stub_callee_fn;   // RuntimeStub: StubRoutines_* (nullptr if none)
   JeandleRuntimeCalleeFn shared_callee_fn; // RuntimeStub: SharedRuntime_*
 
-  // ---- operand-stack shape (Call only; Hybrid bodies pop/push themselves) ----
-  // arg_types is in *call-argument* order: arg_types[0] is the first callee
-  // parameter, arg_types[arg_count-1] is on top of the operand stack, so
-  // emit_simple_call_intrinsic pops in reverse.
-  BasicType arg_types[3];
-  uint8_t   arg_count;
-  BasicType result_type;    // T_VOID = no result pushed
+  // NOTE: no operand-stack shape here.  For a Call intrinsic the arg count/types
+  // and the pushed result type are fully determined by the intercepted Java
+  // method's signature (plus the receiver for instance methods), so
+  // emit_simple_call_intrinsic derives them at lowering time from
+  // _target->signature() via JeandleType::actual2computational — there is nothing
+  // to encode per-intrinsic.  This makes the Call tables shape-agnostic: a
+  // multi-arg runtime stub (crc32, AES, ...) needs no new columns.
 
   // ---- named accessors ----
   bool may_deopt()             const { return (control_flags & CTRL_MAY_DEOPT) != 0; }

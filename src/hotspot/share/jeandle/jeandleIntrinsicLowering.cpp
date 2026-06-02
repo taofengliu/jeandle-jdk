@@ -185,27 +185,46 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
       return false;  // a Call descriptor must name a generic callee
   }
 
-  // Pop args in reverse: arg_types[arg_count-1] is on top of the operand stack.
-  llvm::SmallVector<llvm::Value*, 3> args;
-  args.resize(ci->arg_count);
-  for (int i = (int)ci->arg_count - 1; i >= 0; --i) {
-    args[i] = _interp->_jvm->pop(ci->arg_types[i]);
+  // The operand-stack shape is fully determined by the intercepted method's
+  // signature: one slot per signature parameter, plus a leading receiver slot for
+  // instance methods.  Pop in computational types (sub-word -> int, array -> object),
+  // matching how the JVM operand stack stores them.
+  ciSignature* sig = _target->signature();
+  const bool has_receiver = !_target->is_static();
+  const int sig_count = sig->count();
+  const int arg_count = sig_count + (has_receiver ? 1 : 0);
+
+  llvm::SmallVector<llvm::Value*, 4> args;
+  llvm::SmallVector<BasicType, 4> arg_types;
+  args.resize(arg_count);
+  arg_types.resize(arg_count);
+  for (int i = 0; i < arg_count; ++i) {
+    arg_types[i] = (has_receiver && i == 0)
+        ? T_OBJECT  // the receiver ('this')
+        : JeandleType::actual2computational(sig->type_at(i - (has_receiver ? 1 : 0))->basic_type());
+  }
+  // Pop in reverse: the last argument is on top of the operand stack.
+  for (int i = arg_count - 1; i >= 0; --i) {
+    args[i] = _interp->_jvm->pop(arg_types[i]);
   }
 
   llvm::Value* result = nullptr;
   if (is_java_op) {
     result = emit_java_op_call(desc, args);
   } else if (use_builtin) {
+    assert(arg_count >= 1, "LLVM builtin intrinsic must take at least one operand");
     llvm::CallInst* call = builder.CreateIntrinsic(
-        JeandleType::java2llvm(ci->arg_types[0], ctx), ci->llvm_intrin_id, args);
+        JeandleType::java2llvm(arg_types[0], ctx), ci->llvm_intrin_id, args);
     annotate_generated_instruction(*call, desc);
     result = call;
   } else {
     result = emit_runtime_call(desc, entry, args);
   }
 
-  if (ci->result_type != T_VOID) {
-    _interp->_jvm->push(ci->result_type, result);
+  const BasicType result_type =
+      JeandleType::actual2computational(sig->return_type()->basic_type());
+  if (result_type != T_VOID) {
+    _interp->_jvm->push(result_type, result);
   }
   return true;
 }
