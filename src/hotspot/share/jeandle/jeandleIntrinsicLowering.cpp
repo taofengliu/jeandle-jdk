@@ -84,7 +84,7 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDe
                                                         llvm::CallingConv::ID calling_conv,
                                                         llvm::ArrayRef<llvm::Value*> args,
                                                         const JeandleIntrinsicEntrypoint* entry) {
-  const JeandleCallInfo* ci = desc.call_info;
+  const JeandleIntrinsicCallInfo* ci = desc.call_info;
   assert(ci != nullptr, "emit_callsite requires call_info (Call/Hybrid only)");
   llvm::SmallVector<llvm::OperandBundleDef, 1> bundles =
     JeandleIntrinsicIRSemantics::build_operand_bundles(_interp, ci->attach_deopt_bundle());
@@ -111,7 +111,7 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_runtime_call(const JeandleIntrins
 
 llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrinsicDescriptor& desc,
                                                             llvm::ArrayRef<llvm::Value*> args) {
-  const JeandleCallInfo* ci = desc.call_info;
+  const JeandleIntrinsicCallInfo* ci = desc.call_info;
   assert(ci != nullptr && ci->java_op_name != nullptr, "JavaOp lowering requires a JavaOp symbol");
   llvm::Function* java_op = _interp->_module.getFunction(ci->java_op_name);
   assert(java_op != nullptr, "invalid JavaOp");
@@ -127,7 +127,7 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrins
 bool JeandleIntrinsicLowering::resolve_runtime_callee(const JeandleIntrinsicDescriptor& desc,
                                                       JeandleIntrinsicEntrypoint& entry,
                                                       bool& has_entry) {
-  const JeandleCallInfo* ci = desc.call_info;
+  const JeandleIntrinsicCallInfo* ci = desc.call_info;
   has_entry = false;
   JeandleIntrinsicCapabilities caps = JeandleIntrinsicSupport::query(desc);
   if (caps.hotspot_preferred && caps.any_runtime()) {
@@ -153,7 +153,7 @@ bool JeandleIntrinsicLowering::resolve_runtime_callee(const JeandleIntrinsicDesc
 }
 
 bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsicDescriptor& desc) {
-  const JeandleCallInfo* ci = desc.call_info;
+  const JeandleIntrinsicCallInfo* ci = desc.call_info;
   assert(ci != nullptr, "Call lowering requires call_info");
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
@@ -166,22 +166,22 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
   bool has_entry = false;                          // runtime stub / SharedRuntime
 
   switch (ci->callee_kind) {
-    case JeandleCalleeKind::JavaOp:
+    case JeandleIntrinsicCalleeKind::JavaOp:
       is_java_op = true;
       break;
-    case JeandleCalleeKind::LLVMBuiltin:
+    case JeandleIntrinsicCalleeKind::LLVMBuiltin:
       if (!JeandleIntrinsicSupport::query(desc).has_llvm_builtin) {
         return false;  // e.g. floor/ceil/rint without SSE4.1 -> NormalInvoke fallback
       }
       use_builtin = true;
       break;
-    case JeandleCalleeKind::RuntimeStub:
+    case JeandleIntrinsicCalleeKind::RuntimeStub:
       if (!resolve_runtime_callee(desc, entry, has_entry)) {
         return false;
       }
       use_builtin = !has_entry;
       break;
-    case JeandleCalleeKind::None:
+    case JeandleIntrinsicCalleeKind::None:
       return false;  // a Call descriptor must name a generic callee
   }
 
@@ -363,7 +363,7 @@ bool JeandleIntrinsicLowering::lower_type_coercion(const JeandleIntrinsicDescrip
 // Math.pow(base, exp): Hybrid — IR fast paths for the common constant exponents,
 // otherwise a runtime/builtin pow call resolved property-driven from call_info.
 bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc) {
-  const JeandleCallInfo* ci = desc.call_info;
+  const JeandleIntrinsicCallInfo* ci = desc.call_info;
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::Type* ret_ty = JeandleType::java2llvm(T_DOUBLE, ctx);

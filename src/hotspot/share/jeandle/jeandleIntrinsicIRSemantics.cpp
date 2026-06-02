@@ -34,7 +34,7 @@
 // memory attribute upstream, so this only adds value for *external* runtime stubs
 // whose body LLVM cannot see, enabling LICM / GVN / DCE on hot pure libm calls
 // and read-only array scans.
-void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const JeandleCallInfo& ci) {
+void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const JeandleIntrinsicCallInfo& ci) {
   if (ci.needs_gc_state() || ci.may_deopt() || ci.needs_exception_edge()) {
     return;
   }

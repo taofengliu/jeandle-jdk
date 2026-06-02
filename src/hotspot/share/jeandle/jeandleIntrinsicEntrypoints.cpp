@@ -26,7 +26,7 @@ static llvm::CallingConv::ID runtime_cc() {
 }
 
 // The libm math routines (dsin/dcos/.../dpow) are resolved property-driven from
-// JeandleCallInfo's stub_callee_fn / shared_callee_fn function pointers in
+// JeandleIntrinsicCallInfo's stub_callee_fn / shared_callee_fn function pointers in
 // JeandleIntrinsicLowering::resolve_runtime_callee — there is no id-switch here.
 // Only countPositives keeps a dedicated resolver because it picks between a SIMD
 // adapter stub and a scalar fallback that share no naming convention with the id.

@@ -29,7 +29,7 @@
 #include "memory/allocation.hpp"
 
 // Materialized runtime callee plus the IR-level facts a lowering needs to emit a
-// call to it.  The libm math family is resolved directly from JeandleCallInfo's
+// call to it.  The libm math family is resolved directly from JeandleIntrinsicCallInfo's
 // stub_callee_fn / shared_callee_fn function pointers (see
 // JeandleIntrinsicLowering::resolve_runtime_callee), so it no longer needs a
 // resolver here.  countPositives keeps a dedicated resolver because it chooses

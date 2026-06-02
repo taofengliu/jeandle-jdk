@@ -30,14 +30,14 @@
 #include "memory/allocation.hpp"
 
 // =============================================================================
-// JeandleCallInfo — everything an intrinsic needs *only when its lowering emits
+// JeandleIntrinsicCallInfo — everything an intrinsic needs *only when its lowering emits
 // a call site*.  Reached from JeandleIntrinsicDescriptor::call_info; the base
 // descriptor stays minimal and LLVM-free.
 //
 // Rationale (the "call-only" split): a deopt bundle, an invoke exception edge,
 // and GC-state visibility are properties of a call, not of a bare IR sequence.
 // PureLLVM intrinsics (bitcast / fence / inline-asm / uncommon_trap) emit no
-// such call site and carry no JeandleCallInfo.  Call and Hybrid intrinsics do,
+// such call site and carry no JeandleIntrinsicCallInfo.  Call and Hybrid intrinsics do,
 // so the control/memory/support facts, the callee identity, and the operand
 // stack shape all live here.
 //
@@ -48,7 +48,7 @@
 // Meanwhile the actual G1 barrier still lives inside the relevant JavaOp bodies.
 // =============================================================================
 
-// Control-flow facts.  Combined into JeandleCallInfo::control_flags with bitwise
+// Control-flow facts.  Combined into JeandleIntrinsicCallInfo::control_flags with bitwise
 // OR.  Unscoped so call-info rows can write `CTRL_MAY_DEOPT | CTRL_...`.
 enum JeandleControlFlag : uint8_t {
   CTRL_NONE                 = 0,
@@ -59,7 +59,7 @@ enum JeandleControlFlag : uint8_t {
   CTRL_NEEDS_EXCEPTION_EDGE = 1u << 1,
 };
 
-// Memory-effect facts.  Combined into JeandleCallInfo::memory_flags with bitwise
+// Memory-effect facts.  Combined into JeandleIntrinsicCallInfo::memory_flags with bitwise
 // OR and translated into LLVM call-site memory attributes where safe.
 enum JeandleMemoryFlag : uint16_t {
   MEM_NONE              = 0,
@@ -77,7 +77,7 @@ enum JeandleMemoryFlag : uint16_t {
 };
 
 // What lowering paths a call-based descriptor *declares* it can take.  Combined
-// into JeandleCallInfo::support_flags with bitwise OR.  Per-VM availability of
+// into JeandleIntrinsicCallInfo::support_flags with bitwise OR.  Per-VM availability of
 // those paths (stub installed, CPU feature present) is resolved at runtime by
 // JeandleIntrinsicSupport.
 enum JeandleSupportFlag : uint8_t {
@@ -89,7 +89,7 @@ enum JeandleSupportFlag : uint8_t {
 };
 
 // Which kind of callee a Call / Hybrid intrinsic targets.
-enum class JeandleCalleeKind : uint8_t {
+enum class JeandleIntrinsicCalleeKind : uint8_t {
   // No generic callee — a Hybrid body resolves and emits the call itself
   // (e.g. StringCoding.countPositives via resolve_count_positives).
   None,
@@ -109,14 +109,14 @@ enum class JeandleCalleeKind : uint8_t {
 // Hybrid bodies resolve a callee generically — never switching on intrinsic id.
 using JeandleRuntimeCalleeFn = llvm::FunctionCallee (*)(llvm::Module&);
 
-struct JeandleCallInfo {
+struct JeandleIntrinsicCallInfo {
   // ---- call-site semantics (moved out of the base descriptor) ----
   uint8_t  control_flags;   // bitmask of JeandleControlFlag
   uint16_t memory_flags;    // bitmask of JeandleMemoryFlag
   uint8_t  support_flags;   // bitmask of JeandleSupportFlag
 
   // ---- callee identity (discriminated by callee_kind) ----
-  JeandleCalleeKind      callee_kind;
+  JeandleIntrinsicCalleeKind      callee_kind;
   const char*            java_op_name;     // JavaOp
   llvm::Intrinsic::ID    llvm_intrin_id;   // LLVMBuiltin; RuntimeStub builtin fallback
   JeandleRuntimeCalleeFn stub_callee_fn;   // RuntimeStub: StubRoutines_* (nullptr if none)
@@ -152,7 +152,7 @@ struct JeandleCallInfo {
   // qualify (they may run arbitrary managed code).
   bool attach_gc_leaf() const {
     return !needs_gc_state() && !may_deopt() && !needs_exception_edge() &&
-           callee_kind != JeandleCalleeKind::JavaOp;
+           callee_kind != JeandleIntrinsicCalleeKind::JavaOp;
   }
 };
 

@@ -99,7 +99,7 @@ static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleIntrinsicCapabilitie
 JeandleIntrinsicCapabilities JeandleIntrinsicSupport::query(const JeandleIntrinsicDescriptor& desc) {
   assert(desc.call_info != nullptr,
          "capability query is only meaningful for Call/Hybrid intrinsics");
-  const JeandleCallInfo& ci = *desc.call_info;
+  const JeandleIntrinsicCallInfo& ci = *desc.call_info;
   JeandleIntrinsicCapabilities caps{};
   caps.has_llvm_builtin  = ci.supports_llvm_intrin() && cpu_supports_llvm_builtin(desc.id);
   caps.hotspot_preferred = JeandleUseHotspotIntrinsics;

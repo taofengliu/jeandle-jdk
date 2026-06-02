@@ -57,7 +57,7 @@ class JeandleIntrinsicIRSemantics : public AllStatic {
   // attribute.  The caller (emit_callsite) applies it only on the plain-call
   // path; the helper itself is also a no-op for any call that could safepoint
   // (gc-state / deopt / exception edge).
-  static void apply_memory_attr(llvm::CallBase* call, const JeandleCallInfo& ci);
+  static void apply_memory_attr(llvm::CallBase* call, const JeandleIntrinsicCallInfo& ci);
 };
 
 #endif // SHARE_JEANDLE_INTRINSIC_IR_SEMANTICS_HPP

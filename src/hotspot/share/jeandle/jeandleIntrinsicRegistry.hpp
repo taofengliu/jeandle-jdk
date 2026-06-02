@@ -30,19 +30,19 @@ class ciMethod;
 // Defined in jeandleIntrinsicCallInfo.hpp.  That header pulls in LLVM types
 // (Intrinsic::ID, FunctionCallee), so it is kept out of this descriptor header:
 // the base descriptor stays LLVM-free and only holds a pointer to the call info.
-struct JeandleCallInfo;
+struct JeandleIntrinsicCallInfo;
 
 // Coarse lowering family — selects which lowering routine handles the intrinsic:
 //
 //   PureLLVM — bare LLVM IR / inline-asm / uncommon_trap.  Emits no semantic
-//              call site, so it carries no JeandleCallInfo (call_info == nullptr).
+//              call site, so it carries no JeandleIntrinsicCallInfo (call_info == nullptr).
 //   Hybrid   — a hand-written lowering that wraps a call site in guards or
 //              fast paths (Math.pow, StringCoding.countPositives).
 //   Call     — fixed shape "pop args -> call the callee once -> push result",
 //              handled generically by emit_simple_call_intrinsic.
 //
 // Hybrid and Call both emit a call site and therefore always carry a
-// JeandleCallInfo (call_info != nullptr).
+// JeandleIntrinsicCallInfo (call_info != nullptr).
 enum class JeandleLoweringKind : uint8_t {
   PureLLVM,
   Hybrid,
@@ -60,7 +60,7 @@ enum class JeandleLoweringKind : uint8_t {
 // consistency); meanwhile the G1 pre-barrier stays inside the JavaOp body for
 // correctness.  It is lowering-independent (a future inlined load/store could
 // carry the same kind), so it lives on the base descriptor, not in
-// JeandleCallInfo.  See jeandle-docs/intrinsics/pending-barrier-semantic-stability.md.
+// JeandleIntrinsicCallInfo.  See jeandle-docs/intrinsics/pending-barrier-semantic-stability.md.
 // Barriers are mutually exclusive, so a scoped enum models them better than a bitmask.
 enum class JeandleBarrierKind : uint8_t {
   None,
@@ -78,7 +78,7 @@ static_assert(Deoptimization::Reason_LIMIT <= 32,
 // Base descriptor: one row per intrinsic Jeandle can lower.  It holds only the
 // admission-time facts (identity, lowering family, trap throttle).  Everything
 // tied to emitting a call site — control/memory semantics, callee identity and
-// operand-stack shape — lives in JeandleCallInfo, reached through call_info.
+// operand-stack shape — lives in JeandleIntrinsicCallInfo, reached through call_info.
 //
 // call_info is nullptr for pure-IR PureLLVM intrinsics and non-null for every
 // Call / Hybrid intrinsic.
@@ -89,7 +89,7 @@ struct JeandleIntrinsicDescriptor {
   JeandleLoweringKind    lowering_kind;
   // Call-site semantics + callee + stack shape.  nullptr iff lowering_kind is
   // PureLLVM.
-  const JeandleCallInfo* call_info;
+  const JeandleIntrinsicCallInfo* call_info;
   // GC barrier semantic source: reserved data for a future late GC-barrier pass.
   // Not emitted anywhere today and never drives lowering.  Defaulted so rows that
   // omit it read as JeandleBarrierKind::None.
