@@ -180,7 +180,7 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
       }
       use_builtin = true;
       break;
-    case JeandleCalleeKind::HotspotStubOrLibm:
+    case JeandleCalleeKind::RuntimeStub:
       if (!resolve_runtime_callee(desc, entry, has_entry)) {
         return false;
       }

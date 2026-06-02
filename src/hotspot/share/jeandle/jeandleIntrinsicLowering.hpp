@@ -39,7 +39,7 @@ class JeandleIntrinsicLowering : public StackObj {
   // by call_info->arg_types, call the callee, push the result.  No per-intrinsic
   // code; everything is read off call_info.
   bool emit_simple_call_intrinsic(const JeandleIntrinsicDescriptor& desc);
-  // Resolve a HotspotStubOrLibm callee from call_info (property-driven, never a
+  // Resolve a RuntimeStub callee from call_info (property-driven, never a
   // switch on intrinsic id).  On a runtime stub / SharedRuntime hit, fills
   // `entry` (callee + calling conv + well-known name) and sets has_entry=true;
   // when the runtime path is unavailable but a builtin fallback exists, returns

@@ -97,10 +97,10 @@ enum class JeandleCalleeKind : uint8_t {
   JavaOp,
   // A named llvm.* builtin identified by llvm_intrin_id.
   LLVMBuiltin,
-  // A HotSpot runtime stub / SharedRuntime entry, materialized via the
+  // A HotSpot runtime stub / SharedRuntime routine, materialized via the
   // *_callee_fn resolvers; falls back to the llvm_intrin_id builtin when the
   // runtime path is unavailable or not preferred.
-  HotspotStubOrLibm,
+  RuntimeStub,
 };
 
 // Property-driven runtime-callee resolver.  One function per runtime routine that
@@ -118,9 +118,9 @@ struct JeandleCallInfo {
   // ---- callee identity (discriminated by callee_kind) ----
   JeandleCalleeKind      callee_kind;
   const char*            java_op_name;     // JavaOp
-  llvm::Intrinsic::ID    llvm_intrin_id;   // LLVMBuiltin; HotspotStubOrLibm builtin fallback
-  JeandleRuntimeCalleeFn stub_callee_fn;   // HotspotStubOrLibm: StubRoutines_* (nullptr if none)
-  JeandleRuntimeCalleeFn shared_callee_fn; // HotspotStubOrLibm: SharedRuntime_*
+  llvm::Intrinsic::ID    llvm_intrin_id;   // LLVMBuiltin; RuntimeStub builtin fallback
+  JeandleRuntimeCalleeFn stub_callee_fn;   // RuntimeStub: StubRoutines_* (nullptr if none)
+  JeandleRuntimeCalleeFn shared_callee_fn; // RuntimeStub: SharedRuntime_*
 
   // ---- operand-stack shape (Call only; Hybrid bodies pop/push themselves) ----
   // arg_types is in *call-argument* order: arg_types[0] is the first callee

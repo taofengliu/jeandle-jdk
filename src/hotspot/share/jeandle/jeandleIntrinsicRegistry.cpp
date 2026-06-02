@@ -142,7 +142,7 @@ JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO)
 #define JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
   static constexpr JeandleCallInfo ci_##VM_NAME = {                                   \
     CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,                  \
-    JeandleCalleeKind::HotspotStubOrLibm, nullptr, llvm::Intrinsic::LLVM_BUILTIN,     \
+    JeandleCalleeKind::RuntimeStub, nullptr, llvm::Intrinsic::LLVM_BUILTIN,     \
     &JeandleRuntimeRoutine::StubRoutines_##VM_NAME##_callee,                          \
     &JeandleRuntimeRoutine::SharedRuntime_##VM_NAME##_callee,                         \
     { T_DOUBLE }, 1, T_DOUBLE };
@@ -173,7 +173,7 @@ JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
 //   callee_kind      — JeandleCalleeKind; None when the body resolves its own callee
 //   java_op_name     — JavaOp symbol, else nullptr
 //   llvm_intrin_id   — llvm::Intrinsic::ID; not_intrinsic when unused
-//   stub/shared_fn   — runtime-callee resolvers (HotspotStubOrLibm), else nullptr
+//   stub/shared_fn   — runtime-callee resolvers (RuntimeStub), else nullptr
 //   arg_types/count  — call-argument shape (documentary for Hybrid)
 //   result_type      — pushed result type; T_VOID for none
 //
@@ -181,7 +181,7 @@ JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
 //   trap-throttle side-table (kTrapThrottleTable below).
 static constexpr JeandleCallInfo ci_dpow = {
   CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,
-  JeandleCalleeKind::HotspotStubOrLibm, nullptr, llvm::Intrinsic::pow,
+  JeandleCalleeKind::RuntimeStub, nullptr, llvm::Intrinsic::pow,
   &JeandleRuntimeRoutine::StubRoutines_dpow_callee,
   &JeandleRuntimeRoutine::SharedRuntime_dpow_callee,
   { T_DOUBLE, T_DOUBLE }, 2, T_DOUBLE };
@@ -208,9 +208,9 @@ static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
          "JavaOp callee requires a non-null java_op_name");
   assert(ci->java_op_name == nullptr || ci->java_op_name[0] != '\0',
          "empty JavaOp name string");
-  assert(ci->callee_kind != JeandleCalleeKind::HotspotStubOrLibm ||
+  assert(ci->callee_kind != JeandleCalleeKind::RuntimeStub ||
          (ci->stub_callee_fn != nullptr || ci->shared_callee_fn != nullptr || ci->supports_llvm_intrin()),
-         "HotspotStubOrLibm needs a runtime resolver or a builtin fallback");
+         "RuntimeStub needs a runtime resolver or a builtin fallback");
   assert(!ci->only_orders_memory() || (!ci->reads_memory() && !ci->writes_memory()),
          "MEM_ORDERING_ONLY is mutually exclusive with MEM_READ / MEM_WRITE");
   // The referent-reading intrinsics must keep read-only GC-visible memory so the
