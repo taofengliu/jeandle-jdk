@@ -87,11 +87,6 @@ struct JeandleIntrinsicDescriptor {
   vmIntrinsics::ID       id;
   // Coarse lowering family; see JeandleLoweringKind.
   JeandleLoweringKind    lowering_kind;
-  // Deoptimization reasons that throttle admission when too many traps occurred
-  // at the invoke site.  Zero means no trap-based throttling.  Read at admission
-  // time (JeandleAbstractInterpreter::try_lower_intrinsic), independent of any
-  // call site, so it stays on the base descriptor.
-  JeandleTrapReasonMask  trap_throttle_mask;
   // Call-site semantics + callee + stack shape.  nullptr iff lowering_kind is
   // PureLLVM.
   const JeandleCallInfo* call_info;
@@ -115,6 +110,14 @@ class JeandleIntrinsicRegistry : public AllStatic {
   static void initialize();
   static const JeandleIntrinsicDescriptor* lookup(vmIntrinsics::ID id);
   static const JeandleIntrinsicDescriptor* lookup(const ciMethod* method);
+
+  // Trap-throttle mask for an intrinsic: deopt reasons that throttle admission
+  // when too many traps occurred at the invoke site (read before too_many_traps
+  // in JeandleAbstractInterpreter::try_lower_intrinsic).  This is a sparse,
+  // id-keyed property — only a few intrinsics deopt — so it lives in a small
+  // side-table rather than on every descriptor.  Returns 0 (no throttling) for
+  // any id not in the table.  Independent of lowering_kind: any kind may throttle.
+  static JeandleTrapReasonMask trap_throttle_mask(vmIntrinsics::ID id);
 };
 
 #endif // SHARE_JEANDLE_INTRINSIC_REGISTRY_HPP
