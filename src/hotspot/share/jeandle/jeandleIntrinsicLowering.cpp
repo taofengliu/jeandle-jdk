@@ -161,7 +161,7 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
   // Resolve the callee form before popping args, so a CPU-feature miss can
   // decline cleanly without disturbing the operand stack.
   bool is_java_op = false;
-  bool use_builtin = false;                       // emit via CreateIntrinsic(llvm_intrin_id)
+  bool use_builtin = false;                       // RuntimeStub fell back to the llvm builtin
   JeandleIntrinsicEntrypoint entry;
   bool has_entry = false;                          // runtime stub / SharedRuntime
 
@@ -169,13 +169,10 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
     case JeandleIntrinsicCalleeKind::JavaOp:
       is_java_op = true;
       break;
-    case JeandleIntrinsicCalleeKind::LLVMBuiltin:
-      if (!JeandleIntrinsicSupport::query(desc).has_llvm_builtin) {
-        return false;  // e.g. floor/ceil/rint without SSE4.1 -> NormalInvoke fallback
-      }
-      use_builtin = true;
-      break;
     case JeandleIntrinsicCalleeKind::RuntimeStub:
+      // Prefer the stub / SharedRuntime; if unavailable, fall back to the llvm
+      // builtin (CreateIntrinsic).  (Plain single-builtin intrinsics are not
+      // here — they are PureLLVM via kPureMathTable.)
       if (!resolve_runtime_callee(desc, entry, has_entry)) {
         return false;
       }
@@ -247,6 +244,14 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
 
     case JeandleLoweringKind::PureLLVM:
       switch (desc.id) {
+        case vmIntrinsics::_dabs:
+        case vmIntrinsics::_fabs:
+        case vmIntrinsics::_bitCount_i:
+        case vmIntrinsics::_dsqrt:
+        case vmIntrinsics::_dsqrt_strict:
+        case vmIntrinsics::_floor:
+        case vmIntrinsics::_ceil:
+        case vmIntrinsics::_rint:
         case vmIntrinsics::_iabs:
         case vmIntrinsics::_labs:
         case vmIntrinsics::_bitCount_l:
@@ -280,28 +285,47 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
   return false;
 }
 
-// Spec rows for lower_pure_math: PureLLVM math intrinsics that deviate from the
-// plain Call shape — llvm.abs needs a trailing i1 poison flag, and Long.bitCount
-// truncates an i64 ctpop result to i32.  (The plain shapes — dabs/fabs/dsqrt/
-// bitCount_i/floor/ceil/rint — are JeandleLoweringKind::Call, handled generically
-// by emit_simple_call_intrinsic.)
+// Spec rows for lower_pure_math: PureLLVM intrinsics lowered to a single llvm.*
+// builtin.  Two groups share this one handler:
+//   - plain "pop -> CreateIntrinsic -> push" builtins (dabs/fabs/dsqrt/bitCount_i/
+//     floor/ceil/rint): operand_type == result_type, no poison flag;
+//   - shape-deviating builtins: llvm.abs needs a trailing i1 poison flag (iabs/
+//     labs), Long.bitCount truncates an i64 ctpop result to i32 (bitCount_l).
+// These all attach the same single attribute a PureLLVM call gets (gc-leaf via
+// annotate_generated_instruction) — no JeandleIntrinsicCallInfo, no deopt bundle —
+// which is exactly why they belong here and not on the opaque-call path.
 struct PureMathSpec {
   vmIntrinsics::ID    vm_id;
   llvm::Intrinsic::ID llvm_id;
   BasicType           operand_type;
   BasicType           result_type;
   bool                needs_poison_flag;  // llvm.abs requires a trailing i1
+  bool                needs_cpu_check;    // gate on cpu_supports_llvm_builtin (floor/ceil/rint)
 };
 
 static constexpr PureMathSpec kPureMathTable[] = {
-  { vmIntrinsics::_iabs,       llvm::Intrinsic::abs,   T_INT,  T_INT, true  },
-  { vmIntrinsics::_labs,       llvm::Intrinsic::abs,   T_LONG, T_LONG, true  },
-  { vmIntrinsics::_bitCount_l, llvm::Intrinsic::ctpop, T_LONG, T_INT,  false },
+  { vmIntrinsics::_dabs,         llvm::Intrinsic::fabs,  T_DOUBLE, T_DOUBLE, false, false },
+  { vmIntrinsics::_fabs,         llvm::Intrinsic::fabs,  T_FLOAT,  T_FLOAT,  false, false },
+  { vmIntrinsics::_bitCount_i,   llvm::Intrinsic::ctpop, T_INT,    T_INT,    false, false },
+  { vmIntrinsics::_dsqrt,        llvm::Intrinsic::sqrt,  T_DOUBLE, T_DOUBLE, false, false },
+  { vmIntrinsics::_dsqrt_strict, llvm::Intrinsic::sqrt,  T_DOUBLE, T_DOUBLE, false, false },
+  { vmIntrinsics::_floor,        llvm::Intrinsic::floor, T_DOUBLE, T_DOUBLE, false, true  },
+  { vmIntrinsics::_ceil,         llvm::Intrinsic::ceil,  T_DOUBLE, T_DOUBLE, false, true  },
+  { vmIntrinsics::_rint,         llvm::Intrinsic::rint,  T_DOUBLE, T_DOUBLE, false, true  },
+  { vmIntrinsics::_iabs,         llvm::Intrinsic::abs,   T_INT,    T_INT,    true,  false },
+  { vmIntrinsics::_labs,         llvm::Intrinsic::abs,   T_LONG,   T_LONG,   true,  false },
+  { vmIntrinsics::_bitCount_l,   llvm::Intrinsic::ctpop, T_LONG,   T_INT,    false, false },
 };
 
 bool JeandleIntrinsicLowering::lower_pure_math(const JeandleIntrinsicDescriptor& desc) {
   for (const PureMathSpec& spec : kPureMathTable) {
     if (spec.vm_id != desc.id) continue;
+    // CPU-feature gate (floor/ceil/rint need SSE4.1 on x86): decline before
+    // touching the operand stack so the caller falls back to NormalInvoke.
+    if (spec.needs_cpu_check &&
+        !JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
+      return false;
+    }
     llvm::LLVMContext& ctx = *_interp->_context;
     llvm::IRBuilder<>& builder = _interp->_ir_builder;
 

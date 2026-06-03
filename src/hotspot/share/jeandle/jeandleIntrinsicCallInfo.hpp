@@ -88,15 +88,15 @@ enum JeandleSupportFlag : uint8_t {
   SUPPORT_LLVM_INTRIN   = 1u << 1,
 };
 
-// Which kind of callee a Call / Hybrid intrinsic targets.
+// Which kind of callee a Call / Hybrid intrinsic targets.  (A single llvm.*
+// builtin is NOT a callee kind here — such intrinsics are PureLLVM, lowered via
+// kPureMathTable, and carry no JeandleIntrinsicCallInfo.)
 enum class JeandleIntrinsicCalleeKind : uint8_t {
   // No generic callee — a Hybrid body resolves and emits the call itself
   // (e.g. StringCoding.countPositives via resolve_count_positives).
   None,
   // A Jeandle JavaOp function in the module, named by java_op_name.
   JavaOp,
-  // A named llvm.* builtin identified by llvm_intrin_id.
-  LLVMBuiltin,
   // A HotSpot runtime stub / SharedRuntime routine, materialized via the
   // *_callee_fn resolvers; falls back to the llvm_intrin_id builtin when the
   // runtime path is unavailable or not preferred.
@@ -118,7 +118,7 @@ struct JeandleIntrinsicCallInfo {
   // ---- callee identity (discriminated by callee_kind) ----
   JeandleIntrinsicCalleeKind      callee_kind;
   const char*            java_op_name;     // JavaOp
-  llvm::Intrinsic::ID    llvm_intrin_id;   // LLVMBuiltin; RuntimeStub builtin fallback
+  llvm::Intrinsic::ID    llvm_intrin_id;   // RuntimeStub builtin fallback (not_intrinsic if none)
   JeandleRuntimeCalleeFn stub_callee_fn;   // RuntimeStub: StubRoutines_* (nullptr if none)
   JeandleRuntimeCalleeFn shared_callee_fn; // RuntimeStub: SharedRuntime_*
 

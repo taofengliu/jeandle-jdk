@@ -37,19 +37,20 @@
 // ci_<name>`, once to emit the base-descriptor row pointing at it.  Pick the
 // table by *shape*:
 //
-//   JEANDLE_CALL_LLVM_BUILTIN_TABLE — Call lowered to a single llvm.* builtin,
-//       one operand in / one result out, same type.  `V(name, intrinsic, type)`.
-//       CPU-feature gating (floor/ceil/rint) lives in Support::query, not here.
 //   JEANDLE_CALL_RUNTIME_STUB_TABLE — Call backed by a HotSpot runtime stub /
 //       SharedRuntime routine, with the llvm builtin as fallback; the stub /
 //       SharedRuntime resolvers are derived from `name` by token paste.
-//       `V(name, intrinsic, well_known)`.  NOTE: currently models the single
-//       "double in -> double out" shape only (libm math today); a differently
-//       shaped runtime-stub intrinsic needs its own row/table.
+//       `V(name, llvm_builtin)`.
 //   JEANDLE_CALL_JAVAOP_TABLE — Call delegating to a JavaOp.
-//       `V(name, java_op, ctrl, mem, barrier, arg_count, result, arg_types...)`.
+//       `V(name, java_op, ctrl, mem, barrier)`.
 //   JEANDLE_PURE_TABLE — PureLLVM (bare IR / inline-asm / uncommon_trap); no
 //       call site, call_info == nullptr.  `V(name)`.
+//   (Single-llvm.*-builtin intrinsics — dabs/fabs/dsqrt/floor/... — are also
+//    PureLLVM, but lowered via kPureMathTable in jeandleIntrinsicLowering.cpp
+//    rather than a registry table; they need no JeandleIntrinsicCallInfo.)
+//
+// Operand/result stack shapes are NOT in these tables — they come from the
+// intercepted method's signature at lowering time.
 //
 // Intrinsics that do not fit a table (Hybrid bodies, trap-throttled PureLLVM) are
 // written out explicitly right after the tables.  After adding a row:
@@ -67,20 +68,11 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
 
 // ---- One-line intrinsic tables (see the header comment for the column guide) ----
 
-// Call lowered to a single llvm.* builtin.  Operand/result types come from the
-// intercepted method's signature at lowering time, not from the table.  Columns:
-//   vm_name       — vmIntrinsics::_<vm_name> (also the ci_<vm_name> symbol)
-//   llvm_builtin  — llvm::Intrinsic::<llvm_builtin> id
-#define JEANDLE_CALL_LLVM_BUILTIN_TABLE(V) \
-  /*   vm_name      llvm_builtin */ \
-  V(dabs,         fabs)  \
-  V(fabs,         fabs)  \
-  V(bitCount_i,   ctpop) \
-  V(dsqrt,        sqrt)  \
-  V(dsqrt_strict, sqrt)  \
-  V(floor,        floor) \
-  V(ceil,         ceil)  \
-  V(rint,         rint)
+// NOTE: single-llvm.*-builtin intrinsics (dabs/fabs/dsqrt/bitCount_i/floor/ceil/
+// rint and the poison-flag/trunc ones) are NOT here — they are PureLLVM, lowered
+// via kPureMathTable in jeandleIntrinsicLowering.cpp.  A builtin call attaches the
+// same single gc-leaf attribute a bare-IR PureLLVM op does and needs no
+// JeandleIntrinsicCallInfo, so it does not belong on the opaque-call path below.
 
 // Call backed by a HotSpot runtime stub / SharedRuntime routine.  The stub and
 // SharedRuntime resolvers are derived from vm_name by token paste
@@ -109,14 +101,27 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
   V(PhantomReference_refersTo0, "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead)  \
   V(newArray,                   "jeandle.new_array",          CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE,          None)
 
-// PureLLVM: bare LLVM IR / inline-asm / uncommon_trap; no call site, so
-// call_info == nullptr.  Column: vm_name.  (Trap throttling — which a PureLLVM
-// body like Preconditions does need — is NOT here; it is a sparse id-keyed
-// property kept in the trap-throttle side-table, see kTrapThrottleTable below.)
+// PureLLVM: bare LLVM IR / inline-asm / uncommon_trap / single llvm.* builtin;
+// no call site, so call_info == nullptr.  Column: vm_name.  The actual lowering
+// is a per-id case in jeandleIntrinsicLowering.cpp (lower_pure_math /
+// lower_type_coercion / lower_barrier_semantic / ...); this table only supplies
+// the base descriptor row.  (Trap throttling — which a PureLLVM body like
+// Preconditions does need — is NOT here; it is a sparse id-keyed property kept in
+// the trap-throttle side-table, see kTrapThrottleTable below.)
 #define JEANDLE_PURE_TABLE(V) \
+  /* single llvm.* builtin (lowered via kPureMathTable) */ \
+  V(dabs)                     \
+  V(fabs)                     \
+  V(bitCount_i)               \
+  V(dsqrt)                    \
+  V(dsqrt_strict)             \
+  V(floor)                    \
+  V(ceil)                     \
+  V(rint)                     \
   V(iabs)                     \
   V(labs)                     \
   V(bitCount_l)               \
+  /* bare IR / inline-asm / uncommon_trap */ \
   V(floatToRawIntBits)        \
   V(intBitsToFloat)           \
   V(doubleToRawLongBits)      \
@@ -130,14 +135,6 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
   V(Preconditions_checkLongIndex)
 
 // ---- Pass 1: define a JeandleIntrinsicCallInfo per Call/JavaOp row. ----
-#define JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
-  static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                                   \
-    CTRL_NONE, MEM_NONE, SUPPORT_LLVM_INTRIN,                                         \
-    JeandleIntrinsicCalleeKind::LLVMBuiltin, nullptr, llvm::Intrinsic::LLVM_BUILTIN,           \
-    nullptr, nullptr };
-JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO)
-#undef JEANDLE_DEFINE_LLVM_BUILTIN_CALL_INFO
-
 #define JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO(VM_NAME, LLVM_BUILTIN)                  \
   static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                                   \
     CTRL_NONE, MEM_NONE, SUPPORT_HOTSPOT_STUB | SUPPORT_LLVM_INTRIN,                  \
@@ -248,7 +245,6 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     // ---- Call: LLVM builtin + runtime-stub (barrier-free) ----
 #define JEANDLE_ROW_CALL(VM_NAME, ...) \
     { vmIntrinsics::_##VM_NAME, JeandleLoweringKind::Call, &ci_##VM_NAME },
-    JEANDLE_CALL_LLVM_BUILTIN_TABLE(JEANDLE_ROW_CALL)
     JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_ROW_CALL)
 #undef JEANDLE_ROW_CALL
 

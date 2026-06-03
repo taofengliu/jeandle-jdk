@@ -52,7 +52,7 @@
 //             decline to intrinsify.
 //   AArch64 — FRINTM/FRINTP/FRINTN are part of the ARMv8 base ISA; always ok.
 //   Other   — conservatively allow; LLVM will pick the best lowering.
-static bool cpu_supports_llvm_builtin(vmIntrinsics::ID id) {
+bool JeandleIntrinsicSupport::cpu_supports_llvm_builtin(vmIntrinsics::ID id) {
   switch (id) {
     case vmIntrinsics::_floor:
     case vmIntrinsics::_ceil:

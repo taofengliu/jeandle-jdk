@@ -54,6 +54,12 @@ class JeandleIntrinsicSupport : public AllStatic {
   // method; callers receive a plain capability struct and apply their own
   // priority rules.
   static JeandleIntrinsicCapabilities query(const JeandleIntrinsicDescriptor& desc);
+
+  // Whether the target CPU can lower the given intrinsic's llvm.* builtin to a
+  // native instruction (e.g. floor/ceil/rint need SSE4.1 ROUNDSD on x86).  Pure
+  // id -> bool, no descriptor/call_info needed, so PureLLVM builtin lowering can
+  // gate on it directly.  Returns true for intrinsics with no CPU requirement.
+  static bool cpu_supports_llvm_builtin(vmIntrinsics::ID id);
 };
 
 #endif // SHARE_JEANDLE_INTRINSIC_SUPPORT_HPP
