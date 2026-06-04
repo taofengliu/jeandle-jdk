@@ -40,13 +40,13 @@ struct JeandleIntrinsicCallInfo;
 //
 //   LK_LLVM   — bare LLVM IR / inline-asm / uncommon_trap / single llvm.* builtin.
 //               Emits no semantic call site (call_info == nullptr).
-//   LK_HYBRID — a hand-written lowering that wraps a call site in guards or fast
-//               paths (Math.pow, StringCoding.countPositives).
+//   LK_HYBRID — a custom lowering handler that wraps call sites in guards or
+//               fast paths (Math.pow, StringCoding.countPositives).
 //   LK_CALL   — fixed shape "pop args -> call the callee once -> push result",
 //               handled generically by emit_simple_call_intrinsic.
 //
-// Only LK_CALL carries a static JeandleIntrinsicCallInfo.  LK_HYBRID may emit call
-// sites, but its hand-written body builds each JeandleCallSiteContract inline.
+// Only LK_CALL carries a static JeandleIntrinsicCallInfo.  LK_HYBRID may emit
+// call sites, but its handler builds each JeandleCallSiteContract inline.
 // Combine with bitwise OR.
 enum JeandleLoweringKind : uint8_t {
   LK_NONE   = 0,
@@ -86,8 +86,8 @@ static_assert(Deoptimization::Reason_LIMIT <= 32,
 // tied to data-driven LK_CALL emission — control/memory semantics and callee
 // identity — lives in JeandleIntrinsicCallInfo, reached through call_info.
 //
-// call_info is nullptr unless LK_CALL is declared in lowering_kinds.  Hybrid bodies
-// may emit call sites, but they do not use a static call_info row.
+// call_info is nullptr unless LK_CALL is declared in lowering_kinds.  Hybrid
+// handlers may emit call sites, but they do not use a static call_info row.
 struct JeandleIntrinsicDescriptor {
   // VM intrinsic ID being described.  This is also the O(1) lookup-table key.
   vmIntrinsics::ID       id;

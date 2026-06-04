@@ -31,6 +31,7 @@
 #include "jeandle/jeandleIntrinsicIRSemantics.hpp"
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 #include "jeandle/jeandleIntrinsicSupport.hpp"
+#include "jeandle/jeandleIntrinsicTable.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleType.hpp"
 #include "jeandle/jeandleUtils.hpp"
@@ -41,30 +42,6 @@
 #include "jeandle/jeandle_globals.hpp"
 #include "oops/arrayOop.hpp"
 #include "runtime/stubRoutines.hpp"
-
-// =============================================================================
-// Hand-written-body dispatch tables.
-//
-// The intrinsics whose lowering is a per-id hand-written body are listed here as
-// V(vm_name, handler_suffix); the dispatch token-pastes each to a call to
-// lower_<handler_suffix>(desc).  This catches missing handlers for rows that appear
-// in the dispatch table.  The matching LK_* descriptor rows still live in
-// jeandleIntrinsicRegistry.cpp, so those tables must be kept in sync until they are
-// moved to a shared .def file.
-// =============================================================================
-
-// LK_HYBRID — a hand-written body that wraps a call site in guards / fast paths and
-// builds its own JeandleCallSiteContract (no static call_info).
-#define JEANDLE_HYBRID_TABLE(V) \
-  V(dpow,           pow_hybrid)  \
-  V(countPositives, count_positives)
-
-// LK_LLVM OP_CUSTOM — a hand-written bare-IR body that does not fit a single
-// value-producing op (platform-specific asm, or a guard + uncommon_trap).
-#define JEANDLE_LLVM_CUSTOM_TABLE(V) \
-  V(onSpinWait,                   spin_wait_hint)             \
-  V(Preconditions_checkIndex,     preconditions_check_index)  \
-  V(Preconditions_checkLongIndex, preconditions_check_index)
 
 // =============================================================================
 // File-local helpers
@@ -129,9 +106,9 @@ static bool candidate_selection_allows(JeandleLoweringKind kind,
 
 // =============================================================================
 // Common call-site emission — the shared machinery used by the data-driven
-// LK_CALL path and by hand-written bodies.  emit_callsite consumes a
-// JeandleCallSiteContract only (never desc.call_info), so those bodies can feed it
-// contracts built on the fly.
+// LK_CALL path and by Hybrid handlers.  emit_callsite consumes a
+// JeandleCallSiteContract only (never desc.call_info), so those handlers can
+// feed it contracts built on the fly.
 // =============================================================================
 
 // Mirror PR #430's call-site type-info attachment for object-returning intrinsics:
@@ -153,8 +130,8 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDe
                                                         llvm::ArrayRef<llvm::Value*> args,
                                                         const JeandleCallSiteContract& contract,
                                                         const JeandleIntrinsicEntrypoint* entry) {
-  // emit_callsite consumes the call-site contract only — never desc.call_info — so
-  // hand-written bodies can build contracts on the fly.
+  // emit_callsite consumes the call-site contract only — never desc.call_info —
+  // so Hybrid handlers can build contracts on the fly.
   llvm::SmallVector<llvm::OperandBundleDef, 1> bundles =
     JeandleIntrinsicIRSemantics::build_operand_bundles(_interp, contract.attach_deopt_bundle());
   llvm::CallBase* site;
@@ -188,8 +165,8 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrins
 // Resolve the HotSpot stub / SharedRuntime routine from the given resolver function
 // pointers, filling `entry`.  Returns false without touching the operand stack if no
 // runtime routine exists, so the caller can decline the selected candidate or use
-// its own fallback.  Takes the callee identity explicitly, so a Hybrid body can
-// resolve without a call_info.
+// its own fallback.  Takes the callee identity explicitly, so a Hybrid handler
+// can resolve without a call_info.
 bool JeandleIntrinsicLowering::resolve_runtime_callee(vmIntrinsics::ID id,
                                                       JeandleRuntimeCalleeFn stub_fn,
                                                       JeandleRuntimeCalleeFn shared_fn,
@@ -232,13 +209,13 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
   if (candidate_selection_allows(LK_HYBRID, selection) &&
       (desc.lowering_kinds & LK_HYBRID)) {
     switch (desc.id) {
-      // Dispatch generated from JEANDLE_HYBRID_TABLE; the token-pasted call catches
-      // missing handlers for rows in that table.
-#define JEANDLE_HYBRID_DISPATCH(VM_NAME, HANDLER) \
-      case vmIntrinsics::_##VM_NAME: return lower_##HANDLER(desc);
-      JEANDLE_HYBRID_TABLE(JEANDLE_HYBRID_DISPATCH)
+      // Dispatch generated from the same shared table as the descriptor row.
+      // handler_suffix is token-pasted to lower_<handler_suffix>(desc).
+#define JEANDLE_HYBRID_DISPATCH(VM_NAME, HANDLER_SUFFIX) \
+      case vmIntrinsics::_##VM_NAME: return lower_##HANDLER_SUFFIX(desc);
+      JEANDLE_HYBRID_HANDLER_TABLE(JEANDLE_HYBRID_DISPATCH)
 #undef JEANDLE_HYBRID_DISPATCH
-      default: ShouldNotReachHere(); break;  // unreachable: every LK_HYBRID id is in the table
+      default: ShouldNotReachHere(); break;  // unreachable: every LK_HYBRID row dispatches here
     }
   }
 
@@ -319,23 +296,24 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
 }
 
 // =============================================================================
-// LK_LLVM — bare IR, dispatched on an *op*: the LLVM IR operation that produces the
-// intrinsic's result.  The op set is closed (a handful of IR builder calls), so it
-// does NOT grow as intrinsics are added: a new LK_LLVM intrinsic is one row in
-// kLlvmOpTable, no new code unless it needs a genuinely new IR operation.  Operand /
-// result types come from the target method signature, so there are no per-row type
-// columns.
+// LK_LLVM — no-call IR, dispatched on an *op*: the LLVM IR operation that
+// produces the intrinsic's result.  The inline op set is closed (a handful of IR
+// builder calls), so it does NOT grow as intrinsics are added: a new LK_LLVM
+// intrinsic is one shared table row, no new code unless it needs a genuinely new
+// IR operation or a custom handler.  Operand/result types come from the target
+// method signature, so there are no per-row type columns.
 //
-//   LO_BUILTIN — CreateIntrinsic(llvm_id): a single llvm.* builtin.  Carries the
-//                llvm_id and a CPU-feature gate (floor/ceil/rint need SSE4.1 on
-//                x86).  A few llvm intrinsics (abs/ctlz/cttz) take a trailing i1
+//   LO_BUILTIN — CreateIntrinsic(llvm_id): a single-argument llvm.* builtin.
+//                CPU support is checked by id (floor/ceil/rint need SSE4.1 on x86).
+//                A few llvm intrinsics (abs/ctlz/cttz) take a trailing i1
 //                edge-case flag; that is derived from llvm_id and always passed
 //                false (Java wants the poison-free result, e.g. abs(MIN_VALUE)).
 //   LO_BITCAST — CreateBitCast between the (single) argument and the result type.
 //   LO_FENCE   — CreateFence with an ordering derived from the id.
 //   LO_SINK    — volatile inline-asm sink consuming every argument (blackhole).
-//   LO_CUSTOM  — a hand-written bare-IR body (platform asm / guard+trap) that does
-//                not fit a single value-producing op; see JEANDLE_LLVM_CUSTOM_TABLE.
+//   LO_CUSTOM_HANDLER — custom no-call lowering (platform asm / guard+trap) that
+//                does not fit an existing LO_* skeleton; the shared table carries
+//                handler_suffix for lower_<handler_suffix>(desc).
 //
 // Every LO_* emits bare IR or an llvm.* builtin — no JeandleIntrinsicCallInfo, no deopt
 // bundle, and no gc-leaf annotation: RS4GC never rewrites intrinsics or bare IR to a
@@ -343,56 +321,27 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
 // statepoint, so it is stamped gc-leaf via IRSemantics::emit_gc_leaf_inline_asm.  This is
 // exactly why these belong here and not on the opaque-call path.
 // =============================================================================
-enum LlvmOp : uint8_t { LO_BUILTIN, LO_BITCAST, LO_FENCE, LO_SINK, LO_CUSTOM };
+enum LlvmOp : uint8_t { LO_BUILTIN, LO_BITCAST, LO_FENCE, LO_SINK, LO_CUSTOM_HANDLER };
 
 struct LlvmOpSpec {
   vmIntrinsics::ID    vm_id;
   LlvmOp              op;
   llvm::Intrinsic::ID llvm_id;         // LO_BUILTIN only (else not_intrinsic)
-  bool                needs_cpu_check; // LO_BUILTIN: floor/ceil/rint SSE4.1 gate
 };
 
 static constexpr LlvmOpSpec kLlvmOpTable[] = {
-  // single llvm.* builtin (operand/result types derived from the signature)
-  { vmIntrinsics::_dabs,         LO_BUILTIN, llvm::Intrinsic::fabs,  false },
-  { vmIntrinsics::_fabs,         LO_BUILTIN, llvm::Intrinsic::fabs,  false },
-  { vmIntrinsics::_bitCount_i,   LO_BUILTIN, llvm::Intrinsic::ctpop, false },
-  { vmIntrinsics::_dsqrt,        LO_BUILTIN, llvm::Intrinsic::sqrt,  false },
-  { vmIntrinsics::_dsqrt_strict, LO_BUILTIN, llvm::Intrinsic::sqrt,  false },
-  { vmIntrinsics::_floor,        LO_BUILTIN, llvm::Intrinsic::floor, true  },
-  { vmIntrinsics::_ceil,         LO_BUILTIN, llvm::Intrinsic::ceil,  true  },
-  { vmIntrinsics::_rint,         LO_BUILTIN, llvm::Intrinsic::rint,  true  },
-  { vmIntrinsics::_iabs,         LO_BUILTIN, llvm::Intrinsic::abs,   false },
-  { vmIntrinsics::_labs,         LO_BUILTIN, llvm::Intrinsic::abs,   false },
-  { vmIntrinsics::_bitCount_l,   LO_BUILTIN, llvm::Intrinsic::ctpop, false },
-  // libm math family: the *builtin* candidate of the dsin..dexp dual candidates.
-  // Their runtime-stub candidate stays in JEANDLE_CALL_RUNTIME_STUB_TABLE; the
-  // descriptor's LK_LLVM | LK_CALL kinds are OR-merged in the registry.  The default
-  // traversal tries these LLVM builtins first; -XX:JeandleIntrinsicCandidate=call
-  // forces the runtime candidate for path testing.
-  { vmIntrinsics::_dsin,   LO_BUILTIN, llvm::Intrinsic::sin,   false },
-  { vmIntrinsics::_dcos,   LO_BUILTIN, llvm::Intrinsic::cos,   false },
-  { vmIntrinsics::_dtan,   LO_BUILTIN, llvm::Intrinsic::tan,   false },
-  { vmIntrinsics::_dlog,   LO_BUILTIN, llvm::Intrinsic::log,   false },
-  { vmIntrinsics::_dlog10, LO_BUILTIN, llvm::Intrinsic::log10, false },
-  { vmIntrinsics::_dexp,   LO_BUILTIN, llvm::Intrinsic::exp,   false },
-  // raw-bits reinterpret: a single bitcast (src/dst derived from the signature)
-  { vmIntrinsics::_floatToRawIntBits,   LO_BITCAST, llvm::Intrinsic::not_intrinsic, false },
-  { vmIntrinsics::_intBitsToFloat,      LO_BITCAST, llvm::Intrinsic::not_intrinsic, false },
-  { vmIntrinsics::_doubleToRawLongBits, LO_BITCAST, llvm::Intrinsic::not_intrinsic, false },
-  { vmIntrinsics::_longBitsToDouble,    LO_BITCAST, llvm::Intrinsic::not_intrinsic, false },
-  // memory fence: ordering derived from the id
-  { vmIntrinsics::_loadFence,  LO_FENCE, llvm::Intrinsic::not_intrinsic, false },
-  { vmIntrinsics::_storeFence, LO_FENCE, llvm::Intrinsic::not_intrinsic, false },
-  { vmIntrinsics::_fullFence,  LO_FENCE, llvm::Intrinsic::not_intrinsic, false },
-  // DCE-proof argument sink
-  { vmIntrinsics::_blackhole,  LO_SINK, llvm::Intrinsic::not_intrinsic, false },
-  // hand-written bare-IR bodies (platform asm / guard+trap) — generated from
-  // JEANDLE_LLVM_CUSTOM_TABLE, the same source as the LO_CUSTOM dispatch.
-#define JEANDLE_LLVM_CUSTOM_OPROW(VM_NAME, HANDLER) \
-  { vmIntrinsics::_##VM_NAME, LO_CUSTOM, llvm::Intrinsic::not_intrinsic, false },
-  JEANDLE_LLVM_CUSTOM_TABLE(JEANDLE_LLVM_CUSTOM_OPROW)
-#undef JEANDLE_LLVM_CUSTOM_OPROW
+  // Data-driven LLVM ops (operand/result types derived from the signature).
+#define JEANDLE_LLVM_OP_ROW(VM_NAME, OP, LLVM_NAME) \
+  { vmIntrinsics::_##VM_NAME, OP, llvm::Intrinsic::LLVM_NAME },
+  JEANDLE_LLVM_INLINE_OP_TABLE(JEANDLE_LLVM_OP_ROW)
+#undef JEANDLE_LLVM_OP_ROW
+
+  // Custom no-call handlers share the LK_LLVM descriptor table, but dispatch
+  // through lower_<handler_suffix> below.
+#define JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW(VM_NAME, HANDLER_SUFFIX) \
+  { vmIntrinsics::_##VM_NAME, LO_CUSTOM_HANDLER, llvm::Intrinsic::not_intrinsic },
+  JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW)
+#undef JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW
 };
 
 static const LlvmOpSpec* find_llvm_op(vmIntrinsics::ID id) {
@@ -405,8 +354,9 @@ static const LlvmOpSpec* find_llvm_op(vmIntrinsics::ID id) {
 bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc) {
   const LlvmOpSpec* spec = find_llvm_op(desc.id);
   if (spec == nullptr) {
-    // lowering_kinds advertised LK_LLVM for this id, but kLlvmOpTable has no row:
-    // the descriptor bit and the op table fell out of sync (developer omission).
+    // lowering_kinds advertised LK_LLVM for this id, but kLlvmOpTable has no row.
+    // With the shared row list this should only happen if a new LLVM mechanism
+    // tag is added without expanding it here.
     ShouldNotReachHere();
     return false;
   }
@@ -414,9 +364,9 @@ bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc
     case LO_BUILTIN:
       // CPU-feature gate (floor/ceil/rint need SSE4.1 on x86): decline before
       // touching the operand stack so the traversal falls through to the next
-      // candidate (or NormalInvoke).
-      if (spec->needs_cpu_check &&
-          !JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
+      // candidate (or NormalInvoke).  The query is id-keyed and returns true for
+      // intrinsics with no CPU requirement.
+      if (!JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
         return false;
       }
       return emit_llvm_builtin(desc, spec->llvm_id);
@@ -426,15 +376,15 @@ bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc
       return emit_llvm_fence(desc);
     case LO_SINK:
       return emit_llvm_sink(desc);
-    case LO_CUSTOM:
+    case LO_CUSTOM_HANDLER:
       switch (desc.id) {
-        // Dispatch generated from JEANDLE_LLVM_CUSTOM_TABLE; the token-pasted call
-        // catches missing handlers for rows in that table.
-#define JEANDLE_LLVM_CUSTOM_DISPATCH(VM_NAME, HANDLER) \
-        case vmIntrinsics::_##VM_NAME: return lower_##HANDLER(desc);
-        JEANDLE_LLVM_CUSTOM_TABLE(JEANDLE_LLVM_CUSTOM_DISPATCH)
-#undef JEANDLE_LLVM_CUSTOM_DISPATCH
-        default: ShouldNotReachHere(); return false;  // unreachable: every LO_CUSTOM id is in the table
+        // Dispatch generated from the same shared table as the descriptor row.
+        // handler_suffix is token-pasted to lower_<handler_suffix>(desc).
+#define JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH(VM_NAME, HANDLER_SUFFIX) \
+        case vmIntrinsics::_##VM_NAME: return lower_##HANDLER_SUFFIX(desc);
+        JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH)
+#undef JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH
+        default: ShouldNotReachHere(); return false;  // unreachable: every LO_CUSTOM_HANDLER row dispatches here
       }
   }
   return false;  // unreachable: the switch is exhaustive over LlvmOp (-Wswitch enforces it)
@@ -559,12 +509,12 @@ bool JeandleIntrinsicLowering::emit_llvm_sink(const JeandleIntrinsicDescriptor& 
   return true;
 }
 
-// LO_CUSTOM body.  Preconditions.checkIndex(int|long index, int|long length,
+// Custom LK_LLVM handler.  Preconditions.checkIndex(int|long index, int|long length,
 // BiFunction exceptionFactory) -> int|long.
 //
 // Guard: length < 0 || (uint)index >= (uint)length.  The two-level check
 // distinguishes precondition failure (length < 0, Reason_intrinsic) from a true
-// range failure (Reason_range_check).  (onSpinWait's LO_CUSTOM body is
+// range failure (Reason_range_check).  (onSpinWait's LK_LLVM custom handler is
 // platform-specific, in cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp.)
 bool JeandleIntrinsicLowering::lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
@@ -636,9 +586,9 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(const JeandleIntr
 }
 
 // =============================================================================
-// LK_HYBRID — hand-written bodies that wrap a call site in guards / fast paths and
-// build their own JeandleCallSiteContract (no static call_info).  See
-// JEANDLE_HYBRID_TABLE for the id -> handler mapping that drives the dispatch.
+// LK_HYBRID — custom handlers that wrap call sites in guards / fast paths and
+// build their own JeandleCallSiteContract (no static call_info).  The shared row
+// generates both the descriptor and this dispatch.
 // =============================================================================
 
 // Math.pow(base, exp): IR fast paths for common constant exponents, then the

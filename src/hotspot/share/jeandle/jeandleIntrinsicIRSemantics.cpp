@@ -38,9 +38,9 @@ void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const 
     return;
   }
   if (contract.only_orders_memory()) {
-    // Ordering-only intrinsics are fences (PureLLVM, no call site) and never reach
-    // here; guard anyway in case a future contract pairs MEM_ORDERING_ONLY with a
-    // call-shaped lowering.
+    // Ordering-only intrinsics are currently LK_LLVM fences (no call site) and
+    // never reach here; guard anyway in case a future contract pairs
+    // MEM_ORDERING_ONLY with a call-shaped lowering.
     return;
   }
   const bool reads = contract.reads_memory();

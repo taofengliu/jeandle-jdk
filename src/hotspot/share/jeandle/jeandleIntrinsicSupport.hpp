@@ -47,16 +47,17 @@ class JeandleIntrinsicSupport : public AllStatic {
  public:
   // The runtime-stub availability for the given intrinsic id (stub installed /
   // SharedRuntime present); callers apply their own candidate policy.  Keyed
-  // purely on the id (no descriptor / call_info), so a Hybrid body queries it the
-  // same way a data-driven Call does.  This is a *generic* entry point: adding an
-  // intrinsic adds a `case` to the internal probe, never a new query method.
+  // purely on the id (no descriptor / call_info), so a Hybrid handler queries it
+  // the same way a data-driven Call does.  This is a *generic* entry point:
+  // adding an intrinsic adds a `case` to the internal probe, never a new query
+  // method.
   static JeandleRuntimeAvailability runtime_availability(vmIntrinsics::ID id);
 
   // Whether the target CPU can lower the given intrinsic's llvm.* builtin to a
   // native instruction (e.g. floor/ceil/rint need SSE4.1 ROUNDSD on x86).  The CPU
   // counterpart to runtime_availability — likewise generic and id-keyed (a new
   // intrinsic adds a `case`, not a function).  Returns true for intrinsics with no
-  // CPU requirement, so PureLLVM builtin lowering can gate on it directly.
+  // CPU requirement, so LK_LLVM builtin lowering can gate on it directly.
   static bool cpu_supports_llvm_builtin(vmIntrinsics::ID id);
 };
 

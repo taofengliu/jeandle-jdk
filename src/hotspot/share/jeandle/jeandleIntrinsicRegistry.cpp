@@ -16,6 +16,7 @@
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 #include "jeandle/jeandleIntrinsicCallInfo.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
+#include "jeandle/jeandleIntrinsicTable.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "ci/ciMethod.hpp"
@@ -28,41 +29,30 @@
 //   JeandleIntrinsicDescriptor (base, registry.hpp) — admission-time facts:
 //       id, lowering_kinds, call_info, barrier_kind.  (Trap throttling is a
 //       separate id-keyed side-table, kTrapThrottleTable.)
-//   JeandleIntrinsicCallInfo (callinfo.hpp) — everything needed only when the lowering
-//       emits a call site: the call-site contract (control/memory facts) and the
-//       callee identity.
+//   JeandleIntrinsicCallInfo (callinfo.hpp) — everything needed only when the
+//       lowering emits a call site: the call-site contract (control/memory facts)
+//       and the callee identity.
 //
-// Most intrinsics are ONE LINE in a table macro below.  Each table macro is
-// expanded twice (X-macro): once to define a `static constexpr JeandleIntrinsicCallInfo
-// ci_<name>`, once to emit the base-descriptor row pointing at it.  Pick the
-// table by *shape*:
+// The shared row sources live in jeandleIntrinsicTable.hpp.  Registry expands the
+// tables into descriptors and CallInfo objects; lowering expands the same LLVM /
+// Hybrid tables into kLlvmOpTable entries and custom-handler dispatch.  For
+// Hybrid / custom LK_LLVM rows, the handler suffix is token-pasted into
+// lower_<handler_suffix>, so a missing implementation fails at compile/link time
+// instead of silently leaving registry and dispatch out of sync.
 //
-//   JEANDLE_CALL_RUNTIME_STUB_TABLE — Call backed by a HotSpot runtime stub /
-//       SharedRuntime routine; the stub / SharedRuntime resolvers are derived from
-//       `name` by token paste.  `V(name)`.  (The libm family dsin..dexp is dual: it
-//       is also in JEANDLE_PURE_TABLE / kLlvmOpTable as an LK_LLVM builtin.)
-//   JEANDLE_CALL_JAVAOP_TABLE — Call delegating to a JavaOp.
-//       `V(name, java_op, ctrl, mem, barrier)`.
-//   JEANDLE_PURE_TABLE — PureLLVM (bare IR / inline-asm / uncommon_trap); no
-//       call site, call_info == nullptr.  `V(name)`.
-//   (Single-llvm.*-builtin intrinsics — dabs/fabs/dsqrt/floor/... — are also
-//    PureLLVM, but their op is in the LLVM op table (kLlvmOpTable) in
-//    jeandleIntrinsicLowering.cpp rather than a registry table; they need no
-//    JeandleIntrinsicCallInfo.)
+// Pick the table by mechanism: CALL_RUNTIME_STUB, CALL_JAVAOP, LLVM_INLINE_OP,
+// LLVM_CUSTOM_HANDLER, or HYBRID_HANDLER.  Add a new table only when the
+// framework gains a new lowering mechanism, not for each new intrinsic.
 //
 // Operand/result stack shapes are NOT in these tables — they come from the
-// intercepted method's signature at lowering time.
+// intercepted method's signature at lowering time.  Trap throttling is also not a
+// row column; deopt-capable intrinsics add an id-keyed row to kTrapThrottleTable.
 //
-// Intrinsics that do not fit a table (Hybrid bodies, trap-throttled PureLLVM) are
-// written out explicitly right after the tables.  After adding a row (or an explicit
-// entry), add the corresponding implementation in these locations:
-//   - Support (jeandleIntrinsicSupport.cpp) — only if a runtime stub or a CPU-gated
-//     builtin is advertised: add a `case` to probe_hotspot_stubs (runtime_availability)
-//     or cpu_supports_llvm_builtin.  Both entry points are generic and id-keyed —
-//     you add a case, never a new query function.
-//   - Lowering (jeandleIntrinsicLowering.cpp) — Call needs no per-id code; Hybrid
-//     and PureLLVM OP_CUSTOM rows must also be present in the dispatch tables there.
-//   - JavaOp callees — define the body in template.ll / jeandleRuntimeDefinedJavaOps.cpp.
+// After adding a row, wire the remaining pieces only where needed:
+//   - Support (jeandleIntrinsicSupport.cpp) — runtime availability or CPU gating.
+//   - JavaOp body — template.ll / jeandleRuntimeDefinedJavaOps.cpp for JavaOp rows.
+//   - Lowering helper — only for new handler suffixes, or for a genuinely new
+//     LLVM inline-op category.
 //   - A jtreg test under test/hotspot/jtreg/compiler/jeandle/.
 // =============================================================================
 
@@ -70,103 +60,31 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
   return JeandleTrapReasonMask(1u) << static_cast<uint>(reason);
 }
 
-// ---- One-line intrinsic tables (see the header comment for the column guide) ----
-
-// Call backed by a HotSpot runtime stub / SharedRuntime routine.  The stub and
-// SharedRuntime resolvers are derived from vm_name by token paste
-// (StubRoutines_<vm_name>_callee / SharedRuntime_<vm_name>_callee).  Arg and result
-// types come from the method signature, so this table is shape-agnostic — a future
-// multi-arg stub (crc32, AES, ...) adds a row with no new columns.
-//   vm_name — vmIntrinsics::_<vm_name>; also drives the resolver names
-//
-// The dsin..dexp libm family is dual-candidate: this is their *stub* candidate
-// (LK_CALL).  Their llvm.* builtin candidate (LK_LLVM) lives in kLlvmOpTable +
-// JEANDLE_PURE_TABLE; the registry OR-merges the two into LK_LLVM | LK_CALL.
-// The default traversal tries the LLVM candidate first; the diagnostic
-// JeandleIntrinsicCandidate option can force either path for tests.
-#define JEANDLE_CALL_RUNTIME_STUB_TABLE(V) \
-  V(dsin)   \
-  V(dcos)   \
-  V(dtan)   \
-  V(dlog)   \
-  V(dlog10) \
-  V(dexp)
-
-// Call delegating to a JavaOp.  Stack shape comes from the method signature.
-//   Columns: vm_name, java_op_name, control_flags, memory_flags, barrier_kind
-// (Trap throttling is not a column — see the trap-throttle side-table below.)
-#define JEANDLE_CALL_JAVAOP_TABLE(V)                                                                     \
-  V(getClass,                   "jeandle.get_class",          CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, None)             \
-  V(Reference_get,              "jeandle.reference_get",      CTRL_NONE,                 MEM_READ | MEM_NEEDS_GC_STATE, WeakReferentLoad) \
-  V(Reference_refersTo0,        "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead)  \
-  V(PhantomReference_refersTo0, "jeandle.reference_refers_to", CTRL_NONE,                MEM_READ | MEM_NEEDS_GC_STATE, RawReferentRead)  \
-  V(newArray,                   "jeandle.new_array",          CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE,          None)
-
-// PureLLVM: bare LLVM IR / inline-asm / uncommon_trap / single llvm.* builtin;
-// no call site, so call_info == nullptr.  Column: vm_name.  The actual lowering is
-// driven by the LLVM op table (kLlvmOpTable) in jeandleIntrinsicLowering.cpp, where
-// lower_llvm dispatches on each id's op; this table only supplies the base
-// descriptor row.  (Trap throttling — which a PureLLVM body like Preconditions does
-// need — is NOT here; it is a sparse id-keyed property kept in the trap-throttle
-// side-table, see kTrapThrottleTable below.)
-#define JEANDLE_PURE_TABLE(V) \
-  /* single llvm.* builtin (lowered via kLlvmOpTable) */ \
-  V(dabs)                     \
-  V(fabs)                     \
-  V(bitCount_i)               \
-  V(dsqrt)                    \
-  V(dsqrt_strict)             \
-  V(floor)                    \
-  V(ceil)                     \
-  V(rint)                     \
-  V(iabs)                     \
-  V(labs)                     \
-  V(bitCount_l)               \
-  /* libm family: LK_LLVM (builtin) half of the dsin..dexp dual candidates; the stub half is in JEANDLE_CALL_RUNTIME_STUB_TABLE, OR-merged in the registry */ \
-  V(dsin)                     \
-  V(dcos)                     \
-  V(dtan)                     \
-  V(dlog)                     \
-  V(dlog10)                   \
-  V(dexp)                     \
-  /* bare IR / inline-asm / uncommon_trap */ \
-  V(floatToRawIntBits)        \
-  V(intBitsToFloat)           \
-  V(doubleToRawLongBits)      \
-  V(longBitsToDouble)         \
-  V(loadFence)                \
-  V(storeFence)               \
-  V(fullFence)                \
-  V(onSpinWait)               \
-  V(blackhole)                \
-  V(Preconditions_checkIndex) \
-  V(Preconditions_checkLongIndex)
-
 // ---- Pass 1: define a JeandleIntrinsicCallInfo per Call/JavaOp row. ----
 #define JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO(VM_NAME)                               \
-  static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                                   \
-    { CTRL_NONE, MEM_NONE },                                                          \
+  static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                         \
+    { CTRL_NONE, MEM_NONE },                                                         \
     JeandleIntrinsicCalleeKind::RuntimeStub, nullptr,                                \
-    &JeandleRuntimeRoutine::StubRoutines_##VM_NAME##_callee,                          \
+    &JeandleRuntimeRoutine::StubRoutines_##VM_NAME##_callee,                         \
     &JeandleRuntimeRoutine::SharedRuntime_##VM_NAME##_callee };
 JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO)
 #undef JEANDLE_DEFINE_RUNTIME_STUB_CALL_INFO
 
-#define JEANDLE_DEFINE_JAVAOP_CALL_INFO(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS,         \
-                                        MEMORY_FLAGS, BARRIER)                        \
-  static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                                   \
-    { CONTROL_FLAGS, MEMORY_FLAGS },                                                  \
-    JeandleIntrinsicCalleeKind::JavaOp, JAVA_OP_NAME,                                 \
+#define JEANDLE_DEFINE_JAVAOP_CALL_INFO(VM_NAME, JAVA_OP_NAME, CONTROL_FLAGS,        \
+                                        MEMORY_FLAGS, BARRIER)                       \
+  static constexpr JeandleIntrinsicCallInfo ci_##VM_NAME = {                         \
+    { CONTROL_FLAGS, MEMORY_FLAGS },                                                 \
+    JeandleIntrinsicCalleeKind::JavaOp, JAVA_OP_NAME,                                \
     nullptr, nullptr };
 JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_DEFINE_JAVAOP_CALL_INFO)
 #undef JEANDLE_DEFINE_JAVAOP_CALL_INFO
 
-// --- Hybrid: hand-written bodies that carry NO static JeandleIntrinsicCallInfo.
+// --- Hybrid handlers carry NO static JeandleIntrinsicCallInfo.
 //     A Hybrid lowering (Math.pow, StringCoding.countPositives) resolves its own
 //     callee and builds each call site's JeandleCallSiteContract on the fly at
 //     lowering time — a Hybrid may emit several call sites, each with a different
-//     contract — so a single static descriptor cannot describe it.  Their rows
-//     below therefore use call_info == nullptr.
+//     contract — so a single static descriptor cannot describe it.  Their shared
+//     table rows therefore use call_info == nullptr.
 
 #ifdef ASSERT
 static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
@@ -174,8 +92,8 @@ static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
          "invalid Jeandle intrinsic id");
   assert(desc.lowering_kinds != LK_NONE, "intrinsic declares no lowering candidate");
   const JeandleIntrinsicCallInfo* ci = desc.call_info;
-  // call_info is present iff LK_CALL is declared.  A Hybrid body carries no static
-  // call_info — it builds its call-site contract on the fly at lowering time.
+  // call_info is present iff LK_CALL is declared.  A Hybrid handler carries no
+  // static call_info — it builds its call-site contract on the fly.
   assert(((desc.lowering_kinds & LK_CALL) != 0) == (ci != nullptr),
          "call_info must be present iff LK_CALL is declared");
   if (ci == nullptr) {
@@ -228,13 +146,12 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
   }
 
  private:
-  // Base descriptor rows, all generated from the one-line tables (pass 2 of the
-  // X-macro).  Field order: id, lowering_kinds, call_info, barrier_kind.  Hybrid
-  // rows are listed last because that group grows as new hand-written intrinsics
-  // are added.
+  // Base descriptor rows, generated from jeandleIntrinsicTable.hpp.  Field order:
+  // id, lowering_kinds, call_info, barrier_kind.  Multi-candidate ids appear once
+  // per candidate and are OR-merged by initialize().
   static constexpr JeandleIntrinsicDescriptor _intrinsic_table[] = {
-    // ---- Call: LLVM builtin + runtime-stub (barrier-free) ----
-#define JEANDLE_ROW_CALL(VM_NAME, ...) \
+    // ---- Call: runtime stub / SharedRuntime (barrier-free) ----
+#define JEANDLE_ROW_CALL(VM_NAME) \
     { vmIntrinsics::_##VM_NAME, LK_CALL, &ci_##VM_NAME },
     JEANDLE_CALL_RUNTIME_STUB_TABLE(JEANDLE_ROW_CALL)
 #undef JEANDLE_ROW_CALL
@@ -245,23 +162,31 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_ROW_JAVAOP)
 #undef JEANDLE_ROW_JAVAOP
 
-    // ---- PureLLVM (no call site, call_info == nullptr) ----
-#define JEANDLE_ROW_PURE(VM_NAME) \
+    // ---- LK_LLVM: inline-op rows ----
+#define JEANDLE_ROW_LLVM_OP(VM_NAME, OP, LLVM_NAME) \
     { vmIntrinsics::_##VM_NAME, LK_LLVM, nullptr },
-    JEANDLE_PURE_TABLE(JEANDLE_ROW_PURE)
-#undef JEANDLE_ROW_PURE
+    JEANDLE_LLVM_INLINE_OP_TABLE(JEANDLE_ROW_LLVM_OP)
+#undef JEANDLE_ROW_LLVM_OP
 
-    // ---- Hybrid: hand-written bodies.  Keep this list in sync with
-    //      JEANDLE_HYBRID_TABLE in jeandleIntrinsicLowering.cpp. ----
-    { vmIntrinsics::_dpow,           LK_HYBRID, nullptr },
-    { vmIntrinsics::_countPositives, LK_HYBRID, nullptr },
+    // ---- LK_LLVM: custom handler rows ----
+#define JEANDLE_ROW_LLVM_CUSTOM_HANDLER(VM_NAME, HANDLER_SUFFIX) \
+    { vmIntrinsics::_##VM_NAME, LK_LLVM, nullptr },
+    JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_ROW_LLVM_CUSTOM_HANDLER)
+#undef JEANDLE_ROW_LLVM_CUSTOM_HANDLER
+
+    // ---- LK_HYBRID: handler rows ----
+#define JEANDLE_ROW_HYBRID(VM_NAME, HANDLER_SUFFIX) \
+    { vmIntrinsics::_##VM_NAME, LK_HYBRID, nullptr },
+    JEANDLE_HYBRID_HANDLER_TABLE(JEANDLE_ROW_HYBRID)
+#undef JEANDLE_ROW_HYBRID
   };
 };
 
 // ---------------------------------------------------------------------------
 // Trap-throttle side-table: id -> trap_throttle_mask.  Sparse (only intrinsics
 // whose lowering can emit uncommon_trap appear here), id-keyed, and independent
-// of lowering_kinds — any Call/Hybrid/PureLLVM intrinsic that deopts adds a row.
+// of lowering_kinds — any LK_CALL/LK_HYBRID/LK_LLVM intrinsic that deopts adds
+// a row.
 // Anything not listed throttles on nothing (mask 0).
 // ---------------------------------------------------------------------------
 struct JeandleTrapThrottleEntry {
@@ -304,7 +229,7 @@ void JeandleIntrinsicRegistry::initialize() {
       // A multi-candidate intrinsic (e.g. dsin = LK_LLVM | LK_CALL) appears in more
       // than one table; OR the kind bits together and keep the call_info / barrier
       // from whichever row carries it.  The descriptor's kinds are thus *derived*
-      // from table membership rather than a hand-written literal that could desync.
+      // from table membership rather than a handwritten literal that could desync.
       slot.lowering_kinds |= it->lowering_kinds;
       if (it->call_info != nullptr) {
         assert(slot.call_info == nullptr || slot.call_info == it->call_info,
@@ -320,6 +245,11 @@ void JeandleIntrinsicRegistry::initialize() {
   }
 
 #ifdef ASSERT
+  for (int i = 0; i < (int)vmIntrinsics::ID_LIMIT; i++) {
+    if (_lookup[i].lowering_kinds != LK_NONE) {
+      validate_descriptor(_lookup[i]);
+    }
+  }
   _initialized = true;
 #endif
 }

@@ -42,38 +42,39 @@ class JeandleIntrinsicLowering : public StackObj {
   // intrinsic id).  Returns true iff an installed stub / SharedRuntime is found,
   // filling `entry`; false otherwise (the caller then falls back as it chooses —
   // NormalInvoke, or its own builtin).  Takes the callee identity explicitly so
-  // hand-written bodies do not need call_info.
+  // Hybrid handlers do not need call_info.
   bool resolve_runtime_callee(vmIntrinsics::ID id,
                               JeandleRuntimeCalleeFn stub_fn,
                               JeandleRuntimeCalleeFn shared_fn,
                               JeandleIntrinsicEntrypoint& entry);
 
-  // LK_LLVM lowering (call_info == nullptr; bare IR / inline asm / traps): a single
-  // skeleton dispatching on the LLVM op (see kLlvmOpTable in the .cpp), plus one
-  // emit helper per data-driven op.  Operand/result types come from the signature.
+  // LK_LLVM lowering (call_info == nullptr; bare IR / inline asm / traps): a
+  // single skeleton dispatching on the LLVM op (see kLlvmOpTable in the .cpp),
+  // plus one emit helper per inline op.  Operand/result types come from the
+  // signature.
   bool lower_llvm(const JeandleIntrinsicDescriptor& desc);
   bool emit_llvm_builtin(const JeandleIntrinsicDescriptor& desc,
                            llvm::Intrinsic::ID llvm_id);
   bool emit_llvm_bitcast(const JeandleIntrinsicDescriptor& desc);
   bool emit_llvm_fence(const JeandleIntrinsicDescriptor& desc);
   bool emit_llvm_sink(const JeandleIntrinsicDescriptor& desc);
-  // LO_CUSTOM hand-written bodies: a guard+trap (Preconditions) and the
+  // LK_LLVM custom handlers: a guard+trap (Preconditions) and the
   // platform-specific spin-wait hint (implemented in
   // cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp).
   bool lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc);
   bool lower_spin_wait_hint(const JeandleIntrinsicDescriptor& desc);
 
-  // Hybrid handlers: hand-written bodies that may wrap call sites in guards / fast
-  // paths.  They carry no static call_info and build each call-site contract inline.
+  // Hybrid handlers may wrap call sites in guards / fast paths.  They carry no
+  // static call_info and build each call-site contract inline.
   bool lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc);
   bool lower_count_positives(const JeandleIntrinsicDescriptor& desc);
 
   // Shared call-site skeleton for runtime stubs and JavaOps: builds the deopt
   // bundle, emits a call or an invoke (call path marked nounwind) based on
   // contract.needs_exception_edge(), then runs the common IR annotations.  The
-  // call-site contract is the only call_info-derived input — a Hybrid body passes
-  // one built on the fly.  entry is optional runtime-stub metadata (nullptr for
-  // JavaOps).
+  // call-site contract is the only call_info-derived input — a Hybrid handler
+  // passes one built on the fly.  entry is optional runtime-stub metadata
+  // (nullptr for JavaOps).
   llvm::CallBase* emit_callsite(const JeandleIntrinsicDescriptor& desc,
                                 llvm::FunctionCallee callee,
                                 llvm::CallingConv::ID calling_conv,

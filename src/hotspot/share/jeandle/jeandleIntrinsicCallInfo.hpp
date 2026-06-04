@@ -37,11 +37,11 @@
 //
 // Rationale (the "call-only" split): a deopt bundle, an invoke exception edge,
 // and GC-state visibility are properties of a call, not of a bare IR sequence.
-// PureLLVM intrinsics (bitcast / fence / inline-asm / uncommon_trap) emit no
-// such call site and carry no JeandleIntrinsicCallInfo.  LK_CALL intrinsics do:
-// their control/memory facts and callee identity live here.  Hybrid bodies may
-// emit call sites too, but they build JeandleCallSiteContract values inline rather
-// than carrying one static CallInfo row.
+// LK_LLVM intrinsics (bitcast / fence / inline-asm / uncommon_trap / llvm.*)
+// emit no such call site and carry no JeandleIntrinsicCallInfo.  LK_CALL
+// intrinsics do: their control/memory facts and callee identity live here.
+// Hybrid handlers may emit call sites too, but they build JeandleCallSiteContract
+// values inline rather than carrying one static CallInfo row.
 //
 // NOTE: GC barrier semantics do NOT live here.  The barrier semantic is reserved
 // data on the base descriptor (JeandleIntrinsicDescriptor::barrier_kind) for a
@@ -79,11 +79,11 @@ enum JeandleMemoryFlag : uint16_t {
 };
 
 // Which kind of callee a data-driven LK_CALL intrinsic targets.  (A single llvm.*
-// builtin is NOT a callee kind here — such intrinsics are PureLLVM, lowered via the
-// LLVM op table (kLlvmOpTable), and carry no JeandleIntrinsicCallInfo.)
+// builtin is NOT a callee kind here — such intrinsics are LK_LLVM inline ops,
+// lowered via kLlvmOpTable, and carry no JeandleIntrinsicCallInfo.)
 enum class JeandleIntrinsicCalleeKind : uint8_t {
-  // No generic callee — a Hybrid body resolves and emits the call itself
-  // (e.g. StringCoding.countPositives via resolve_count_positives).
+  // No generic callee — a Hybrid handler resolves and emits the call itself
+  // (e.g. lower_count_positives selects its adapter / scalar fallback inline).
   None,
   // A Jeandle JavaOp function in the module, named by java_op_name.
   JavaOp,
@@ -96,13 +96,14 @@ enum class JeandleIntrinsicCalleeKind : uint8_t {
 // Property-driven runtime-callee resolver.  One function per runtime routine that
 // materializes the stub / SharedRuntime FunctionCallee in the given module.
 // Storing these as data on the LK_CALL descriptor lets emit_simple_call_intrinsic
-// resolve a callee generically — never switching on intrinsic id.  Hybrid bodies
-// can still pass resolver functions directly when they need the same runtime path.
+// resolve a callee generically — never switching on intrinsic id.  Hybrid
+// handlers can still pass resolver functions directly when they need the same
+// runtime path.
 using JeandleRuntimeCalleeFn = llvm::FunctionCallee (*)(llvm::Module&);
 
 // A resolved (materialized) runtime callee plus the IR-level facts a lowering needs
-// to emit a call to it.  resolve_runtime_callee (and the inline resolver in a SIMD
-// lower_* body) fills it; emit_callsite consumes it; annotate_call reads
+// to emit a call to it.  resolve_runtime_callee (and inline resolver code in a
+// lower_* handler) fills it; emit_callsite consumes it; annotate_call reads
 // is_gc_leaf.  Shared by the lowering and IR-semantics layers.
 struct JeandleIntrinsicEntrypoint {
   llvm::FunctionCallee  callee;
@@ -114,7 +115,7 @@ struct JeandleIntrinsicEntrypoint {
 // site is emitted — the deopt operand bundle, the exception edge, the LLVM memory
 // attribute, and the flag-based part of the gc-leaf decision.  It is shared by two
 // producers: data-driven Call lowering holds it inside a static JeandleIntrinsicCallInfo,
-// while a Hybrid body builds it on the fly at lowering time (a Hybrid may emit
+// while a Hybrid handler builds it on the fly at lowering time (a Hybrid may emit
 // several call sites, each with its own contract, so one static contract cannot
 // describe it).  emit_callsite consumes exactly this — never the whole descriptor.
 struct JeandleCallSiteContract {

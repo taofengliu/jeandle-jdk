@@ -447,9 +447,9 @@ class JeandleRuntimeRoutine : public AllStatic {
   static jint count_positives_impl(jbyte* ba_start, jint len);
 
   // Platform-specific SIMD adapter stub for countPositives.
-  // Populated by generate_count_positives_adapter() during Jeandle startup; nullptr until then.
-  // When non-null, resolve_count_positives() routes the intrinsic through this stub instead
-  // of the scalar count_positives_impl fallback.
+  // Set by generate_count_positives_adapter() during Jeandle startup when a
+  // platform-specific adapter is generated.  lower_count_positives uses it when
+  // present; otherwise it calls the scalar count_positives_impl fallback.
   static address _count_positives_stub_adapter;
 
  public:
