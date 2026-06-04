@@ -43,14 +43,14 @@ public class TestLog10Double {
         boolean is_x86 = System.getProperty("os.arch").equals("amd64");
         String dump_path = System.getProperty("java.io.tmpdir");
 
-        // intrinsic by StubRoutine
+        // Force the Call candidate and verify the StubRoutine path.
         ArrayList<String> command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-            "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-            "-XX:JeandleDumpDirectory="+dump_path, "-XX:+JeandleUseHotspotIntrinsics",
+            "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
+            "-XX:JeandleDumpDirectory="+dump_path, "-XX:JeandleIntrinsicCandidate=call",
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double"));
         if (is_x86) {
-          command_args.addAll(List.of("-XX:+UnlockDiagnosticVMOptions", "-XX:+UseLibmIntrinsic"));
+          command_args.addAll(List.of("-XX:+UseLibmIntrinsic"));
         }
         command_args.add(TestWrapper.class.getName());
 
@@ -80,7 +80,7 @@ public class TestLog10Double {
         }
         checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
 
-        // intrinsic by SharedRuntime
+        // Force the Call candidate and verify the SharedRuntime fallback.
         if (is_x86) {
             dump_path = System.getProperty("java.io.tmpdir")+"/test2";
             Path tmp2 = Path.of(dump_path);
@@ -90,9 +90,9 @@ public class TestLog10Double {
 
             command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-Xlog:jeandle=debug", "-XX:+ForceUnreachable",
+                "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+ForceUnreachable",
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double",
-                "-XX:+UnlockDiagnosticVMOptions", "-XX:-UseLibmIntrinsic", "-XX:+JeandleUseHotspotIntrinsics",
+                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=call",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);
@@ -101,10 +101,10 @@ public class TestLog10Double {
 
             command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
+                "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory="+dump_path,
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double",
-                "-XX:+UnlockDiagnosticVMOptions", "-XX:-UseLibmIntrinsic", "-XX:+JeandleUseHotspotIntrinsics",
+                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=call",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);

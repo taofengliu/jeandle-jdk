@@ -39,10 +39,10 @@ class JeandleIntrinsicLowering : public StackObj {
   // code; the callee + call-site facts are read off call_info.
   bool emit_simple_call_intrinsic(const JeandleIntrinsicDescriptor& desc);
   // Resolve a runtime-stub callee from the given resolvers (never a switch on the
-  // intrinsic id).  Returns true iff HotSpot intrinsics are preferred and an
-  // installed stub / SharedRuntime is found, filling `entry`; false otherwise (the
-  // caller then falls back as it chooses — NormalInvoke, or its own builtin).  Takes
-  // the callee identity explicitly so a Hybrid body can call it without a call_info.
+  // intrinsic id).  Returns true iff an installed stub / SharedRuntime is found,
+  // filling `entry`; false otherwise (the caller then falls back as it chooses —
+  // NormalInvoke, or its own builtin).  Takes the callee identity explicitly so
+  // hand-written bodies do not need call_info.
   bool resolve_runtime_callee(vmIntrinsics::ID id,
                               JeandleRuntimeCalleeFn stub_fn,
                               JeandleRuntimeCalleeFn shared_fn,
@@ -63,8 +63,8 @@ class JeandleIntrinsicLowering : public StackObj {
   bool lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc);
   bool lower_spin_wait_hint(const JeandleIntrinsicDescriptor& desc);
 
-  // Hybrid handlers (call_info != nullptr; a call site wrapped in guards / fast
-  // paths).
+  // Hybrid handlers: hand-written bodies that may wrap call sites in guards / fast
+  // paths.  They carry no static call_info and build each call-site contract inline.
   bool lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc);
   bool lower_count_positives(const JeandleIntrinsicDescriptor& desc);
 

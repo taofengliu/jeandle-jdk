@@ -19,6 +19,8 @@
 
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 
+#include <string.h>
+
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/IR/Constants.h"
@@ -45,12 +47,10 @@
 //
 // The intrinsics whose lowering is a per-id hand-written body are listed here as
 // V(vm_name, handler_suffix); the dispatch token-pastes each to a call to
-// lower_<handler_suffix>(desc).  Because the row that declares the intrinsic also
-// names its handler, declaring one without a matching lower_<handler_suffix> is a
-// compile/link error — a hand-written kind cannot be registered without its body.
-// (The matching LK_* descriptor rows live in jeandleIntrinsicRegistry.cpp; the
-// kinds with no per-id body — data-driven LK_CALL and the LK_LLVM standard ops —
-// need no entry here.)
+// lower_<handler_suffix>(desc).  This catches missing handlers for rows that appear
+// in the dispatch table.  The matching LK_* descriptor rows still live in
+// jeandleIntrinsicRegistry.cpp, so those tables must be kept in sync until they are
+// moved to a shared .def file.
 // =============================================================================
 
 // LK_HYBRID — a hand-written body that wraps a call site in guards / fast paths and
@@ -90,11 +90,48 @@ static bool is_double_constant(llvm::Value* value, double expected,
   return fp_constant->getValueAPF().bitwiseIsEqual(expected_value);
 }
 
+enum JeandleIntrinsicCandidateSelection : uint8_t {
+  JICS_Auto,
+  JICS_LLVM,
+  JICS_Hybrid,
+  JICS_Call,
+};
+
+static JeandleIntrinsicCandidateSelection intrinsic_candidate_selection() {
+  const char* value = JeandleIntrinsicCandidate;
+  if (value == nullptr || strcmp(value, "auto") == 0) {
+    return JICS_Auto;
+  }
+  if (strcmp(value, "llvm") == 0) {
+    return JICS_LLVM;
+  }
+  if (strcmp(value, "hybrid") == 0) {
+    return JICS_Hybrid;
+  }
+  if (strcmp(value, "call") == 0) {
+    return JICS_Call;
+  }
+  fatal("Invalid JeandleIntrinsicCandidate='%s': expected auto, llvm, hybrid, or call", value);
+  return JICS_Auto;
+}
+
+static bool candidate_selection_allows(JeandleLoweringKind kind,
+                                       JeandleIntrinsicCandidateSelection selection) {
+  switch (selection) {
+    case JICS_Auto:   return true;
+    case JICS_LLVM:   return kind == LK_LLVM;
+    case JICS_Hybrid: return kind == LK_HYBRID;
+    case JICS_Call:   return kind == LK_CALL;
+  }
+  ShouldNotReachHere();
+  return false;
+}
+
 // =============================================================================
 // Common call-site emission — the shared machinery used by the data-driven
-// LK_CALL path and by Hybrid bodies.  emit_callsite consumes a JeandleCallSiteContract
-// only (never desc.call_info), so a Hybrid body without a static call_info can feed
-// it a contract built on the fly.
+// LK_CALL path and by hand-written bodies.  emit_callsite consumes a
+// JeandleCallSiteContract only (never desc.call_info), so those bodies can feed it
+// contracts built on the fly.
 // =============================================================================
 
 // Mirror PR #430's call-site type-info attachment for object-returning intrinsics:
@@ -117,7 +154,7 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(const JeandleIntrinsicDe
                                                         const JeandleCallSiteContract& contract,
                                                         const JeandleIntrinsicEntrypoint* entry) {
   // emit_callsite consumes the call-site contract only — never desc.call_info — so
-  // a Hybrid body (which carries no static call_info) can build one on the fly.
+  // hand-written bodies can build contracts on the fly.
   llvm::SmallVector<llvm::OperandBundleDef, 1> bundles =
     JeandleIntrinsicIRSemantics::build_operand_bundles(_interp, contract.attach_deopt_bundle());
   llvm::CallBase* site;
@@ -149,29 +186,26 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const JeandleIntrins
 }
 
 // Resolve the HotSpot stub / SharedRuntime routine from the given resolver function
-// pointers, filling `entry`.  Returns true iff a runtime routine was selected — i.e.
-// HotSpot intrinsics are preferred and an installed stub/SharedRuntime exists.
-// Returns false otherwise; the caller then falls back as it sees fit (the dsin Call
-// candidate to NormalInvoke, the dpow Hybrid body to the llvm.pow builtin).  Takes
-// the callee identity explicitly, so a Hybrid body can resolve without a call_info.
+// pointers, filling `entry`.  Returns false without touching the operand stack if no
+// runtime routine exists, so the caller can decline the selected candidate or use
+// its own fallback.  Takes the callee identity explicitly, so a Hybrid body can
+// resolve without a call_info.
 bool JeandleIntrinsicLowering::resolve_runtime_callee(vmIntrinsics::ID id,
                                                       JeandleRuntimeCalleeFn stub_fn,
                                                       JeandleRuntimeCalleeFn shared_fn,
                                                       JeandleIntrinsicEntrypoint& entry) {
-  JeandleRuntimeAvailability avail = JeandleIntrinsicSupport::runtime_availability(id);
-  if (avail.hotspot_preferred && avail.any_runtime()) {
-    JeandleRuntimeCalleeFn fn = nullptr;
-    if (avail.has_hotspot_stub && stub_fn != nullptr) {
-      fn = stub_fn;
-    } else if (avail.has_shared_runtime && shared_fn != nullptr) {
-      fn = shared_fn;
-    }
-    if (fn != nullptr) {
-      entry.callee = fn(_interp->_module);
-      entry.calling_conv = llvm::CallingConv::C;
-      entry.is_gc_leaf = true;
-      return true;
-    }
+  const JeandleRuntimeAvailability avail = JeandleIntrinsicSupport::runtime_availability(id);
+  JeandleRuntimeCalleeFn fn = nullptr;
+  if (avail.has_hotspot_stub && stub_fn != nullptr) {
+    fn = stub_fn;
+  } else if (avail.has_shared_runtime && shared_fn != nullptr) {
+    fn = shared_fn;
+  }
+  if (fn != nullptr) {
+    entry.callee = fn(_interp->_module);
+    entry.calling_conv = llvm::CallingConv::C;
+    entry.is_gc_leaf = true;
+    return true;
   }
   return false;
 }
@@ -179,24 +213,27 @@ bool JeandleIntrinsicLowering::resolve_runtime_callee(vmIntrinsics::ID id,
 // =============================================================================
 // lower() — entry point.  Fixed-priority traversal over the declared candidate
 // kinds: LK_LLVM > LK_HYBRID > LK_CALL.  Try each declared candidate in order; the
-// first that lowers wins.  Today every intrinsic declares exactly one kind, so
-// exactly one branch is taken; a multi-candidate intrinsic (e.g. dsin = LK_LLVM |
+// first that lowers wins.  A multi-candidate intrinsic (e.g. dsin = LK_LLVM |
 // LK_CALL) falls through to the next candidate when the higher-priority one declines.
+// JeandleIntrinsicCandidate is a diagnostic override for path testing: auto keeps
+// the traversal above, while llvm / hybrid / call masks the other candidates.
 // =============================================================================
 
 bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
                                      const ciMethod* target) {
   _target = target;
+  const JeandleIntrinsicCandidateSelection selection = intrinsic_candidate_selection();
 
-  if ((desc.lowering_kinds & LK_LLVM) && lower_llvm(desc)) {
+  if (candidate_selection_allows(LK_LLVM, selection) &&
+      (desc.lowering_kinds & LK_LLVM) && lower_llvm(desc)) {
     return true;
   }
 
-  if (desc.lowering_kinds & LK_HYBRID) {
+  if (candidate_selection_allows(LK_HYBRID, selection) &&
+      (desc.lowering_kinds & LK_HYBRID)) {
     switch (desc.id) {
-      // Dispatch generated from JEANDLE_HYBRID_TABLE: declaring a row token-pastes a
-      // call to lower_<suffix>, so a missing body is a compile/link error rather
-      // than a runtime surprise.
+      // Dispatch generated from JEANDLE_HYBRID_TABLE; the token-pasted call catches
+      // missing handlers for rows in that table.
 #define JEANDLE_HYBRID_DISPATCH(VM_NAME, HANDLER) \
       case vmIntrinsics::_##VM_NAME: return lower_##HANDLER(desc);
       JEANDLE_HYBRID_TABLE(JEANDLE_HYBRID_DISPATCH)
@@ -205,7 +242,8 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
     }
   }
 
-  if (desc.lowering_kinds & LK_CALL) {
+  if (candidate_selection_allows(LK_CALL, selection) &&
+      (desc.lowering_kinds & LK_CALL)) {
     // LK_CALL is fully data-driven.
     return emit_simple_call_intrinsic(desc);
   }
@@ -329,9 +367,9 @@ static constexpr LlvmOpSpec kLlvmOpTable[] = {
   { vmIntrinsics::_bitCount_l,   LO_BUILTIN, llvm::Intrinsic::ctpop, false },
   // libm math family: the *builtin* candidate of the dsin..dexp dual candidates.
   // Their runtime-stub candidate stays in JEANDLE_CALL_RUNTIME_STUB_TABLE; the
-  // descriptor's LK_LLVM | LK_CALL kinds are OR-merged in the registry, and the
-  // LO_BUILTIN case below declines (so the stub wins) when JeandleUseHotspotIntrinsics
-  // is set and a stub is installed.
+  // descriptor's LK_LLVM | LK_CALL kinds are OR-merged in the registry.  The default
+  // traversal tries these LLVM builtins first; -XX:JeandleIntrinsicCandidate=call
+  // forces the runtime candidate for path testing.
   { vmIntrinsics::_dsin,   LO_BUILTIN, llvm::Intrinsic::sin,   false },
   { vmIntrinsics::_dcos,   LO_BUILTIN, llvm::Intrinsic::cos,   false },
   { vmIntrinsics::_dtan,   LO_BUILTIN, llvm::Intrinsic::tan,   false },
@@ -381,16 +419,6 @@ bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc
           !JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
         return false;
       }
-      // Flag reversal: when HotSpot intrinsics are preferred and this id also has a
-      // runtime-stub candidate (LK_CALL) that is installed, decline the builtin so
-      // the stub candidate wins the priority traversal (the dsin..dexp libm family
-      // under -XX:+JeandleUseHotspotIntrinsics).
-      if (desc.lowering_kinds & LK_CALL) {
-        JeandleRuntimeAvailability avail = JeandleIntrinsicSupport::runtime_availability(desc.id);
-        if (avail.hotspot_preferred && avail.any_runtime()) {
-          return false;
-        }
-      }
       return emit_llvm_builtin(desc, spec->llvm_id);
     case LO_BITCAST:
       return emit_llvm_bitcast(desc);
@@ -400,9 +428,8 @@ bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc
       return emit_llvm_sink(desc);
     case LO_CUSTOM:
       switch (desc.id) {
-        // Dispatch generated from JEANDLE_LLVM_CUSTOM_TABLE: declaring a row
-        // token-pastes a call to lower_<suffix>, so a missing body is a
-        // compile/link error.
+        // Dispatch generated from JEANDLE_LLVM_CUSTOM_TABLE; the token-pasted call
+        // catches missing handlers for rows in that table.
 #define JEANDLE_LLVM_CUSTOM_DISPATCH(VM_NAME, HANDLER) \
         case vmIntrinsics::_##VM_NAME: return lower_##HANDLER(desc);
         JEANDLE_LLVM_CUSTOM_TABLE(JEANDLE_LLVM_CUSTOM_DISPATCH)
@@ -614,9 +641,9 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(const JeandleIntr
 // JEANDLE_HYBRID_TABLE for the id -> handler mapping that drives the dispatch.
 // =============================================================================
 
-// Math.pow(base, exp): IR fast paths for the common constant exponents, otherwise a
-// runtime/builtin pow call.  The body self-resolves its callee and builds its own
-// call-site contract, so it carries no static call_info.
+// Math.pow(base, exp): IR fast paths for common constant exponents, then the
+// platform pow stub when one is installed, then llvm.pow.  SharedRuntime is kept
+// as a last-resort fallback rather than taking priority over LLVM's pow intrinsic.
 bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc) {
   // pow is a pure leaf call: no deopt, no GC state, no exception edge.
   const JeandleCallSiteContract pow_contract = { CTRL_NONE, MEM_NONE };
@@ -634,21 +661,35 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
     return true;
   }
 
-  // Resolve the slow / general pow callee once (runtime stub / SharedRuntime, or
-  // the llvm.pow builtin fallback).
-  JeandleIntrinsicEntrypoint entry;
+  // Resolve only the generated HotSpot stub here.  SharedRuntime is intentionally
+  // not used before llvm.pow; on platforms without a generated stub, keeping the
+  // slow path as an LLVM intrinsic gives LLVM a chance to lower it directly.
+  JeandleIntrinsicEntrypoint stub_entry;
   const bool has_stub = resolve_runtime_callee(desc.id,
                               &JeandleRuntimeRoutine::StubRoutines_dpow_callee,
-                              &JeandleRuntimeRoutine::SharedRuntime_dpow_callee, entry);
+                              nullptr, stub_entry);
 
-  // Emit a full pow(base, exp) call: the resolved runtime stub, or the llvm.pow builtin.
+  // Emit a full pow(base, exp) call: generated stub, llvm.pow, then SharedRuntime.
   auto emit_slow = [&]() -> llvm::Value* {
     if (has_stub) {
-      return emit_callsite(desc, entry.callee, entry.calling_conv, {base, exp}, pow_contract, &entry);
+      return emit_callsite(desc, stub_entry.callee, stub_entry.calling_conv,
+                           {base, exp}, pow_contract, &stub_entry);
     }
     llvm::Function* pow_fn = llvm::Intrinsic::getOrInsertDeclaration(
         &_interp->_module, llvm::Intrinsic::pow, {ret_ty});
-    return builder.CreateCall(pow_fn, {base, exp});
+    if (pow_fn != nullptr) {
+      return builder.CreateCall(pow_fn, {base, exp});
+    }
+
+    JeandleIntrinsicEntrypoint shared_entry;
+    if (resolve_runtime_callee(desc.id, nullptr,
+                               &JeandleRuntimeRoutine::SharedRuntime_dpow_callee,
+                               shared_entry)) {
+      return emit_callsite(desc, shared_entry.callee, shared_entry.calling_conv,
+                           {base, exp}, pow_contract, &shared_entry);
+    }
+    ShouldNotReachHere();
+    return llvm::UndefValue::get(ret_ty);
   };
 
   // Constant fast path: pow(x, 0.5) => x > 0.0 ? llvm.sqrt(x) : pow(x, 0.5).
@@ -721,9 +762,9 @@ bool JeandleIntrinsicLowering::lower_count_positives(const JeandleIntrinsicDescr
       ? JeandleRuntimeRoutine::JeandleRuntime_count_positives_adapter_callee(_interp->_module)
       : JeandleRuntimeRoutine::JeandleRuntime_count_positives_callee(_interp->_module);
 
-  // The precondition guards above may deopt (string_range_check); the scan itself
-  // only reads the byte[].  Built here — countPositives carries no static call_info.
-  const JeandleCallSiteContract scan_contract = { CTRL_MAY_DEOPT, MEM_READ };
+  // The guards above may deopt; the scan call itself only reads the byte[].
+  // Built here — countPositives carries no static call_info.
+  const JeandleCallSiteContract scan_contract = { CTRL_NONE, MEM_READ };
   _interp->_jvm->ipush(emit_callsite(desc, entry.callee, entry.calling_conv, {ba_start, len}, scan_contract, &entry));
   return true;
 }

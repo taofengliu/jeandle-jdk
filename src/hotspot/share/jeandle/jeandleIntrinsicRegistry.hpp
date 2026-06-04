@@ -36,8 +36,7 @@ struct JeandleIntrinsicCallInfo;
 // intrinsic can be lowered through.  lower() traverses them in the fixed priority
 // LK_LLVM > LK_HYBRID > LK_CALL and takes the first that applies.  An intrinsic may
 // declare more than one candidate (e.g. a math routine with both an llvm.* builtin
-// and a runtime-stub fallback declares LK_LLVM | LK_CALL); today every intrinsic
-// declares exactly one.
+// and a runtime-stub fallback declares LK_LLVM | LK_CALL).
 //
 //   LK_LLVM   — bare LLVM IR / inline-asm / uncommon_trap / single llvm.* builtin.
 //               Emits no semantic call site (call_info == nullptr).
@@ -46,8 +45,9 @@ struct JeandleIntrinsicCallInfo;
 //   LK_CALL   — fixed shape "pop args -> call the callee once -> push result",
 //               handled generically by emit_simple_call_intrinsic.
 //
-// LK_HYBRID and LK_CALL emit a call site and so carry a JeandleIntrinsicCallInfo
-// (call_info != nullptr); LK_LLVM does not.  Combine with bitwise OR.
+// Only LK_CALL carries a static JeandleIntrinsicCallInfo.  LK_HYBRID may emit call
+// sites, but its hand-written body builds each JeandleCallSiteContract inline.
+// Combine with bitwise OR.
 enum JeandleLoweringKind : uint8_t {
   LK_NONE   = 0,
   LK_LLVM   = 1u << 0,
@@ -83,19 +83,19 @@ static_assert(Deoptimization::Reason_LIMIT <= 32,
 
 // Base descriptor: one row per intrinsic Jeandle can lower.  It holds only the
 // admission-time facts (identity, lowering family, trap throttle).  Everything
-// tied to emitting a call site — control/memory semantics, callee identity and
-// operand-stack shape — lives in JeandleIntrinsicCallInfo, reached through call_info.
+// tied to data-driven LK_CALL emission — control/memory semantics and callee
+// identity — lives in JeandleIntrinsicCallInfo, reached through call_info.
 //
-// call_info is nullptr unless a call-emitting kind (LK_HYBRID / LK_CALL) is
-// declared in lowering_kinds.
+// call_info is nullptr unless LK_CALL is declared in lowering_kinds.  Hybrid bodies
+// may emit call sites, but they do not use a static call_info row.
 struct JeandleIntrinsicDescriptor {
   // VM intrinsic ID being described.  This is also the O(1) lookup-table key.
   vmIntrinsics::ID       id;
   // Set of candidate lowering kinds (bitmask of JeandleLoweringKind, OR-combined),
   // traversed by lower() in priority order LK_LLVM > LK_HYBRID > LK_CALL.
   uint8_t                lowering_kinds;
-  // Call-site semantics + callee + stack shape.  nullptr unless a call-emitting
-  // kind (LK_HYBRID / LK_CALL) is declared.
+  // Call-site semantics + callee identity for data-driven LK_CALL.  nullptr for
+  // LK_LLVM and LK_HYBRID.
   const JeandleIntrinsicCallInfo* call_info;
   // GC barrier semantic source: reserved data for a future late GC-barrier pass.
   // Not emitted anywhere today and never drives lowering.  Defaulted so rows that

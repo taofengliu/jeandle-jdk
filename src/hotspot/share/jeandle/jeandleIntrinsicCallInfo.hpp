@@ -38,9 +38,10 @@
 // Rationale (the "call-only" split): a deopt bundle, an invoke exception edge,
 // and GC-state visibility are properties of a call, not of a bare IR sequence.
 // PureLLVM intrinsics (bitcast / fence / inline-asm / uncommon_trap) emit no
-// such call site and carry no JeandleIntrinsicCallInfo.  Call and Hybrid intrinsics do,
-// so the control/memory/support facts, the callee identity, and the operand
-// stack shape all live here.
+// such call site and carry no JeandleIntrinsicCallInfo.  LK_CALL intrinsics do:
+// their control/memory facts and callee identity live here.  Hybrid bodies may
+// emit call sites too, but they build JeandleCallSiteContract values inline rather
+// than carrying one static CallInfo row.
 //
 // NOTE: GC barrier semantics do NOT live here.  The barrier semantic is reserved
 // data on the base descriptor (JeandleIntrinsicDescriptor::barrier_kind) for a
@@ -77,7 +78,7 @@ enum JeandleMemoryFlag : uint16_t {
   // lowering-time decision emitted via a shared helper, not a memory-flag bit.
 };
 
-// Which kind of callee a Call / Hybrid intrinsic targets.  (A single llvm.*
+// Which kind of callee a data-driven LK_CALL intrinsic targets.  (A single llvm.*
 // builtin is NOT a callee kind here — such intrinsics are PureLLVM, lowered via the
 // LLVM op table (kLlvmOpTable), and carry no JeandleIntrinsicCallInfo.)
 enum class JeandleIntrinsicCalleeKind : uint8_t {
@@ -94,8 +95,9 @@ enum class JeandleIntrinsicCalleeKind : uint8_t {
 
 // Property-driven runtime-callee resolver.  One function per runtime routine that
 // materializes the stub / SharedRuntime FunctionCallee in the given module.
-// Storing these as data on the descriptor lets emit_simple_call_intrinsic and the
-// Hybrid bodies resolve a callee generically — never switching on intrinsic id.
+// Storing these as data on the LK_CALL descriptor lets emit_simple_call_intrinsic
+// resolve a callee generically — never switching on intrinsic id.  Hybrid bodies
+// can still pass resolver functions directly when they need the same runtime path.
 using JeandleRuntimeCalleeFn = llvm::FunctionCallee (*)(llvm::Module&);
 
 // A resolved (materialized) runtime callee plus the IR-level facts a lowering needs

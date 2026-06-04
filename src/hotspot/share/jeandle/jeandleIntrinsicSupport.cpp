@@ -19,7 +19,6 @@
 
 #include "jeandle/jeandleIntrinsicSupport.hpp"
 
-#include "jeandle/jeandle_globals.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleIntrinsicCallInfo.hpp"
 
@@ -98,7 +97,6 @@ static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleRuntimeAvailability&
 
 JeandleRuntimeAvailability JeandleIntrinsicSupport::runtime_availability(vmIntrinsics::ID id) {
   JeandleRuntimeAvailability avail{};
-  avail.hotspot_preferred = JeandleUseHotspotIntrinsics;
   // The stub probe is keyed on the id and leaves the fields false for any id that
   // does not name a stub, so it is safe to run unconditionally.  (CPU support for a
   // libm builtin is the separate cpu_supports_llvm_builtin query, not part of this

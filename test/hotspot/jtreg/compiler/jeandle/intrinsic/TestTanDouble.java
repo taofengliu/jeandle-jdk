@@ -43,14 +43,14 @@ public class TestTanDouble {
         boolean is_x86 = System.getProperty("os.arch").equals("amd64");
         String dump_path = System.getProperty("java.io.tmpdir");
 
-        // intrinsic by StubRoutine
+        // Force the Call candidate and verify the StubRoutine path.
         if (is_x86) {
             ArrayList<String> command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
+                "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory="+dump_path,
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::tan_double",
-                "-XX:+UnlockDiagnosticVMOptions", "-XX:+UseLibmIntrinsic", "-XX:+JeandleUseHotspotIntrinsics",
+                "-XX:+UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=call",
                 TestWrapper.class.getName()));
 
             ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
@@ -74,7 +74,7 @@ public class TestTanDouble {
             checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
         }
 
-        // intrinsic by SharedRuntime
+        // Force the Call candidate and verify the SharedRuntime fallback.
         dump_path = System.getProperty("java.io.tmpdir")+"/test2";
         Path tmp2 = Path.of(dump_path);
         if (!Files.exists(tmp2)) {
@@ -85,9 +85,9 @@ public class TestTanDouble {
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
             "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+ForceUnreachable",
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::tan_double",
-            "-XX:+JeandleUseHotspotIntrinsics"));
+            "-XX:JeandleIntrinsicCandidate=call"));
         if (is_x86) {
-            command_args.addAll(List.of("-XX:+UnlockDiagnosticVMOptions", "-XX:-UseLibmIntrinsic"));
+            command_args.addAll(List.of("-XX:-UseLibmIntrinsic"));
         }
         command_args.add(TestWrapper.class.getName());
         ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
@@ -97,12 +97,12 @@ public class TestTanDouble {
 
         command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-            "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
+            "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
             "-XX:JeandleDumpDirectory="+dump_path,
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::tan_double",
-            "-XX:+JeandleUseHotspotIntrinsics"));
+            "-XX:JeandleIntrinsicCandidate=call"));
         if (is_x86) {
-            command_args.addAll(List.of("-XX:+UnlockDiagnosticVMOptions", "-XX:-UseLibmIntrinsic"));
+            command_args.addAll(List.of("-XX:-UseLibmIntrinsic"));
         }
         command_args.add(TestWrapper.class.getName());
         pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);

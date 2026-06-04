@@ -60,8 +60,8 @@
 //     builtin is advertised: add a `case` to probe_hotspot_stubs (runtime_availability)
 //     or cpu_supports_llvm_builtin.  Both entry points are generic and id-keyed —
 //     you add a case, never a new query function.
-//   - Lowering (jeandleIntrinsicLowering.cpp) — Call needs no code; Hybrid /
-//     PureLLVM add a `case` routed to a lower_* helper.
+//   - Lowering (jeandleIntrinsicLowering.cpp) — Call needs no per-id code; Hybrid
+//     and PureLLVM OP_CUSTOM rows must also be present in the dispatch tables there.
 //   - JavaOp callees — define the body in template.ll / jeandleRuntimeDefinedJavaOps.cpp.
 //   - A jtreg test under test/hotspot/jtreg/compiler/jeandle/.
 // =============================================================================
@@ -81,8 +81,9 @@ static constexpr JeandleTrapReasonMask trap_reason_mask(Deoptimization::DeoptRea
 //
 // The dsin..dexp libm family is dual-candidate: this is their *stub* candidate
 // (LK_CALL).  Their llvm.* builtin candidate (LK_LLVM) lives in kLlvmOpTable +
-// JEANDLE_PURE_TABLE; the registry OR-merges the two into LK_LLVM | LK_CALL and the
-// priority traversal (plus the JeandleUseHotspotIntrinsics flag) picks between them.
+// JEANDLE_PURE_TABLE; the registry OR-merges the two into LK_LLVM | LK_CALL.
+// The default traversal tries the LLVM candidate first; the diagnostic
+// JeandleIntrinsicCandidate option can force either path for tests.
 #define JEANDLE_CALL_RUNTIME_STUB_TABLE(V) \
   V(dsin)   \
   V(dcos)   \
@@ -182,6 +183,9 @@ static void validate_descriptor(const JeandleIntrinsicDescriptor& desc) {
   }
   assert(ci->callee_kind != JeandleIntrinsicCalleeKind::JavaOp || ci->java_op_name != nullptr,
          "JavaOp callee requires a non-null java_op_name");
+  assert(ci->callee_kind != JeandleIntrinsicCalleeKind::JavaOp ||
+         !ci->contract.gc_leaf_by_flags(),
+         "JavaOp call sites must remain GC-visible/non-leaf");
   assert(ci->java_op_name == nullptr || ci->java_op_name[0] != '\0',
          "empty JavaOp name string");
   assert(ci->callee_kind != JeandleIntrinsicCalleeKind::RuntimeStub ||
@@ -247,9 +251,8 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     JEANDLE_PURE_TABLE(JEANDLE_ROW_PURE)
 #undef JEANDLE_ROW_PURE
 
-    // ---- Hybrid: hand-written bodies, no static call_info.  Each one's lower_*
-    //      body is forced to exist by the token-paste dispatch generated from
-    //      JEANDLE_HYBRID_TABLE in jeandleIntrinsicLowering.cpp.  Keep last; grows. ----
+    // ---- Hybrid: hand-written bodies.  Keep this list in sync with
+    //      JEANDLE_HYBRID_TABLE in jeandleIntrinsicLowering.cpp. ----
     { vmIntrinsics::_dpow,           LK_HYBRID, nullptr },
     { vmIntrinsics::_countPositives, LK_HYBRID, nullptr },
   };

@@ -24,7 +24,7 @@
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "memory/allocation.hpp"
 
-// Translate the call_info's memory flags into an LLVM `memory()` call-site
+// Translate the call-site contract's memory flags into an LLVM `memory()` call-site
 // attribute.  Only applied when the call is safe from LLVM's reordering
 // perspective: no GC-state observation, no deopt, no exception edge — anything
 // that could imply a safepoint or surprise the optimizer must be excluded.

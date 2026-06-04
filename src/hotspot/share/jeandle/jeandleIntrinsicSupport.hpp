@@ -23,10 +23,10 @@
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 
 // Runtime-path availability for one intrinsic id, computed at decision time: is a
-// HotSpot stub installed, is a SharedRuntime fallback present, and is the
-// prefer-HotSpot flag set.  CPU-feature support for an llvm builtin is a *separate*
-// query (cpu_supports_llvm_builtin) so each caller asks only about the category it
-// cares about — resolve_runtime_callee never sees a CPU bit it does not use.
+// HotSpot stub installed, and is a SharedRuntime fallback present.  CPU-feature
+// support for an llvm builtin is a *separate* query (cpu_supports_llvm_builtin) so
+// each caller asks only about the category it cares about — resolve_runtime_callee
+// never sees a CPU bit it does not use.
 //
 // Part of the Jeandle analog of C2Compiler::is_intrinsic_supported: a pure
 // availability query, separate from the policy that ranks those paths.
@@ -40,20 +40,16 @@ struct JeandleRuntimeAvailability {
   bool has_hotspot_stub;
   // A SharedRuntime C-linkage fallback function exists.
   bool has_shared_runtime;
-  // JeandleUseHotspotIntrinsics flag: when true, HotSpot runtime paths are preferred over LLVM.
-  bool hotspot_preferred;
-
   bool any_runtime() const { return has_hotspot_stub || has_shared_runtime; }
 };
 
 class JeandleIntrinsicSupport : public AllStatic {
  public:
   // The runtime-stub availability for the given intrinsic id (stub installed /
-  // SharedRuntime present / prefer-HotSpot flag); callers apply their own priority
-  // rules.  Keyed purely on the id (no descriptor / call_info), so a Hybrid body
-  // queries it the same way a data-driven Call does.  This is a *generic* entry
-  // point: adding an intrinsic adds a `case` to the internal probe, never a new
-  // query method.
+  // SharedRuntime present); callers apply their own candidate policy.  Keyed
+  // purely on the id (no descriptor / call_info), so a Hybrid body queries it the
+  // same way a data-driven Call does.  This is a *generic* entry point: adding an
+  // intrinsic adds a `case` to the internal probe, never a new query method.
   static JeandleRuntimeAvailability runtime_availability(vmIntrinsics::ID id);
 
   // Whether the target CPU can lower the given intrinsic's llvm.* builtin to a
