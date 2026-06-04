@@ -22,43 +22,45 @@
 
 #include "jeandle/jeandleIntrinsicRegistry.hpp"
 
-// Per-intrinsic capability snapshot, computed once at decision time.
+// Runtime-path availability for one intrinsic id, computed at decision time: is a
+// HotSpot stub installed, is a SharedRuntime fallback present, and is the
+// prefer-HotSpot flag set.  CPU-feature support for an llvm builtin is a *separate*
+// query (cpu_supports_llvm_builtin) so each caller asks only about the category it
+// cares about — resolve_runtime_callee never sees a CPU bit it does not use.
 //
-// This is the Jeandle analog of C2Compiler::is_intrinsic_supported: a pure
-// capability query that answers what lowering paths are actually available for
-// a given descriptor at runtime (stub installed?  CPU feature present?  flag
-// enabled?), separate from the policy that ranks those paths.
+// Part of the Jeandle analog of C2Compiler::is_intrinsic_supported: a pure
+// availability query, separate from the policy that ranks those paths.
 //
 // The split is intentional and addresses three different kinds of facts:
-//   descriptor           - what we declared statically about the intrinsic
-//   capabilities (here)  - what is available right now in this VM
-//   decision (Policy)    - which path we actually picked, given priorities
-struct JeandleIntrinsicCapabilities {
-  // Descriptor says supports_llvm_intrinsic; lowering can emit an llvm.* builtin call.
-  bool has_llvm_builtin;
-  // Descriptor says supports_hotspot_stub AND the per-intrinsic stub has been installed.
+//   descriptor            - what we declared statically about the intrinsic
+//   runtime availability  - which runtime paths exist right now in this VM
+//   decision (Policy)     - which path we actually picked, given priorities
+struct JeandleRuntimeAvailability {
+  // The per-intrinsic platform stub has been installed.
   bool has_hotspot_stub;
-  // Descriptor says supports_hotspot_stub AND a SharedRuntime fallback function exists.
+  // A SharedRuntime C-linkage fallback function exists.
   bool has_shared_runtime;
   // JeandleUseHotspotIntrinsics flag: when true, HotSpot runtime paths are preferred over LLVM.
   bool hotspot_preferred;
 
   bool any_runtime() const { return has_hotspot_stub || has_shared_runtime; }
-  bool any_path()    const { return has_llvm_builtin || any_runtime(); }
 };
 
 class JeandleIntrinsicSupport : public AllStatic {
  public:
-  // Return the set of available lowering paths for the given descriptor.
-  // All stub-installation, CPU-feature, and flag checks live in this single
-  // method; callers receive a plain capability struct and apply their own
-  // priority rules.
-  static JeandleIntrinsicCapabilities query(const JeandleIntrinsicDescriptor& desc);
+  // The runtime-stub availability for the given intrinsic id (stub installed /
+  // SharedRuntime present / prefer-HotSpot flag); callers apply their own priority
+  // rules.  Keyed purely on the id (no descriptor / call_info), so a Hybrid body
+  // queries it the same way a data-driven Call does.  This is a *generic* entry
+  // point: adding an intrinsic adds a `case` to the internal probe, never a new
+  // query method.
+  static JeandleRuntimeAvailability runtime_availability(vmIntrinsics::ID id);
 
   // Whether the target CPU can lower the given intrinsic's llvm.* builtin to a
-  // native instruction (e.g. floor/ceil/rint need SSE4.1 ROUNDSD on x86).  Pure
-  // id -> bool, no descriptor/call_info needed, so PureLLVM builtin lowering can
-  // gate on it directly.  Returns true for intrinsics with no CPU requirement.
+  // native instruction (e.g. floor/ceil/rint need SSE4.1 ROUNDSD on x86).  The CPU
+  // counterpart to runtime_availability — likewise generic and id-keyed (a new
+  // intrinsic adds a `case`, not a function).  Returns true for intrinsics with no
+  // CPU requirement, so PureLLVM builtin lowering can gate on it directly.
   static bool cpu_supports_llvm_builtin(vmIntrinsics::ID id);
 };
 

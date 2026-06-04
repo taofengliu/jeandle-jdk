@@ -38,8 +38,8 @@
 // future intrinsics matching this shape can reuse it.
 #define MATCHED_STUB_PROBE(name)                                                           \
   case vmIntrinsics::_##name:                                                              \
-    caps.has_hotspot_stub   = StubRoutines::name() != nullptr;                             \
-    caps.has_shared_runtime = CAST_FROM_FN_PTR(address, SharedRuntime::name) != nullptr;   \
+    avail.has_hotspot_stub   = StubRoutines::name() != nullptr;                             \
+    avail.has_shared_runtime = CAST_FROM_FN_PTR(address, SharedRuntime::name) != nullptr;   \
     break;
 
 // CPU-feature guards: some LLVM builtins require specific ISA extensions to
@@ -74,7 +74,7 @@ bool JeandleIntrinsicSupport::cpu_supports_llvm_builtin(vmIntrinsics::ID id) {
 // the bare intrinsic name use the file-scope MATCHED_STUB_PROBE macro (libm
 // family today).  Intrinsics whose probe shape differs (e.g. countPositives)
 // get their own explicit case.
-static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleIntrinsicCapabilities& caps) {
+static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleRuntimeAvailability& avail) {
   switch (id) {
     MATCHED_STUB_PROBE(dsin)
     MATCHED_STUB_PROBE(dcos)
@@ -88,23 +88,21 @@ static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleIntrinsicCapabilitie
     // has_shared_runtime is always true because the scalar C++ fallback (count_positives_impl)
     // is unconditionally available.
     case vmIntrinsics::_countPositives:
-      caps.has_hotspot_stub   = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr;
-      caps.has_shared_runtime = true;
+      avail.has_hotspot_stub   = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr;
+      avail.has_shared_runtime = true;
       break;
     default:
       break;
   }
 }
 
-JeandleIntrinsicCapabilities JeandleIntrinsicSupport::query(const JeandleIntrinsicDescriptor& desc) {
-  assert(desc.call_info != nullptr,
-         "capability query is only meaningful for Call/Hybrid intrinsics");
-  const JeandleIntrinsicCallInfo& ci = *desc.call_info;
-  JeandleIntrinsicCapabilities caps{};
-  caps.has_llvm_builtin  = ci.supports_llvm_intrin() && cpu_supports_llvm_builtin(desc.id);
-  caps.hotspot_preferred = JeandleUseHotspotIntrinsics;
-  if (ci.supports_hotspot_stub()) {
-    probe_hotspot_stubs(desc.id, caps);
-  }
-  return caps;
+JeandleRuntimeAvailability JeandleIntrinsicSupport::runtime_availability(vmIntrinsics::ID id) {
+  JeandleRuntimeAvailability avail{};
+  avail.hotspot_preferred = JeandleUseHotspotIntrinsics;
+  // The stub probe is keyed on the id and leaves the fields false for any id that
+  // does not name a stub, so it is safe to run unconditionally.  (CPU support for a
+  // libm builtin is the separate cpu_supports_llvm_builtin query, not part of this
+  // runtime-availability snapshot.)
+  probe_hotspot_stubs(id, avail);
+  return avail;
 }

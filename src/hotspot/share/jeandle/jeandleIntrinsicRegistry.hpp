@@ -32,21 +32,27 @@ class ciMethod;
 // the base descriptor stays LLVM-free and only holds a pointer to the call info.
 struct JeandleIntrinsicCallInfo;
 
-// Coarse lowering family — selects which lowering routine handles the intrinsic:
+// Lowering candidate kinds — a *set* (bitmask) of the lowering families an
+// intrinsic can be lowered through.  lower() traverses them in the fixed priority
+// LK_LLVM > LK_HYBRID > LK_CALL and takes the first that applies.  An intrinsic may
+// declare more than one candidate (e.g. a math routine with both an llvm.* builtin
+// and a runtime-stub fallback declares LK_LLVM | LK_CALL); today every intrinsic
+// declares exactly one.
 //
-//   PureLLVM — bare LLVM IR / inline-asm / uncommon_trap.  Emits no semantic
-//              call site, so it carries no JeandleIntrinsicCallInfo (call_info == nullptr).
-//   Hybrid   — a hand-written lowering that wraps a call site in guards or
-//              fast paths (Math.pow, StringCoding.countPositives).
-//   Call     — fixed shape "pop args -> call the callee once -> push result",
-//              handled generically by emit_simple_call_intrinsic.
+//   LK_LLVM   — bare LLVM IR / inline-asm / uncommon_trap / single llvm.* builtin.
+//               Emits no semantic call site (call_info == nullptr).
+//   LK_HYBRID — a hand-written lowering that wraps a call site in guards or fast
+//               paths (Math.pow, StringCoding.countPositives).
+//   LK_CALL   — fixed shape "pop args -> call the callee once -> push result",
+//               handled generically by emit_simple_call_intrinsic.
 //
-// Hybrid and Call both emit a call site and therefore always carry a
-// JeandleIntrinsicCallInfo (call_info != nullptr).
-enum class JeandleLoweringKind : uint8_t {
-  PureLLVM,
-  Hybrid,
-  Call
+// LK_HYBRID and LK_CALL emit a call site and so carry a JeandleIntrinsicCallInfo
+// (call_info != nullptr); LK_LLVM does not.  Combine with bitwise OR.
+enum JeandleLoweringKind : uint8_t {
+  LK_NONE   = 0,
+  LK_LLVM   = 1u << 0,
+  LK_HYBRID = 1u << 1,
+  LK_CALL   = 1u << 2,
 };
 
 // GC barrier semantic of an intrinsic.  This is *annotation only*: it never
@@ -80,15 +86,16 @@ static_assert(Deoptimization::Reason_LIMIT <= 32,
 // tied to emitting a call site — control/memory semantics, callee identity and
 // operand-stack shape — lives in JeandleIntrinsicCallInfo, reached through call_info.
 //
-// call_info is nullptr for pure-IR PureLLVM intrinsics and non-null for every
-// Call / Hybrid intrinsic.
+// call_info is nullptr unless a call-emitting kind (LK_HYBRID / LK_CALL) is
+// declared in lowering_kinds.
 struct JeandleIntrinsicDescriptor {
   // VM intrinsic ID being described.  This is also the O(1) lookup-table key.
   vmIntrinsics::ID       id;
-  // Coarse lowering family; see JeandleLoweringKind.
-  JeandleLoweringKind    lowering_kind;
-  // Call-site semantics + callee + stack shape.  nullptr iff lowering_kind is
-  // PureLLVM.
+  // Set of candidate lowering kinds (bitmask of JeandleLoweringKind, OR-combined),
+  // traversed by lower() in priority order LK_LLVM > LK_HYBRID > LK_CALL.
+  uint8_t                lowering_kinds;
+  // Call-site semantics + callee + stack shape.  nullptr unless a call-emitting
+  // kind (LK_HYBRID / LK_CALL) is declared.
   const JeandleIntrinsicCallInfo* call_info;
   // GC barrier semantic source: reserved data for a future late GC-barrier pass.
   // Not emitted anywhere today and never drives lowering.  Defaulted so rows that
@@ -101,7 +108,10 @@ struct JeandleIntrinsicDescriptor {
 
 class JeandleIntrinsicRegistry : public AllStatic {
  private:
-  static const JeandleIntrinsicDescriptor* _lookup[(int)vmIntrinsics::ID_LIMIT];
+  // By value, not a pointer into the descriptor table: a multi-candidate intrinsic
+  // is the OR-merge of its per-kind table rows (see initialize()), which has no
+  // single row to point at.  A slot with lowering_kinds == LK_NONE is "absent".
+  static JeandleIntrinsicDescriptor _lookup[(int)vmIntrinsics::ID_LIMIT];
 #ifdef ASSERT
   static bool _initialized;
 #endif

@@ -32,9 +32,10 @@ bool JeandleIntrinsicLowering::lower_spin_wait_hint(
   // The hint encoding is defined in the ARMv8 architecture reference manual;
   // value 1 corresponds to YIELD, which signals the hardware that this thread
   // is in a spin-wait loop.
-  llvm::CallInst* call = builder.CreateIntrinsic(
+  // An llvm.* intrinsic is never rewritten to a statepoint, so no gc-leaf annotation
+  // is needed.
+  builder.CreateIntrinsic(
       llvm::Intrinsic::aarch64_hint, {}, {builder.getInt32(1)});
-  annotate_generated_instruction(*call, desc);
   // void return: nothing to push on the JVM operand stack
   return true;
 }

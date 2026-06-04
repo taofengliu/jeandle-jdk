@@ -20,7 +20,6 @@
 #include "jeandle/jeandleIntrinsicIRSemantics.hpp"
 
 #include "jeandle/jeandleAbstractInterpreter.hpp"
-#include "jeandle/jeandleIntrinsicEntrypoints.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "memory/allocation.hpp"
@@ -34,18 +33,18 @@
 // memory attribute upstream, so this only adds value for *external* runtime stubs
 // whose body LLVM cannot see, enabling LICM / GVN / DCE on hot pure libm calls
 // and read-only array scans.
-void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const JeandleIntrinsicCallInfo& ci) {
-  if (ci.needs_gc_state() || ci.may_deopt() || ci.needs_exception_edge()) {
+void JeandleIntrinsicIRSemantics::apply_memory_attr(llvm::CallBase* call, const JeandleCallSiteContract& contract) {
+  if (contract.needs_gc_state() || contract.may_deopt() || contract.needs_exception_edge()) {
     return;
   }
-  if (ci.only_orders_memory()) {
-    // Ordering-only intrinsics are fences (PureLLVM, no call_info) and never
-    // reach here; guard anyway in case a future descriptor pairs MEM_ORDERING_ONLY
-    // with a call-shaped lowering.
+  if (contract.only_orders_memory()) {
+    // Ordering-only intrinsics are fences (PureLLVM, no call site) and never reach
+    // here; guard anyway in case a future contract pairs MEM_ORDERING_ONLY with a
+    // call-shaped lowering.
     return;
   }
-  const bool reads = ci.reads_memory();
-  const bool writes = ci.writes_memory();
+  const bool reads = contract.reads_memory();
+  const bool writes = contract.writes_memory();
   if (!reads && !writes) {
     call->setDoesNotAccessMemory();   // memory(none)
   } else if (reads && !writes) {
@@ -67,9 +66,31 @@ JeandleIntrinsicIRSemantics::build_operand_bundles(JeandleAbstractInterpreter* i
   return bundles;
 }
 
-void JeandleIntrinsicIRSemantics::annotate_instruction(llvm::Instruction& inst,
-                                                       const JeandleIntrinsicDescriptor& desc,
-                                                       const JeandleIntrinsicEntrypoint* entry) {
+// Stamp the gc-leaf-function attribute on a call — the single source of the attribute
+// string, shared by annotate_call and emit_gc_leaf_inline_asm.  File-local: nothing
+// outside this translation unit needs it.
+static void mark_gc_leaf(llvm::CallBase* call) {
+  llvm::LLVMContext& ctx = call->getContext();
+  call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
+}
+
+llvm::CallInst* JeandleIntrinsicIRSemantics::emit_gc_leaf_inline_asm(
+    llvm::IRBuilder<>& builder,
+    llvm::FunctionType* fn_ty,
+    llvm::StringRef asm_string,
+    llvm::StringRef constraints,
+    llvm::ArrayRef<llvm::Value*> args) {
+  llvm::InlineAsm* ia = llvm::InlineAsm::get(fn_ty, asm_string, constraints,
+                                             /*hasSideEffects=*/true);
+  llvm::CallInst* call = builder.CreateCall(ia, args);
+  mark_gc_leaf(call);
+  return call;
+}
+
+void JeandleIntrinsicIRSemantics::annotate_call(llvm::CallBase* call,
+                                                const JeandleIntrinsicDescriptor& desc,
+                                                const JeandleCallSiteContract& contract,
+                                                const JeandleIntrinsicEntrypoint* entry) {
   // TODO(barrier-hook): desc.barrier_kind carries the GC barrier semantic that a
   // future late GC-barrier LLVM pass needs (analogous to the array GC barrier
   // late insertion).  How that semantic is threaded to LLVM is NOT decided yet
@@ -80,20 +101,12 @@ void JeandleIntrinsicIRSemantics::annotate_instruction(llvm::Instruction& inst,
   //
   // The observability-only metadata (jeandle.intrinsic.id / jeandle.lowering.mode
   // / jeandle.runtime.entry) was dropped in the call-shape refactor; it had no
-  // consumer.  Only the functional gc-leaf-function attribute remains below.
-  auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
-  if (call == nullptr) {
-    return;
-  }
-  // gc-leaf-function asserts the call does not enter a safepoint.  Call/Hybrid
-  // intrinsics derive it from their call_info (plus the runtime entry's own leaf
-  // flag); PureLLVM intrinsics only ever emit leaf calls (llvm.abs/ctpop,
-  // blackhole inline asm, llvm.assume), so they are always gc-leaf.
-  const bool gc_leaf = desc.has_call_info()
-      ? (desc.call_info->attach_gc_leaf() || (entry != nullptr && entry->is_gc_leaf))
-      : true;
-  if (gc_leaf) {
-    llvm::LLVMContext& ctx = inst.getContext();
-    call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
+  // consumer.  Only the functional gc-leaf-function attribute remains.
+  //
+  // gc-leaf-function asserts the call does not enter a safepoint: stamp it when the
+  // contract's flags say so (no GC state, deopt, or unwind), or the runtime entry is
+  // itself a known leaf routine.
+  if (contract.gc_leaf_by_flags() || (entry != nullptr && entry->is_gc_leaf)) {
+    mark_gc_leaf(call);
   }
 }

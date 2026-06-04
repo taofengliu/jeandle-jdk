@@ -21,6 +21,7 @@
 #define SHARE_JEANDLE_INTRINSIC_CALL_INFO_HPP
 
 #include "jeandle/__llvmHeadersBegin__.hpp"
+#include "llvm/IR/CallingConv.h"    // llvm::CallingConv::ID
 #include "llvm/IR/DerivedTypes.h"   // llvm::FunctionCallee
 #include "llvm/IR/Intrinsics.h"     // llvm::Intrinsic::ID
 #include "llvm/IR/Module.h"
@@ -48,8 +49,8 @@
 // Meanwhile the actual G1 barrier still lives inside the relevant JavaOp bodies.
 // =============================================================================
 
-// Control-flow facts.  Combined into JeandleIntrinsicCallInfo::control_flags with bitwise
-// OR.  Unscoped so call-info rows can write `CTRL_MAY_DEOPT | CTRL_...`.
+// Control-flow facts.  Combined into JeandleCallSiteContract::control_flags with bitwise
+// OR.  Unscoped so contract rows can write `CTRL_MAY_DEOPT | CTRL_...`.
 enum JeandleControlFlag : uint8_t {
   CTRL_NONE                 = 0,
   // The lowering can transfer control to uncommon_trap / deopt.
@@ -59,7 +60,7 @@ enum JeandleControlFlag : uint8_t {
   CTRL_NEEDS_EXCEPTION_EDGE = 1u << 1,
 };
 
-// Memory-effect facts.  Combined into JeandleIntrinsicCallInfo::memory_flags with bitwise
+// Memory-effect facts.  Combined into JeandleCallSiteContract::memory_flags with bitwise
 // OR and translated into LLVM call-site memory attributes where safe.
 enum JeandleMemoryFlag : uint16_t {
   MEM_NONE              = 0,
@@ -76,21 +77,9 @@ enum JeandleMemoryFlag : uint16_t {
   // lowering-time decision emitted via a shared helper, not a memory-flag bit.
 };
 
-// What lowering paths a call-based descriptor *declares* it can take.  Combined
-// into JeandleIntrinsicCallInfo::support_flags with bitwise OR.  Per-VM availability of
-// those paths (stub installed, CPU feature present) is resolved at runtime by
-// JeandleIntrinsicSupport.
-enum JeandleSupportFlag : uint8_t {
-  SUPPORT_NONE          = 0,
-  // A HotSpot-generated stub or SharedRuntime fallback is an available impl.
-  SUPPORT_HOTSPOT_STUB  = 1u << 0,
-  // LLVM has a builtin or direct IR representation for this intrinsic.
-  SUPPORT_LLVM_INTRIN   = 1u << 1,
-};
-
 // Which kind of callee a Call / Hybrid intrinsic targets.  (A single llvm.*
-// builtin is NOT a callee kind here — such intrinsics are PureLLVM, lowered via
-// kPureMathTable, and carry no JeandleIntrinsicCallInfo.)
+// builtin is NOT a callee kind here — such intrinsics are PureLLVM, lowered via the
+// LLVM op table (kLlvmOpTable), and carry no JeandleIntrinsicCallInfo.)
 enum class JeandleIntrinsicCalleeKind : uint8_t {
   // No generic callee — a Hybrid body resolves and emits the call itself
   // (e.g. StringCoding.countPositives via resolve_count_positives).
@@ -98,8 +87,8 @@ enum class JeandleIntrinsicCalleeKind : uint8_t {
   // A Jeandle JavaOp function in the module, named by java_op_name.
   JavaOp,
   // A HotSpot runtime stub / SharedRuntime routine, materialized via the
-  // *_callee_fn resolvers; falls back to the llvm_intrin_id builtin when the
-  // runtime path is unavailable or not preferred.
+  // *_callee_fn resolvers.  (A libm intrinsic's llvm.* builtin is a separate
+  // LK_LLVM candidate, not a fallback inside this kind.)
   RuntimeStub,
 };
 
@@ -109,16 +98,63 @@ enum class JeandleIntrinsicCalleeKind : uint8_t {
 // Hybrid bodies resolve a callee generically — never switching on intrinsic id.
 using JeandleRuntimeCalleeFn = llvm::FunctionCallee (*)(llvm::Module&);
 
-struct JeandleIntrinsicCallInfo {
-  // ---- call-site semantics (moved out of the base descriptor) ----
+// A resolved (materialized) runtime callee plus the IR-level facts a lowering needs
+// to emit a call to it.  resolve_runtime_callee (and the inline resolver in a SIMD
+// lower_* body) fills it; emit_callsite consumes it; annotate_call reads
+// is_gc_leaf.  Shared by the lowering and IR-semantics layers.
+struct JeandleIntrinsicEntrypoint {
+  llvm::FunctionCallee  callee;
+  llvm::CallingConv::ID calling_conv;
+  bool                  is_gc_leaf;
+};
+
+// The call-site contract: the control + memory facts that decide HOW a single call
+// site is emitted — the deopt operand bundle, the exception edge, the LLVM memory
+// attribute, and the flag-based part of the gc-leaf decision.  It is shared by two
+// producers: data-driven Call lowering holds it inside a static JeandleIntrinsicCallInfo,
+// while a Hybrid body builds it on the fly at lowering time (a Hybrid may emit
+// several call sites, each with its own contract, so one static contract cannot
+// describe it).  emit_callsite consumes exactly this — never the whole descriptor.
+struct JeandleCallSiteContract {
   uint8_t  control_flags;   // bitmask of JeandleControlFlag
   uint16_t memory_flags;    // bitmask of JeandleMemoryFlag
-  uint8_t  support_flags;   // bitmask of JeandleSupportFlag
+
+  bool may_deopt()            const { return (control_flags & CTRL_MAY_DEOPT) != 0; }
+  bool needs_exception_edge() const { return (control_flags & CTRL_NEEDS_EXCEPTION_EDGE) != 0; }
+  bool reads_memory()         const { return (memory_flags  & MEM_READ) != 0; }
+  bool writes_memory()        const { return (memory_flags  & MEM_WRITE) != 0; }
+  bool only_orders_memory()   const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
+  bool needs_gc_state()       const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
+
+  // A deopt bundle is required when the call can deopt, can safepoint (every
+  // safepoint is a potential deopt point that must carry interpreter state), or
+  // needs an exception edge that crosses Java EH.
+  bool attach_deopt_bundle() const {
+    return may_deopt() || needs_gc_state() || needs_exception_edge();
+  }
+  // The flag-based part of the gc-leaf decision: the call neither observes GC
+  // state, deopts, nor unwinds, so it cannot reach a safepoint.  A managed/JavaOp
+  // callee must declare MEM_NEEDS_GC_STATE (all current ones do), so it is
+  // correctly excluded here without a callee_kind check; a runtime entry
+  // independently known to be a leaf routine can force gc-leaf even when these
+  // flags alone would not (see JeandleIntrinsicIRSemantics::annotate_call).
+  bool gc_leaf_by_flags() const {
+    return !needs_gc_state() && !may_deopt() && !needs_exception_edge();
+  }
+};
+
+struct JeandleIntrinsicCallInfo {
+  // ---- call-site contract (control + memory facts) ----
+  JeandleCallSiteContract contract;
 
   // ---- callee identity (discriminated by callee_kind) ----
+  // A RuntimeStub's runtime path exists when a resolver is non-null.  (Whether a
+  // path is *available* in this VM — stub installed, CPU feature present — is
+  // resolved at runtime by JeandleIntrinsicSupport::runtime_availability, keyed on the id.  A libm
+  // intrinsic's llvm.* builtin is a separate LK_LLVM candidate, not a fallback
+  // stored here.)
   JeandleIntrinsicCalleeKind      callee_kind;
   const char*            java_op_name;     // JavaOp
-  llvm::Intrinsic::ID    llvm_intrin_id;   // RuntimeStub builtin fallback (not_intrinsic if none)
   JeandleRuntimeCalleeFn stub_callee_fn;   // RuntimeStub: StubRoutines_* (nullptr if none)
   JeandleRuntimeCalleeFn shared_callee_fn; // RuntimeStub: SharedRuntime_*
 
@@ -130,30 +166,13 @@ struct JeandleIntrinsicCallInfo {
   // to encode per-intrinsic.  This makes the Call tables shape-agnostic: a
   // multi-arg runtime stub (crc32, AES, ...) needs no new columns.
 
-  // ---- named accessors ----
-  bool may_deopt()             const { return (control_flags & CTRL_MAY_DEOPT) != 0; }
-  bool needs_exception_edge()  const { return (control_flags & CTRL_NEEDS_EXCEPTION_EDGE) != 0; }
-  bool reads_memory()          const { return (memory_flags  & MEM_READ) != 0; }
-  bool writes_memory()         const { return (memory_flags  & MEM_WRITE) != 0; }
-  bool only_orders_memory()    const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
-  bool needs_gc_state()        const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
-  bool supports_hotspot_stub() const { return (support_flags & SUPPORT_HOTSPOT_STUB) != 0; }
-  bool supports_llvm_intrin()  const { return (support_flags & SUPPORT_LLVM_INTRIN) != 0; }
-
-  // ---- derived call-site contracts (folded from the old Policy::make_plan) ----
-  // A deopt bundle is required when the call can deopt, can safepoint (every
-  // safepoint is a potential deopt point that must carry interpreter state), or
-  // needs an exception edge that crosses Java EH.
-  bool attach_deopt_bundle() const {
-    return may_deopt() || needs_gc_state() || needs_exception_edge();
-  }
-  // gc-leaf-function asserts the call site does not enter a safepoint;
-  // RewriteStatepointsForGC reads it to skip statepoint rewriting.  JavaOps never
-  // qualify (they may run arbitrary managed code).
-  bool attach_gc_leaf() const {
-    return !needs_gc_state() && !may_deopt() && !needs_exception_edge() &&
-           callee_kind != JeandleIntrinsicCalleeKind::JavaOp;
-  }
+  // ---- named accessors: flag predicates delegate to the contract ----
+  bool may_deopt()             const { return contract.may_deopt(); }
+  bool needs_exception_edge()  const { return contract.needs_exception_edge(); }
+  bool reads_memory()          const { return contract.reads_memory(); }
+  bool writes_memory()         const { return contract.writes_memory(); }
+  bool only_orders_memory()    const { return contract.only_orders_memory(); }
+  bool needs_gc_state()        const { return contract.needs_gc_state(); }
 };
 
 #endif // SHARE_JEANDLE_INTRINSIC_CALL_INFO_HPP

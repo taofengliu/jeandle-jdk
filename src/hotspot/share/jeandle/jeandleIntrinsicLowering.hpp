@@ -25,7 +25,6 @@
 #include "llvm/IR/Instructions.h"
 
 #include "jeandle/jeandleIntrinsicCallInfo.hpp"
-#include "jeandle/jeandleIntrinsicEntrypoints.hpp"
 #include "memory/allocation.hpp"
 
 class JeandleAbstractInterpreter;
@@ -35,28 +34,33 @@ class JeandleIntrinsicLowering : public StackObj {
   JeandleAbstractInterpreter* _interp;
   const ciMethod* _target;
 
-  // JeandleLoweringKind::Call — generic data-driven lowering: pop the args named
-  // by call_info->arg_types, call the callee, push the result.  No per-intrinsic
-  // code; everything is read off call_info.
+  // LK_CALL — generic data-driven lowering: pop the args (shape derived from the
+  // target method signature), call the callee, push the result.  No per-intrinsic
+  // code; the callee + call-site facts are read off call_info.
   bool emit_simple_call_intrinsic(const JeandleIntrinsicDescriptor& desc);
-  // Resolve a RuntimeStub callee from call_info (property-driven, never a
-  // switch on intrinsic id).  On a runtime stub / SharedRuntime hit, fills
-  // `entry` (callee + calling conv + well-known name) and sets has_entry=true;
-  // when the runtime path is unavailable but a builtin fallback exists, returns
-  // true with has_entry=false (the caller builds the llvm builtin from
-  // call_info->llvm_intrin_id).  Returns false when no lowering path is available.
-  bool resolve_runtime_callee(const JeandleIntrinsicDescriptor& desc,
-                              JeandleIntrinsicEntrypoint& entry,
-                              bool& has_entry);
+  // Resolve a runtime-stub callee from the given resolvers (never a switch on the
+  // intrinsic id).  Returns true iff HotSpot intrinsics are preferred and an
+  // installed stub / SharedRuntime is found, filling `entry`; false otherwise (the
+  // caller then falls back as it chooses — NormalInvoke, or its own builtin).  Takes
+  // the callee identity explicitly so a Hybrid body can call it without a call_info.
+  bool resolve_runtime_callee(vmIntrinsics::ID id,
+                              JeandleRuntimeCalleeFn stub_fn,
+                              JeandleRuntimeCalleeFn shared_fn,
+                              JeandleIntrinsicEntrypoint& entry);
 
-  // PureLLVM leaf handlers (call_info == nullptr; bare IR / inline asm / traps).
-  bool lower_pure_math(const JeandleIntrinsicDescriptor& desc);
-  bool lower_type_coercion(const JeandleIntrinsicDescriptor& desc);
-  bool lower_barrier_semantic(const JeandleIntrinsicDescriptor& desc);
+  // LK_LLVM lowering (call_info == nullptr; bare IR / inline asm / traps): a single
+  // skeleton dispatching on the LLVM op (see kLlvmOpTable in the .cpp), plus one
+  // emit helper per data-driven op.  Operand/result types come from the signature.
+  bool lower_llvm(const JeandleIntrinsicDescriptor& desc);
+  bool emit_llvm_builtin(const JeandleIntrinsicDescriptor& desc,
+                           llvm::Intrinsic::ID llvm_id);
+  bool emit_llvm_bitcast(const JeandleIntrinsicDescriptor& desc);
+  bool emit_llvm_fence(const JeandleIntrinsicDescriptor& desc);
+  bool emit_llvm_sink(const JeandleIntrinsicDescriptor& desc);
+  // LO_CUSTOM hand-written bodies: a guard+trap (Preconditions) and the
+  // platform-specific spin-wait hint (implemented in
+  // cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp).
   bool lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc);
-  bool lower_blackhole(const JeandleIntrinsicDescriptor& desc);
-  // Platform-specific spin-wait hint emission.
-  // Implemented in cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp.
   bool lower_spin_wait_hint(const JeandleIntrinsicDescriptor& desc);
 
   // Hybrid handlers (call_info != nullptr; a call site wrapped in guards / fast
@@ -66,25 +70,20 @@ class JeandleIntrinsicLowering : public StackObj {
 
   // Shared call-site skeleton for runtime stubs and JavaOps: builds the deopt
   // bundle, emits a call or an invoke (call path marked nounwind) based on
-  // call_info->needs_exception_edge(), then runs the common IR annotations.
-  // entry is optional runtime-stub metadata (nullptr for JavaOps).  Requires
-  // desc.call_info != nullptr.
+  // contract.needs_exception_edge(), then runs the common IR annotations.  The
+  // call-site contract is the only call_info-derived input — a Hybrid body passes
+  // one built on the fly.  entry is optional runtime-stub metadata (nullptr for
+  // JavaOps).
   llvm::CallBase* emit_callsite(const JeandleIntrinsicDescriptor& desc,
                                 llvm::FunctionCallee callee,
                                 llvm::CallingConv::ID calling_conv,
                                 llvm::ArrayRef<llvm::Value*> args,
+                                const JeandleCallSiteContract& contract,
                                 const JeandleIntrinsicEntrypoint* entry = nullptr);
-  // Runtime-stub call site. Thin facade over emit_callsite.
-  llvm::CallBase* emit_runtime_call(const JeandleIntrinsicDescriptor& desc,
-                                    const JeandleIntrinsicEntrypoint& entry,
-                                    llvm::ArrayRef<llvm::Value*> args);
   // JavaOp call site. Thin facade over emit_callsite resolving the JavaOp symbol
   // from call_info->java_op_name.
   llvm::CallBase* emit_java_op_call(const JeandleIntrinsicDescriptor& desc,
                                     llvm::ArrayRef<llvm::Value*> args);
-  void annotate_generated_instruction(llvm::Instruction& inst,
-                                      const JeandleIntrinsicDescriptor& desc,
-                                      const JeandleIntrinsicEntrypoint* entry = nullptr) const;
   void attach_callee_return_klass_attr(llvm::CallBase* call) const;
 
  public:
