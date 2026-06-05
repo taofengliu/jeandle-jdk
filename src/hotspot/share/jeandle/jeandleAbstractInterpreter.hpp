@@ -36,6 +36,7 @@
 #include "ci/ciMethodBlocks.hpp"
 #include "ci/ciTypeFlow.hpp"
 #include "ci/compilerInterface.hpp"
+#include "classfile/vmIntrinsics.hpp"
 #include "memory/allocation.hpp"
 #include "memory/universe.hpp"
 #include "utilities/bitMap.inline.hpp"
@@ -302,6 +303,11 @@ class JeandleAbstractInterpreter : public StackObj {
   JeandleCompiledCode& _compiled_code;
   BasicBlockBuilder* _block_builder;
   llvm::IRBuilder<> _ir_builder;
+
+  // The intrinsic currently being lowered, or _none outside intrinsic lowering.
+  // Debug only: lets uncommon_trap verify that every deopt reason an intrinsic emits
+  // is declared in that intrinsic's trap-throttle mask (see kTrapThrottleTable).
+  DEBUG_ONLY(vmIntrinsics::ID _lowering_intrinsic_id = vmIntrinsics::_none;)
 
   // Record oop values.
   llvm::DenseMap<jobject, llvm::Value*> _oops;

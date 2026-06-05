@@ -202,7 +202,11 @@ static constexpr JeandleTrapThrottleEntry kTrapThrottleTable[] = {
     trap_reason_mask(Deoptimization::Reason_intrinsic) |
         trap_reason_mask(Deoptimization::Reason_range_check) },
   { vmIntrinsics::_countPositives,
-    trap_reason_mask(Deoptimization::Reason_intrinsic) },
+    // Reason_intrinsic: the off/len precondition guards in string_range_check.
+    // Reason_null_check: the array null check, which deopts via builtin_throw's cold
+    // path (uncommon_trap).
+    trap_reason_mask(Deoptimization::Reason_intrinsic) |
+        trap_reason_mask(Deoptimization::Reason_null_check) },
 };
 
 constexpr JeandleIntrinsicDescriptor JeandleIntrinsicRegistryTable::_intrinsic_table[];

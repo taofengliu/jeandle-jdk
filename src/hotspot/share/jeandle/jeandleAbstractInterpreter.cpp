@@ -1389,6 +1389,21 @@ void JeandleAbstractInterpreter::interpret_block(JeandleBasicBlock* block) {
 }
 
 void JeandleAbstractInterpreter::uncommon_trap(Deoptimization::DeoptReason reason, Deoptimization::DeoptAction action, llvm::BasicBlock* insert_block) {
+#ifdef ASSERT
+  // Structural guard against trap-throttle drift: any deopt reason an intrinsic emits
+  // must be in its trap-throttle mask, or try_lower_intrinsic's pre-check would not
+  // throttle it.  (Exceptions go through builtin_throw, not here, so null/range/div0
+  // are correctly out of scope.)
+  if (_lowering_intrinsic_id != vmIntrinsics::_none) {
+    const JeandleTrapReasonMask mask =
+        JeandleIntrinsicRegistry::trap_throttle_mask(_lowering_intrinsic_id);
+    assert((mask & (JeandleTrapReasonMask(1) << static_cast<uint>(reason))) != 0,
+           "intrinsic %s emits deopt reason %d not in its trap-throttle mask; "
+           "add it to kTrapThrottleTable",
+           vmIntrinsics::name_at(_lowering_intrinsic_id), static_cast<int>(reason));
+  }
+#endif
+
   auto saved_insert_block = _ir_builder.GetInsertBlock();
   auto saved_insert_point = _ir_builder.GetInsertPoint();
 
@@ -1966,7 +1981,14 @@ bool JeandleAbstractInterpreter::try_lower_intrinsic(const ciMethod* target) {
   // lower() runs before the operand stack is touched, so a decline is side-effect
   // free.
   JeandleIntrinsicLowering lowering(this);
-  return lowering.lower(*desc, target);
+  // Publish the intrinsic being lowered so uncommon_trap can verify (debug) that every
+  // deopt reason it emits is declared in the trap-throttle mask.  Save/restore rather
+  // than clear, so the invariant still holds if intrinsic lowering ever nests.
+  DEBUG_ONLY(const vmIntrinsics::ID prev_id = _lowering_intrinsic_id);
+  DEBUG_ONLY(_lowering_intrinsic_id = desc->id);
+  bool lowered = lowering.lower(*desc, target);
+  DEBUG_ONLY(_lowering_intrinsic_id = prev_id);
+  return lowered;
 }
 
 // Generate IR for calling into llvm FunctionCallee, without exception handling.
