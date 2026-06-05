@@ -78,7 +78,7 @@ public class TestPowDouble {
         }
         checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
 
-        // intrinsic by SharedRuntime
+        // Disable the generated libm stub and verify the SharedRuntime dpow fallback.
         if (is_x86) {
             dump_path = System.getProperty("java.io.tmpdir")+"/test2";
             Path tmp2 = Path.of(dump_path);

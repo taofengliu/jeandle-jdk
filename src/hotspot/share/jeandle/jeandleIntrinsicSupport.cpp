@@ -42,8 +42,9 @@
     break;
 
 // CPU-feature guards: some LLVM builtins require specific ISA extensions to
-// produce a native instruction.  When the required feature is absent we
-// return false so policy falls back to NormalInvoke.
+// produce a native instruction.  When the required feature is absent, the
+// LK_LLVM candidate declines before touching the stack; traversal may then try
+// the next candidate, or fall back to NormalInvoke if none applies.
 //
 // _floor / _ceil / _rint:
 //   x86-64  — needs SSE4.1 (ROUNDSD).  Without it LLVM would synthesise a slow

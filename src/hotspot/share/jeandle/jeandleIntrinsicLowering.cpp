@@ -250,8 +250,8 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
     case JeandleIntrinsicCalleeKind::RuntimeStub:
       // The Call candidate is the runtime stub / SharedRuntime only (the llvm
       // builtin, when one exists, is a separate LK_LLVM candidate).  This branch
-      // runs only when the stub candidate was selected (the LK_LLVM candidate
-      // declined), so the stub must resolve.
+      // runs only when the runtime Call candidate is selected: resolve the
+      // installed stub first, then SharedRuntime, or decline this candidate.
       if (!resolve_runtime_callee(desc.id, ci->stub_callee_fn, ci->shared_callee_fn, entry)) {
         return false;
       }
@@ -315,11 +315,13 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
 //                does not fit an existing LO_* skeleton; the shared table carries
 //                handler_suffix for lower_<handler_suffix>(desc).
 //
-// Every LO_* emits bare IR or an llvm.* builtin — no JeandleIntrinsicCallInfo, no deopt
-// bundle, and no gc-leaf annotation: RS4GC never rewrites intrinsics or bare IR to a
-// statepoint.  The lone exception is the LO_SINK inline asm, which RS4GC *would* try to
-// statepoint, so it is stamped gc-leaf via IRSemantics::emit_gc_leaf_inline_asm.  This is
-// exactly why these belong here and not on the opaque-call path.
+// LK_LLVM rows carry no static CallInfo and no semantic call-site contract.  Inline
+// ops emit bare IR or llvm.* and need no deopt bundle / gc-leaf annotation because
+// RS4GC never rewrites them to a statepoint.  Custom handlers may emit guards or
+// traps; trap deopt bundles are owned by the uncommon_trap helper.  The lone inline
+// op exception is LO_SINK inline asm, which RS4GC *would* try to statepoint, so it
+// is stamped gc-leaf via IRSemantics::emit_gc_leaf_inline_asm.  This is exactly why
+// these belong here and not on the opaque-call path.
 // =============================================================================
 enum LlvmOp : uint8_t { LO_BUILTIN, LO_BITCAST, LO_FENCE, LO_SINK, LO_CUSTOM_HANDLER };
 
