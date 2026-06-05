@@ -71,15 +71,14 @@ public class TestPowDouble {
         if (is_x86) {
             checker.checkNext("call double @StubRoutines_dpow");
             checker.check("ret double");
-            // check gc-leaf-function
             checker.checkPattern("declare double @StubRoutines_dpow.*#\\d+");
-            checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
         } else {
-            checker.checkNext("call double @llvm.pow.f64");
+            checker.checkNextPattern("call double inttoptr \\(i64 (\\d+) to ptr\\).*#\\d+");
             checker.check("ret double");
         }
+        checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
 
-        // With the x86 libm stub disabled, Hybrid falls back to llvm.pow.
+        // intrinsic by SharedRuntime
         if (is_x86) {
             dump_path = System.getProperty("java.io.tmpdir")+"/test2";
             Path tmp2 = Path.of(dump_path);
@@ -117,8 +116,9 @@ public class TestPowDouble {
             checker.checkNext("entry:");
             checker.check("br label %bci_0");
             checker.checkNext("bci_0:");
-            checker.checkNext("call double @llvm.pow.f64");
+            checker.checkNextPattern("call double inttoptr \\(i64 (\\d+) to ptr\\).*#\\d+");
             checker.check("ret double");
+            checker.checkPattern("attributes #\\d+ = \\{ \"gc-leaf-function\" \\}");
         }
     }
 

@@ -591,9 +591,11 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(const JeandleIntr
 // generates both the descriptor and this dispatch.
 // =============================================================================
 
-// Math.pow(base, exp): IR fast paths for common constant exponents, then the
-// platform pow stub when one is installed, then llvm.pow.  SharedRuntime is kept
-// as a last-resort fallback rather than taking priority over LLVM's pow intrinsic.
+// Math.pow(base, exp): IR fast paths for common constant exponents, otherwise the
+// HotSpot pow routine — the generated platform stub when one is installed, else the
+// SharedRuntime dpow (always present).  Math.pow must NOT fall back to llvm.pow:
+// llvm.pow follows C/IEEE semantics (e.g. pow(1.0, NaN) == 1.0) which differ from
+// Java Math.pow (pow(1.0, NaN) == NaN), so only the HotSpot/Java pow is spec-correct.
 bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor& desc) {
   // pow is a pure leaf call: no deopt, no GC state, no exception edge.
   const JeandleCallSiteContract pow_contract = { CTRL_NONE, MEM_NONE };
@@ -611,35 +613,20 @@ bool JeandleIntrinsicLowering::lower_pow_hybrid(const JeandleIntrinsicDescriptor
     return true;
   }
 
-  // Resolve only the generated HotSpot stub here.  SharedRuntime is intentionally
-  // not used before llvm.pow; on platforms without a generated stub, keeping the
-  // slow path as an LLVM intrinsic gives LLVM a chance to lower it directly.
-  JeandleIntrinsicEntrypoint stub_entry;
-  const bool has_stub = resolve_runtime_callee(desc.id,
+  // Resolve the Java-semantics pow routine once: the generated platform stub when
+  // installed, otherwise the SharedRuntime dpow.  Passing both resolvers lets
+  // resolve_runtime_callee pick stub-then-SharedRuntime; SharedRuntime::dpow always
+  // exists, so resolution cannot fail.
+  JeandleIntrinsicEntrypoint entry;
+  const bool resolved = resolve_runtime_callee(desc.id,
                               &JeandleRuntimeRoutine::StubRoutines_dpow_callee,
-                              nullptr, stub_entry);
+                              &JeandleRuntimeRoutine::SharedRuntime_dpow_callee, entry);
+  guarantee(resolved, "Math.pow needs a HotSpot dpow stub or SharedRuntime routine");
 
-  // Emit a full pow(base, exp) call: generated stub, llvm.pow, then SharedRuntime.
+  // Emit a full pow(base, exp) call to the resolved HotSpot pow routine.
   auto emit_slow = [&]() -> llvm::Value* {
-    if (has_stub) {
-      return emit_callsite(desc, stub_entry.callee, stub_entry.calling_conv,
-                           {base, exp}, pow_contract, &stub_entry);
-    }
-    llvm::Function* pow_fn = llvm::Intrinsic::getOrInsertDeclaration(
-        &_interp->_module, llvm::Intrinsic::pow, {ret_ty});
-    if (pow_fn != nullptr) {
-      return builder.CreateCall(pow_fn, {base, exp});
-    }
-
-    JeandleIntrinsicEntrypoint shared_entry;
-    if (resolve_runtime_callee(desc.id, nullptr,
-                               &JeandleRuntimeRoutine::SharedRuntime_dpow_callee,
-                               shared_entry)) {
-      return emit_callsite(desc, shared_entry.callee, shared_entry.calling_conv,
-                           {base, exp}, pow_contract, &shared_entry);
-    }
-    ShouldNotReachHere();
-    return llvm::UndefValue::get(ret_ty);
+    return emit_callsite(desc, entry.callee, entry.calling_conv,
+                         {base, exp}, pow_contract, &entry);
   };
 
   // Constant fast path: pow(x, 0.5) => x > 0.0 ? llvm.sqrt(x) : pow(x, 0.5).
