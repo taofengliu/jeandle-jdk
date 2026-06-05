@@ -32,7 +32,7 @@
 // Developer guide:
 //   - runtime stub call                -> JEANDLE_CALL_RUNTIME_STUB_TABLE
 //   - JavaOp call                      -> JEANDLE_CALL_JAVAOP_TABLE
-//   - no-call existing LLVM skeleton   -> JEANDLE_LLVM_INLINE_OP_TABLE
+//   - no-call single llvm.* builtin    -> JEANDLE_LLVM_BUILTIN_TABLE
 //   - no-call custom LLVM handler      -> JEANDLE_LLVM_CUSTOM_HANDLER_TABLE
 //   - Hybrid lowering that may emit calls -> JEANDLE_HYBRID_HANDLER_TABLE
 //
@@ -54,7 +54,7 @@
 //   V(vm_name)
 //
 // The dsin..dexp libm family is dual-candidate: this table supplies the LK_CALL
-// runtime candidate; JEANDLE_LLVM_INLINE_OP_TABLE supplies the LK_LLVM builtin
+// runtime candidate; JEANDLE_LLVM_BUILTIN_TABLE supplies the LK_LLVM builtin
 // candidate.
 #define JEANDLE_CALL_RUNTIME_STUB_TABLE(V) \
   V(dsin)   \
@@ -81,50 +81,45 @@
   V(newArray, "jeandle.new_array", \
     CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE, None)
 
-// LK_LLVM inline op: an existing no-call lowering skeleton in lower_llvm
-// (builtin, bitcast, fence, sink).  It emits no semantic call site and carries
-// no static JeandleIntrinsicCallInfo.  The op column is consumed only by
-// lowering.cpp; registry uses the same rows to create LK_LLVM descriptor rows.
-//   V(vm_name, op, llvm_intrinsic_name)
-// llvm_intrinsic_name matters only for LO_BUILTIN; use not_intrinsic for
-// LO_BITCAST / LO_FENCE / LO_SINK.
-//
-// Use this table when the intrinsic fits one of the closed LO_* skeletons.  Use
-// JEANDLE_LLVM_CUSTOM_HANDLER_TABLE below only when the LLVM IR must be written
-// by a dedicated lowering handler.
-#define JEANDLE_LLVM_INLINE_OP_TABLE(V) \
-  V(dabs,         LO_BUILTIN, fabs) \
-  V(fabs,         LO_BUILTIN, fabs) \
-  V(bitCount_i,   LO_BUILTIN, ctpop) \
-  V(dsqrt,        LO_BUILTIN, sqrt) \
-  V(dsqrt_strict, LO_BUILTIN, sqrt) \
-  V(floor,        LO_BUILTIN, floor) \
-  V(ceil,         LO_BUILTIN, ceil) \
-  V(rint,         LO_BUILTIN, rint) \
-  V(iabs,         LO_BUILTIN, abs) \
-  V(labs,         LO_BUILTIN, abs) \
-  V(bitCount_l,   LO_BUILTIN, ctpop) \
-  V(dsin,         LO_BUILTIN, sin) \
-  V(dcos,         LO_BUILTIN, cos) \
-  V(dtan,         LO_BUILTIN, tan) \
-  V(dlog,         LO_BUILTIN, log) \
-  V(dlog10,       LO_BUILTIN, log10) \
-  V(dexp,         LO_BUILTIN, exp) \
-  V(floatToRawIntBits,   LO_BITCAST, not_intrinsic) \
-  V(intBitsToFloat,      LO_BITCAST, not_intrinsic) \
-  V(doubleToRawLongBits, LO_BITCAST, not_intrinsic) \
-  V(longBitsToDouble,    LO_BITCAST, not_intrinsic) \
-  V(loadFence,  LO_FENCE, not_intrinsic) \
-  V(storeFence, LO_FENCE, not_intrinsic) \
-  V(fullFence,  LO_FENCE, not_intrinsic) \
-  V(blackhole,  LO_SINK,  not_intrinsic)
+// LK_LLVM builtin: lowered by emit_llvm_builtin to a single llvm.* intrinsic call,
+// with operand/result types taken from the signature.  No call site, no static
+// JeandleIntrinsicCallInfo.  This is the only data-driven LK_LLVM shape; everything
+// else is a custom handler below.
+//   V(vm_name, llvm_intrinsic_name)
+#define JEANDLE_LLVM_BUILTIN_TABLE(V) \
+  V(dabs,         fabs) \
+  V(fabs,         fabs) \
+  V(bitCount_i,   ctpop) \
+  V(dsqrt,        sqrt) \
+  V(dsqrt_strict, sqrt) \
+  V(floor,        floor) \
+  V(ceil,         ceil) \
+  V(rint,         rint) \
+  V(iabs,         abs) \
+  V(labs,         abs) \
+  V(bitCount_l,   ctpop) \
+  V(dsin,         sin) \
+  V(dcos,         cos) \
+  V(dtan,         tan) \
+  V(dlog,         log) \
+  V(dlog10,       log10) \
+  V(dexp,         exp)
 
-// LK_LLVM custom handler: still no semantic call site, no static call_info, and
-// no opaque-call contract.  The handler owns bespoke bare IR / inline asm /
-// guard / trap logic that does not fit an existing LO_* skeleton.  If it needs
-// emit_callsite(), use JEANDLE_HYBRID_HANDLER_TABLE instead.
+// LK_LLVM custom handler: no semantic call site, no static call_info.  The handler
+// owns bespoke no-call lowering (bitcast / fence / inline-asm sink / guard+trap /
+// platform asm) that is not a single llvm.* builtin.  lower_llvm dispatches on the
+// id to lower_<handler_suffix>(desc); if a handler needs emit_callsite(), use
+// JEANDLE_HYBRID_HANDLER_TABLE instead.
 //   V(vm_name, handler_suffix)
 #define JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(V) \
+  V(floatToRawIntBits,            llvm_bitcast) \
+  V(intBitsToFloat,               llvm_bitcast) \
+  V(doubleToRawLongBits,          llvm_bitcast) \
+  V(longBitsToDouble,             llvm_bitcast) \
+  V(loadFence,                    llvm_fence) \
+  V(storeFence,                   llvm_fence) \
+  V(fullFence,                    llvm_fence) \
+  V(blackhole,                    llvm_sink) \
   V(onSpinWait,                   spin_wait_hint) \
   V(Preconditions_checkIndex,     preconditions_check_index) \
   V(Preconditions_checkLongIndex, preconditions_check_index)

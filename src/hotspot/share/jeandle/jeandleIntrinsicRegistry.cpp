@@ -35,7 +35,7 @@
 //
 // The shared row sources live in jeandleIntrinsicTable.hpp.  Registry expands the
 // tables into descriptors and CallInfo objects; lowering expands the same LLVM /
-// Hybrid tables into kLlvmOpTable entries and custom-handler dispatch.  For
+// Hybrid tables into kLlvmBuiltinTable entries and custom-handler dispatch.  For
 // Hybrid / custom LK_LLVM rows, the handler suffix is token-pasted into
 // lower_<handler_suffix>, so a missing implementation fails at compile/link time
 // instead of silently leaving registry and dispatch out of sync.
@@ -162,11 +162,11 @@ class JeandleIntrinsicRegistryTable : public AllStatic {
     JEANDLE_CALL_JAVAOP_TABLE(JEANDLE_ROW_JAVAOP)
 #undef JEANDLE_ROW_JAVAOP
 
-    // ---- LK_LLVM: inline-op rows ----
-#define JEANDLE_ROW_LLVM_OP(VM_NAME, OP, LLVM_NAME) \
+    // ---- LK_LLVM: builtin rows ----
+#define JEANDLE_ROW_LLVM_BUILTIN(VM_NAME, LLVM_NAME) \
     { vmIntrinsics::_##VM_NAME, LK_LLVM, nullptr },
-    JEANDLE_LLVM_INLINE_OP_TABLE(JEANDLE_ROW_LLVM_OP)
-#undef JEANDLE_ROW_LLVM_OP
+    JEANDLE_LLVM_BUILTIN_TABLE(JEANDLE_ROW_LLVM_BUILTIN)
+#undef JEANDLE_ROW_LLVM_BUILTIN
 
     // ---- LK_LLVM: custom handler rows ----
 #define JEANDLE_ROW_LLVM_CUSTOM_HANDLER(VM_NAME, HANDLER_SUFFIX) \

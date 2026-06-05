@@ -79,8 +79,8 @@ enum JeandleMemoryFlag : uint16_t {
 };
 
 // Which kind of callee a data-driven LK_CALL intrinsic targets.  (A single llvm.*
-// builtin is NOT a callee kind here — such intrinsics are LK_LLVM inline ops,
-// lowered via kLlvmOpTable, and carry no JeandleIntrinsicCallInfo.)
+// builtin is NOT a callee kind here — such intrinsics are LK_LLVM builtins,
+// lowered via kLlvmBuiltinTable, and carry no JeandleIntrinsicCallInfo.)
 enum class JeandleIntrinsicCalleeKind : uint8_t {
   // No generic callee — a Hybrid handler resolves and emits the call itself
   // (e.g. lower_count_positives selects its adapter / scalar fallback inline).

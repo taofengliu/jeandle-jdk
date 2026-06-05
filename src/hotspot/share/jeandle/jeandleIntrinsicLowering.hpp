@@ -48,19 +48,18 @@ class JeandleIntrinsicLowering : public StackObj {
                               JeandleRuntimeCalleeFn shared_fn,
                               JeandleIntrinsicEntrypoint& entry);
 
-  // LK_LLVM lowering (call_info == nullptr; bare IR / inline asm / traps): a
-  // single skeleton dispatching on the LLVM op (see kLlvmOpTable in the .cpp),
-  // plus one emit helper per inline op.  Operand/result types come from the
-  // signature.
+  // LK_LLVM lowering (call_info == nullptr; no call site).  lower_llvm dispatches by
+  // id: a single llvm.* builtin (kLlvmBuiltinTable) via emit_llvm_builtin, otherwise a
+  // custom handler below.  Operand/result types come from the signature.
   bool lower_llvm(const JeandleIntrinsicDescriptor& desc);
   bool emit_llvm_builtin(const JeandleIntrinsicDescriptor& desc,
                            llvm::Intrinsic::ID llvm_id);
-  bool emit_llvm_bitcast(const JeandleIntrinsicDescriptor& desc);
-  bool emit_llvm_fence(const JeandleIntrinsicDescriptor& desc);
-  bool emit_llvm_sink(const JeandleIntrinsicDescriptor& desc);
-  // LK_LLVM custom handlers: a guard+trap (Preconditions) and the
-  // platform-specific spin-wait hint (implemented in
-  // cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp).
+  // LK_LLVM custom handlers (dispatched from JEANDLE_LLVM_CUSTOM_HANDLER_TABLE):
+  // bitcast / fence / inline-asm sink, a guard+trap (Preconditions), and the
+  // platform-specific spin-wait hint (in cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp).
+  bool lower_llvm_bitcast(const JeandleIntrinsicDescriptor& desc);
+  bool lower_llvm_fence(const JeandleIntrinsicDescriptor& desc);
+  bool lower_llvm_sink(const JeandleIntrinsicDescriptor& desc);
   bool lower_preconditions_check_index(const JeandleIntrinsicDescriptor& desc);
   bool lower_spin_wait_hint(const JeandleIntrinsicDescriptor& desc);
 

@@ -296,100 +296,69 @@ bool JeandleIntrinsicLowering::emit_simple_call_intrinsic(const JeandleIntrinsic
 }
 
 // =============================================================================
-// LK_LLVM — no-call IR, dispatched on an *op*: the LLVM IR operation that
-// produces the intrinsic's result.  The inline op set is closed (a handful of IR
-// builder calls), so it does NOT grow as intrinsics are added: a new LK_LLVM
-// intrinsic is one shared table row, no new code unless it needs a genuinely new
-// IR operation or a custom handler.  Operand/result types come from the target
-// method signature, so there are no per-row type columns.
+// LK_LLVM — no-call lowering.  Two shapes, distinguished by the id alone (no op tag):
 //
-//   LO_BUILTIN — CreateIntrinsic(llvm_id): a single-argument llvm.* builtin.
-//                CPU support is checked by id (floor/ceil/rint need SSE4.1 on x86).
-//                A few llvm intrinsics (abs/ctlz/cttz) take a trailing i1
-//                edge-case flag; that is derived from llvm_id and always passed
-//                false (Java wants the poison-free result, e.g. abs(MIN_VALUE)).
-//   LO_BITCAST — CreateBitCast between the (single) argument and the result type.
-//   LO_FENCE   — CreateFence with an ordering derived from the id.
-//   LO_SINK    — volatile inline-asm sink consuming every argument (blackhole).
-//   LO_CUSTOM_HANDLER — custom no-call lowering (platform asm / guard+trap) that
-//                does not fit an existing LO_* skeleton; the shared table carries
-//                handler_suffix for lower_<handler_suffix>(desc).
+//   builtin       — the id maps to a single llvm.* intrinsic (JEANDLE_LLVM_BUILTIN_
+//                   TABLE); emit_llvm_builtin emits CreateIntrinsic(llvm_id) with
+//                   operand/result types from the signature.  CPU support is checked
+//                   by id (floor/ceil/rint need SSE4.1 on x86).
+//   custom handler — anything else (JEANDLE_LLVM_CUSTOM_HANDLER_TABLE): bitcast,
+//                   fence, inline-asm sink, guard+trap, platform asm.  lower_llvm
+//                   dispatches on the id to lower_<handler_suffix>(desc).
 //
-// LK_LLVM rows carry no static CallInfo and no semantic call-site contract.  Inline
-// ops emit bare IR or llvm.* and need no deopt bundle / gc-leaf annotation because
-// RS4GC never rewrites them to a statepoint.  Custom handlers may emit guards or
-// traps; trap deopt bundles are owned by the uncommon_trap helper.  The lone inline
-// op exception is LO_SINK inline asm, which RS4GC *would* try to statepoint, so it
-// is stamped gc-leaf via IRSemantics::emit_gc_leaf_inline_asm.  This is exactly why
-// these belong here and not on the opaque-call path.
+// LK_LLVM rows carry no static CallInfo and no semantic call-site contract, and emit
+// bare IR / llvm.* that RS4GC never rewrites to a statepoint, so they need no deopt
+// bundle / gc-leaf annotation.  (Custom handlers that trap own their deopt bundle via
+// uncommon_trap; the lone exception is the blackhole inline-asm sink, which RS4GC
+// *would* statepoint, so lower_llvm_sink stamps it gc-leaf via
+// IRSemantics::emit_gc_leaf_inline_asm.)
 // =============================================================================
-enum LlvmOp : uint8_t { LO_BUILTIN, LO_BITCAST, LO_FENCE, LO_SINK, LO_CUSTOM_HANDLER };
-
-struct LlvmOpSpec {
+struct LlvmBuiltinSpec {
   vmIntrinsics::ID    vm_id;
-  LlvmOp              op;
-  llvm::Intrinsic::ID llvm_id;         // LO_BUILTIN only (else not_intrinsic)
+  llvm::Intrinsic::ID llvm_id;
 };
 
-static constexpr LlvmOpSpec kLlvmOpTable[] = {
-  // Data-driven LLVM ops (operand/result types derived from the signature).
-#define JEANDLE_LLVM_OP_ROW(VM_NAME, OP, LLVM_NAME) \
-  { vmIntrinsics::_##VM_NAME, OP, llvm::Intrinsic::LLVM_NAME },
-  JEANDLE_LLVM_INLINE_OP_TABLE(JEANDLE_LLVM_OP_ROW)
-#undef JEANDLE_LLVM_OP_ROW
-
-  // Custom no-call handlers share the LK_LLVM descriptor table, but dispatch
-  // through lower_<handler_suffix> below.
-#define JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW(VM_NAME, HANDLER_SUFFIX) \
-  { vmIntrinsics::_##VM_NAME, LO_CUSTOM_HANDLER, llvm::Intrinsic::not_intrinsic },
-  JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW)
-#undef JEANDLE_LLVM_CUSTOM_HANDLER_OP_ROW
+static constexpr LlvmBuiltinSpec kLlvmBuiltinTable[] = {
+#define JEANDLE_LLVM_BUILTIN_ROW(VM_NAME, LLVM_NAME) \
+  { vmIntrinsics::_##VM_NAME, llvm::Intrinsic::LLVM_NAME },
+  JEANDLE_LLVM_BUILTIN_TABLE(JEANDLE_LLVM_BUILTIN_ROW)
+#undef JEANDLE_LLVM_BUILTIN_ROW
 };
 
-static const LlvmOpSpec* find_llvm_op(vmIntrinsics::ID id) {
-  for (const LlvmOpSpec& spec : kLlvmOpTable) {
-    if (spec.vm_id == id) return &spec;
+// The id's llvm.* builtin, or not_intrinsic if the id is a custom handler instead.
+static llvm::Intrinsic::ID find_llvm_builtin(vmIntrinsics::ID id) {
+  for (const LlvmBuiltinSpec& spec : kLlvmBuiltinTable) {
+    if (spec.vm_id == id) return spec.llvm_id;
   }
-  return nullptr;
+  return llvm::Intrinsic::not_intrinsic;
 }
 
 bool JeandleIntrinsicLowering::lower_llvm(const JeandleIntrinsicDescriptor& desc) {
-  const LlvmOpSpec* spec = find_llvm_op(desc.id);
-  if (spec == nullptr) {
-    // lowering_kinds advertised LK_LLVM for this id, but kLlvmOpTable has no row.
-    // With the shared row list this should only happen if a new LLVM mechanism
-    // tag is added without expanding it here.
-    ShouldNotReachHere();
-    return false;
+  const llvm::Intrinsic::ID llvm_id = find_llvm_builtin(desc.id);
+  if (llvm_id != llvm::Intrinsic::not_intrinsic) {
+    // CPU-feature gate (floor/ceil/rint need SSE4.1 on x86): decline before touching
+    // the operand stack so the traversal falls through to the next candidate (or
+    // NormalInvoke).  The query is id-keyed and returns true for builtins with no CPU
+    // requirement.
+    if (!JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
+      return false;
+    }
+    return emit_llvm_builtin(desc, llvm_id);
   }
-  switch (spec->op) {
-    case LO_BUILTIN:
-      // CPU-feature gate (floor/ceil/rint need SSE4.1 on x86): decline before
-      // touching the operand stack so the traversal falls through to the next
-      // candidate (or NormalInvoke).  The query is id-keyed and returns true for
-      // intrinsics with no CPU requirement.
-      if (!JeandleIntrinsicSupport::cpu_supports_llvm_builtin(desc.id)) {
-        return false;
-      }
-      return emit_llvm_builtin(desc, spec->llvm_id);
-    case LO_BITCAST:
-      return emit_llvm_bitcast(desc);
-    case LO_FENCE:
-      return emit_llvm_fence(desc);
-    case LO_SINK:
-      return emit_llvm_sink(desc);
-    case LO_CUSTOM_HANDLER:
-      switch (desc.id) {
-        // Dispatch generated from the same shared table as the descriptor row.
-        // handler_suffix is token-pasted to lower_<handler_suffix>(desc).
+
+  // Not a builtin: a custom handler, dispatched on the id.  The dispatch is generated
+  // from the same shared table as the descriptor row, so a row without a matching
+  // lower_<handler_suffix> is a compile/link error.
+  switch (desc.id) {
 #define JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH(VM_NAME, HANDLER_SUFFIX) \
-        case vmIntrinsics::_##VM_NAME: return lower_##HANDLER_SUFFIX(desc);
-        JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH)
+    case vmIntrinsics::_##VM_NAME: return lower_##HANDLER_SUFFIX(desc);
+    JEANDLE_LLVM_CUSTOM_HANDLER_TABLE(JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH)
 #undef JEANDLE_LLVM_CUSTOM_HANDLER_DISPATCH
-        default: ShouldNotReachHere(); return false;  // unreachable: every LO_CUSTOM_HANDLER row dispatches here
-      }
+    default:
+      // lowering_kinds advertised LK_LLVM, but the id is in neither table.
+      ShouldNotReachHere();
+      return false;
   }
-  return false;  // unreachable: the switch is exhaustive over LlvmOp (-Wswitch enforces it)
 }
 
 // llvm.abs / ctlz / cttz take a trailing i1 edge-case flag (is_int_min_poison /
@@ -403,7 +372,7 @@ static bool llvm_intrinsic_takes_trailing_i1(llvm::Intrinsic::ID id) {
          id == llvm::Intrinsic::cttz;
 }
 
-// LO_BUILTIN: pop the single argument, CreateIntrinsic(llvm_id) overloaded on the
+// builtin: pop the single argument, CreateIntrinsic(llvm_id) overloaded on the
 // argument type, push the result — truncated when the result type differs (e.g.
 // Long.bitCount's i64 ctpop -> i32).  Types come from the target method signature.
 bool JeandleIntrinsicLowering::emit_llvm_builtin(const JeandleIntrinsicDescriptor& desc,
@@ -431,9 +400,9 @@ bool JeandleIntrinsicLowering::emit_llvm_builtin(const JeandleIntrinsicDescripto
   return true;
 }
 
-// LO_BITCAST: the Float/Int and Double/Long Raw-bits intrinsics are a single bitcast
-// between the (single) argument type and the result type, both from the signature.
-bool JeandleIntrinsicLowering::emit_llvm_bitcast(const JeandleIntrinsicDescriptor& desc) {
+// llvm_bitcast handler: the Float/Int and Double/Long Raw-bits intrinsics are a single
+// bitcast between the (single) argument type and the result type, both from the signature.
+bool JeandleIntrinsicLowering::lower_llvm_bitcast(const JeandleIntrinsicDescriptor& desc) {
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   ciSignature* sig = _target->signature();
@@ -446,9 +415,9 @@ bool JeandleIntrinsicLowering::emit_llvm_bitcast(const JeandleIntrinsicDescripto
   return true;
 }
 
-// LO_FENCE: Unsafe.{load,store,full}Fence — pop the receiver, emit a CreateFence
-// whose ordering is fixed by the id.  No result.
-bool JeandleIntrinsicLowering::emit_llvm_fence(const JeandleIntrinsicDescriptor& desc) {
+// llvm_fence handler: Unsafe.{load,store,full}Fence — pop the receiver, emit a
+// CreateFence whose ordering is fixed by the id.  No result.
+bool JeandleIntrinsicLowering::lower_llvm_fence(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::AtomicOrdering ordering;
   switch (desc.id) {
@@ -456,7 +425,7 @@ bool JeandleIntrinsicLowering::emit_llvm_fence(const JeandleIntrinsicDescriptor&
     case vmIntrinsics::_storeFence: ordering = llvm::AtomicOrdering::Release;                break;
     case vmIntrinsics::_fullFence:  ordering = llvm::AtomicOrdering::SequentiallyConsistent; break;
     default:
-      // table marked this id LO_FENCE but no ordering is wired here.
+      // the fence handler was dispatched for an id with no ordering wired here.
       ShouldNotReachHere();
       return false;
   }
@@ -465,8 +434,8 @@ bool JeandleIntrinsicLowering::emit_llvm_fence(const JeandleIntrinsicDescriptor&
   return true;
 }
 
-// LO_SINK (_blackhole): consume all arguments via volatile inline asm to prevent DCE.
-bool JeandleIntrinsicLowering::emit_llvm_sink(const JeandleIntrinsicDescriptor& desc) {
+// llvm_sink handler (_blackhole): consume all arguments via volatile inline asm to prevent DCE.
+bool JeandleIntrinsicLowering::lower_llvm_sink(const JeandleIntrinsicDescriptor& desc) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
 
