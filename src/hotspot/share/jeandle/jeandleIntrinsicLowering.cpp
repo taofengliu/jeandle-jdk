@@ -39,7 +39,9 @@
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "ci/ciMethod.hpp"
 #include "ci/ciSignature.hpp"
+#include "classfile/vmIntrinsics.hpp"
 #include "jeandle/jeandle_globals.hpp"
+#include "logging/log.hpp"
 #include "oops/arrayOop.hpp"
 #include "runtime/stubRoutines.hpp"
 
@@ -203,28 +205,40 @@ bool JeandleIntrinsicLowering::lower(const JeandleIntrinsicDescriptor& desc,
 
   if (candidate_selection_allows(LK_LLVM, selection) &&
       (desc.lowering_kinds & LK_LLVM) && lower_llvm(desc)) {
+    log_debug(jeandle)("intrinsic %s lowered via LK_LLVM", vmIntrinsics::name_at(desc.id));
     return true;
   }
 
   if (candidate_selection_allows(LK_HYBRID, selection) &&
       (desc.lowering_kinds & LK_HYBRID)) {
+    bool lowered;
     switch (desc.id) {
       // Dispatch generated from the same shared table as the descriptor row.
       // handler_suffix is token-pasted to lower_<handler_suffix>(desc).
 #define JEANDLE_HYBRID_DISPATCH(VM_NAME, HANDLER_SUFFIX) \
-      case vmIntrinsics::_##VM_NAME: return lower_##HANDLER_SUFFIX(desc);
+      case vmIntrinsics::_##VM_NAME: lowered = lower_##HANDLER_SUFFIX(desc); break;
       JEANDLE_HYBRID_HANDLER_TABLE(JEANDLE_HYBRID_DISPATCH)
 #undef JEANDLE_HYBRID_DISPATCH
-      default: ShouldNotReachHere(); break;  // unreachable: every LK_HYBRID row dispatches here
+      default: ShouldNotReachHere(); lowered = false; break;  // every LK_HYBRID row dispatches here
     }
+    if (lowered) {
+      log_debug(jeandle)("intrinsic %s lowered via LK_HYBRID", vmIntrinsics::name_at(desc.id));
+      return true;
+    }
+    return false;
   }
 
   if (candidate_selection_allows(LK_CALL, selection) &&
-      (desc.lowering_kinds & LK_CALL)) {
-    // LK_CALL is fully data-driven.
-    return emit_simple_call_intrinsic(desc);
+      (desc.lowering_kinds & LK_CALL) && emit_simple_call_intrinsic(desc)) {
+    log_debug(jeandle)("intrinsic %s lowered via LK_CALL", vmIntrinsics::name_at(desc.id));
+    return true;
   }
 
+  // A forced candidate that no path satisfied falls back to a normal invoke.
+  if (selection != JICS_Auto) {
+    log_debug(jeandle)("intrinsic %s has no usable '%s' candidate; normal invoke",
+                       vmIntrinsics::name_at(desc.id), JeandleIntrinsicCandidate);
+  }
   return false;
 }
 
