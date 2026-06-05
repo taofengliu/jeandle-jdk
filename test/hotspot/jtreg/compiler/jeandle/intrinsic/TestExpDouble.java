@@ -47,7 +47,7 @@ public class TestExpDouble {
         ArrayList<String> command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
             "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
-            "-XX:JeandleDumpDirectory="+dump_path, "-XX:JeandleIntrinsicCandidate=call",
+            "-XX:JeandleDumpDirectory="+dump_path, "-XX:+JeandleUseHotspotIntrinsics",
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::exp_double"));
         if (is_x86) {
           command_args.addAll(List.of("-XX:+UseLibmIntrinsic"));
@@ -91,7 +91,7 @@ public class TestExpDouble {
             command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+ForceUnreachable",
-                "-XX:JeandleIntrinsicCandidate=call",
+                "-XX:+JeandleUseHotspotIntrinsics",
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::exp_double",
                 "-XX:-UseLibmIntrinsic",
                 TestWrapper.class.getName()));
@@ -103,7 +103,7 @@ public class TestExpDouble {
             command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory="+dump_path, "-XX:JeandleIntrinsicCandidate=call",
+                "-XX:JeandleDumpDirectory="+dump_path, "-XX:+JeandleUseHotspotIntrinsics",
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::exp_double",
                 "-XX:-UseLibmIntrinsic",
                 TestWrapper.class.getName()));

@@ -30,7 +30,6 @@
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleCompiledCall.hpp"
 #include "jeandle/jeandleIntrinsicLowering.hpp"
-#include "jeandle/jeandleIntrinsicRegistry.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleType.hpp"
 #include "jeandle/jeandleUtils.hpp"
@@ -1396,10 +1395,10 @@ void JeandleAbstractInterpreter::uncommon_trap(Deoptimization::DeoptReason reaso
   // are correctly out of scope.)
   if (_lowering_intrinsic_id != vmIntrinsics::_none) {
     const JeandleTrapReasonMask mask =
-        JeandleIntrinsicRegistry::trap_throttle_mask(_lowering_intrinsic_id);
+        JeandleIntrinsicLowering::trap_throttle_mask(_lowering_intrinsic_id);
     assert((mask & (JeandleTrapReasonMask(1) << static_cast<uint>(reason))) != 0,
            "intrinsic %s emits deopt reason %d not in its trap-throttle mask; "
-           "add it to kTrapThrottleTable",
+           "add it to trap_throttle_mask()",
            vmIntrinsics::name_at(_lowering_intrinsic_id), static_cast<int>(reason));
   }
 #endif
@@ -1915,58 +1914,24 @@ void JeandleAbstractInterpreter::invoke() {
 }
 
 bool JeandleAbstractInterpreter::try_lower_intrinsic(const ciMethod* target) {
-  switch(target->intrinsic_id()) {
-    case vmIntrinsics::_compareUnsigned_i:
-    case vmIntrinsics::_compareUnsigned_l: {
-      bool is_long = (target->intrinsic_id() == vmIntrinsics::_compareUnsigned_l);
+  const vmIntrinsics::ID id = target->intrinsic_id();
 
-      llvm::Value* arg2 = is_long ? _jvm->lpop() : _jvm->ipop();
-      llvm::Value* arg1 = is_long ? _jvm->lpop() : _jvm->ipop();
+  // 1) Is this an intrinsic Jeandle can lower?
+  if (!JeandleIntrinsicLowering::is_supported(id)) return false;
 
-      llvm::Value* is_less = _ir_builder.CreateICmpULT(arg1, arg2);
-      llvm::Value* is_greater = _ir_builder.CreateICmpUGT(arg1, arg2);
-
-      llvm::Value* select_greater = _ir_builder.CreateSelect(is_greater, JeandleType::int_const(_ir_builder, 1), JeandleType::int_const(_ir_builder, 0));
-
-      llvm::Value* result = _ir_builder.CreateSelect(is_less, JeandleType::int_const(_ir_builder, -1), select_greater);
-      _jvm->ipush(result);
-      return true;
-    }
-    default:
-      break;
-  }
-  const JeandleIntrinsicDescriptor* desc = JeandleIntrinsicRegistry::lookup(target);
-  if (desc == nullptr) {
-    return false;
-  }
-
-  // Availability check. Jeandle has no AbstractCompiler hierarchy, so the three
-  // checks C2 folds into AbstractCompiler::is_intrinsic_available are spread out:
-  //   - the per-compiler allowlist is the registry lookup above (lookup == nullptr
-  //     means "not an intrinsic Jeandle knows how to lower");
-  //   - global -XX:DisableIntrinsic / -XX:ControlIntrinsic via is_disabled_by_flags;
-  //   - per-method -XX:CompileCommand=option,...,DisableIntrinsic,... via the
-  //     compilation's DirectiveSet.
-  // When the id is disabled the caller falls back to a normal invoke.
-  if (vmIntrinsics::is_disabled_by_flags(desc->id)) {
-    return false;
-  }
+  // 2) Global / per-method disable flags
+  if (vmIntrinsics::is_disabled_by_flags(id)) return false;
   if (CompileTask* task = ciEnv::current()->task()) {
     if (DirectiveSet* directive = task->directive()) {
-      if (directive->is_intrinsic_disabled(desc->id)) {
+      if (directive->is_intrinsic_disabled(id)) {
         return false;
       }
     }
   }
 
-  // Trap-throttle short-circuit. Mirrors C2's per-bci check in each inline_xxx
-  // (library_call.cpp), but data-driven via the registry's id-keyed trap-throttle
-  // side-table. Uses the interpreter's too_many_traps (which combines the caller
-  // MDO's has_trap_at with the per-compilation _trap_count accumulator seeded by
-  // accumulate_trap_counts_from_mdo at compile entry), so cross-method inlining
-  // is accounted for — matching Compile::too_many_traps in C2.
+  // 3) Trap-throttle check
   const int cur_bci = _bytecodes.cur_bci();
-  JeandleTrapReasonMask mask = JeandleIntrinsicRegistry::trap_throttle_mask(desc->id);
+  JeandleTrapReasonMask mask = JeandleIntrinsicLowering::trap_throttle_mask(id);
   for (uint reason_idx = 0; mask != 0; ++reason_idx, mask >>= 1) {
     if ((mask & 1u) != 0 &&
         too_many_traps(const_cast<ciMethod*>(_method), cur_bci,
@@ -1975,18 +1940,14 @@ bool JeandleAbstractInterpreter::try_lower_intrinsic(const ciMethod* target) {
     }
   }
 
-  // A descriptor exists but the lowering may still decline (no stub installed or
-  // CPU feature missing): lower() returns false and we treat that as a normal
-  // invoke rather than a hard failure.  Any capability/feature check inside
-  // lower() runs before the operand stack is touched, so a decline is side-effect
-  // free.
+  // 4) Lower
   JeandleIntrinsicLowering lowering(this);
   // Publish the intrinsic being lowered so uncommon_trap can verify (debug) that every
   // deopt reason it emits is declared in the trap-throttle mask.  Save/restore rather
   // than clear, so the invariant still holds if intrinsic lowering ever nests.
   DEBUG_ONLY(const vmIntrinsics::ID prev_id = _lowering_intrinsic_id);
-  DEBUG_ONLY(_lowering_intrinsic_id = desc->id);
-  bool lowered = lowering.lower(*desc, target);
+  DEBUG_ONLY(_lowering_intrinsic_id = id);
+  bool lowered = lowering.lower(id, target);
   DEBUG_ONLY(_lowering_intrinsic_id = prev_id);
   return lowered;
 }

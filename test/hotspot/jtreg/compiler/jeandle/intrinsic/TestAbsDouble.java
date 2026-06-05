@@ -28,6 +28,7 @@
 package compiler.jeandle.intrinsic;
 
 import compiler.jeandle.fileCheck.FileCheck;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -38,13 +39,13 @@ import jdk.test.lib.process.ProcessTools;
 
 public class TestAbsDouble {
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("java.io.tmpdir");
+        String dump_path = Files.createTempDirectory("jeandle_test_").toString();
         ArrayList<String> command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
             "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
             "-XX:JeandleDumpDirectory="+dump_path,
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::abs_double",
-            "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::abs_double_with_const_unaligned",
+            "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::unaligned_abs_double",
             TestWrapper.class.getName()
         ));
     
@@ -80,14 +81,14 @@ public class TestAbsDouble {
                 double r = d > 0.0d ? d : -1*d;
                 Asserts.assertEquals(r , abs_double(d));
             }
-            Asserts.assertEquals(1.5d, abs_double_with_const_unaligned(1.5d));
+            Asserts.assertEquals(1.5d, unaligned_abs_double(1.5d));
         }
 
         public static double abs_double(double a) {
             return Math.abs(a);
         }
 
-        public static double abs_double_with_const_unaligned(double a) {
+        public static double unaligned_abs_double(double a) {
             blackhole(1.0); // Insert a double constant (1.0) to break 16-byte alignment
             return Math.abs(a);
         }

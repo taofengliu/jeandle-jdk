@@ -43,11 +43,11 @@ public class TestPowDouble {
         boolean is_x86 = System.getProperty("os.arch").equals("amd64");
         String dump_path = System.getProperty("java.io.tmpdir");
 
-        // Force the Hybrid candidate and verify its slow path.
+        // Verify the Hybrid lowering and its slow path.
         ArrayList<String> command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
             "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
-            "-XX:JeandleDumpDirectory="+dump_path, "-XX:JeandleIntrinsicCandidate=hybrid",
+            "-XX:JeandleDumpDirectory="+dump_path,
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::pow_double"));
         if (is_x86) {
           command_args.addAll(List.of("-XX:+UseLibmIntrinsic"));
@@ -90,7 +90,7 @@ public class TestPowDouble {
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+ForceUnreachable",
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::pow_double",
-                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=hybrid",
+                "-XX:-UseLibmIntrinsic",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);
@@ -102,7 +102,7 @@ public class TestPowDouble {
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory="+dump_path,
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::pow_double",
-                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=hybrid",
+                "-XX:-UseLibmIntrinsic",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);

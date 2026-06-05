@@ -25,8 +25,7 @@
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 
-bool JeandleIntrinsicLowering::lower_spin_wait_hint(
-    const JeandleIntrinsicDescriptor& desc) {
+bool JeandleIntrinsicLowering::lower_spin_wait_hint() {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   // x86-64: PAUSE instruction — spin-wait hint that improves performance
   // and reduces power consumption in busy-wait loops.  An llvm.* intrinsic is never

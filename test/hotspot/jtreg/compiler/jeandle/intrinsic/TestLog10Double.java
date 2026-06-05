@@ -47,7 +47,7 @@ public class TestLog10Double {
         ArrayList<String> command_args = new ArrayList<String>(List.of(
             "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
             "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
-            "-XX:JeandleDumpDirectory="+dump_path, "-XX:JeandleIntrinsicCandidate=call",
+            "-XX:JeandleDumpDirectory="+dump_path, "-XX:+JeandleUseHotspotIntrinsics",
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double"));
         if (is_x86) {
           command_args.addAll(List.of("-XX:+UseLibmIntrinsic"));
@@ -92,7 +92,7 @@ public class TestLog10Double {
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+ForceUnreachable",
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double",
-                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=call",
+                "-XX:-UseLibmIntrinsic", "-XX:+JeandleUseHotspotIntrinsics",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);
@@ -104,7 +104,7 @@ public class TestLog10Double {
                 "-Xlog:jeandle=debug", "-XX:+UnlockDiagnosticVMOptions", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory="+dump_path,
                 "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::log10_double",
-                "-XX:-UseLibmIntrinsic", "-XX:JeandleIntrinsicCandidate=call",
+                "-XX:-UseLibmIntrinsic", "-XX:+JeandleUseHotspotIntrinsics",
                 TestWrapper.class.getName()));
             pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
             output = ProcessTools.executeCommand(pb);

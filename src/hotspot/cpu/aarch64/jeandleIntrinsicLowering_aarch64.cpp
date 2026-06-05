@@ -10,7 +10,7 @@
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
  * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * accompanied this code.
  *
  * You should have received a copy of the GNU General Public License version
  * 2 along with this work; if not, write to the Free Software Foundation,
@@ -25,8 +25,7 @@
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 
-bool JeandleIntrinsicLowering::lower_spin_wait_hint(
-    const JeandleIntrinsicDescriptor& desc) {
+bool JeandleIntrinsicLowering::lower_spin_wait_hint() {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   // AArch64: YIELD instruction via llvm.aarch64.hint with hint value 1.
   // The hint encoding is defined in the ARMv8 architecture reference manual;

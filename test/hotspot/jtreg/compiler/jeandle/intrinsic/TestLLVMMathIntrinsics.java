@@ -57,7 +57,7 @@ public class TestLLVMMathIntrinsics {
         "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
         "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
         "-XX:+UnlockDiagnosticVMOptions",
-        "-XX:JeandleIntrinsicCandidate=llvm"  // Force the LLVM candidate for dual-path math intrinsics.
+        "-XX:-JeandleUseHotspotIntrinsics"  // Force the LLVM candidate for dual-path math intrinsics.
     };
 
     public static void main(String[] args) throws Exception {
