@@ -304,39 +304,41 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
       return lower_java_op("jeandle.new_array",
                            {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE});
 
-    // Custom LLVM IR — bitcast
+    // bitcast
     case vmIntrinsics::_floatToRawIntBits:
     case vmIntrinsics::_intBitsToFloat:
     case vmIntrinsics::_doubleToRawLongBits:
     case vmIntrinsics::_longBitsToDouble:
       return lower_llvm_bitcast();
 
-    // Custom LLVM IR — fence
+    // fence
     case vmIntrinsics::_loadFence:
     case vmIntrinsics::_storeFence:
     case vmIntrinsics::_fullFence:
       return lower_llvm_fence(id);
 
-    // Custom LLVM IR — blackhole sink
+    // blackhole
     case vmIntrinsics::_blackhole:
       return lower_llvm_sink();
 
-    // Platform-specific hint
+    // onSpinWait
     case vmIntrinsics::_onSpinWait:
       return lower_spin_wait_hint();
 
-    // Guard + trap
+    // Preconditions
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
       return lower_preconditions_check_index(id);
 
-    // Complex handlers
+    // dpow
     case vmIntrinsics::_dpow:
       return lower_pow();
+
+    // countPositives
     case vmIntrinsics::_countPositives:
       return lower_count_positives();
 
-    // Inline IR — compare unsigned
+    // CompareUnsigned
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
       return lower_compare_unsigned(id);
@@ -435,15 +437,10 @@ bool JeandleIntrinsicLowering::lower_dual_path_libm(llvm::Intrinsic::ID llvm_id,
       fn = shared_fn;
     }
     if (fn != nullptr) {
-      JeandleIntrinsicEntrypoint entry;
-      entry.callee = fn(_interp->_module);
-      entry.calling_conv = llvm::CallingConv::C;
-      entry.is_gc_leaf = true;
-
       static constexpr CallSiteAttributeMetadata libm_attrs = {CTRL_NONE, MEM_NONE};
       llvm::Value* arg = _interp->_jvm->dpop();
-      llvm::CallBase* site = emit_callsite(entry.callee, entry.calling_conv,
-                                           {arg}, libm_attrs, entry.is_gc_leaf);
+      llvm::CallBase* site = emit_callsite(fn(_interp->_module), llvm::CallingConv::C,
+                                           {arg}, libm_attrs, /*is_gc_leaf_entry=*/true);
       _interp->_jvm->dpush(site);
       return true;
     }
@@ -679,7 +676,6 @@ bool JeandleIntrinsicLowering::lower_pow() {
 
   // Resolve the Java-semantics pow routine: StubRoutines then SharedRuntime.
   // SharedRuntime::dpow always exists, so resolution cannot fail.
-  JeandleIntrinsicEntrypoint entry;
   JeandleRuntimeCalleeFn fn = nullptr;
   if (JeandleRuntimeRoutine::find_routine_entry("StubRoutines_dpow") != nullptr) {
     fn = &JeandleRuntimeRoutine::StubRoutines_dpow_callee;
@@ -687,14 +683,12 @@ bool JeandleIntrinsicLowering::lower_pow() {
     fn = &JeandleRuntimeRoutine::SharedRuntime_dpow_callee;
   }
   guarantee(fn != nullptr, "Math.pow needs a HotSpot dpow stub or SharedRuntime routine");
-  entry.callee = fn(_interp->_module);
-  entry.calling_conv = llvm::CallingConv::C;
-  entry.is_gc_leaf = true;
+  llvm::FunctionCallee callee = fn(_interp->_module);
 
   // Emit a full pow(base, exp) call to the resolved HotSpot pow routine.
   auto emit_slow = [&]() -> llvm::Value* {
-    return emit_callsite(entry.callee, entry.calling_conv,
-                         {base, exp}, pow_attrs, entry.is_gc_leaf);
+    return emit_callsite(callee, llvm::CallingConv::C,
+                         {base, exp}, pow_attrs, /*is_gc_leaf_entry=*/true);
   };
 
   // Constant fast path: pow(x, 0.5) => x > 0.0 ? llvm.sqrt(x) : pow(x, 0.5).
@@ -754,15 +748,12 @@ bool JeandleIntrinsicLowering::lower_count_positives() {
 
   // Resolve the callee inline: prefer the platform SIMD adapter when its stub has
   // been generated, else the scalar C++ fallback.
-  JeandleIntrinsicEntrypoint entry;
-  entry.calling_conv = llvm::CallingConv::C;
-  entry.is_gc_leaf   = true;
-  entry.callee = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr
+  llvm::FunctionCallee callee = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr
       ? JeandleRuntimeRoutine::JeandleRuntime_count_positives_adapter_callee(_interp->_module)
       : JeandleRuntimeRoutine::JeandleRuntime_count_positives_callee(_interp->_module);
 
   // The guards above may deopt; the scan call itself only reads the byte[].
   static constexpr CallSiteAttributeMetadata scan_attrs = {CTRL_NONE, MEM_READ};
-  _interp->_jvm->ipush(emit_callsite(entry.callee, entry.calling_conv, {ba_start, len}, scan_attrs, entry.is_gc_leaf));
+  _interp->_jvm->ipush(emit_callsite(callee, llvm::CallingConv::C, {ba_start, len}, scan_attrs, /*is_gc_leaf_entry=*/true));
   return true;
 }

@@ -89,16 +89,6 @@ struct CallSiteAttributeMetadata {
 using JeandleRuntimeCalleeFn = llvm::FunctionCallee (*)(llvm::Module&);
 
 // =============================================================================
-// JeandleIntrinsicEntrypoint — a resolved (materialized) runtime callee plus
-// the IR-level facts needed to emit a call to it.
-// =============================================================================
-struct JeandleIntrinsicEntrypoint {
-  llvm::FunctionCallee  callee;
-  llvm::CallingConv::ID calling_conv;
-  bool                  is_gc_leaf;
-};
-
-// =============================================================================
 // Call-site IR annotation helpers.
 // =============================================================================
 
