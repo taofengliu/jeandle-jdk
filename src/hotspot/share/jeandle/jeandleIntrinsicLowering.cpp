@@ -41,17 +41,12 @@
 // Call-site IR annotation helpers (migrated from JeandleIntrinsicIRSemantics)
 // =============================================================================
 
-// Stamp the gc-leaf-function attribute on a call.
-static void mark_gc_leaf(llvm::CallBase* call) {
-  llvm::LLVMContext& ctx = call->getContext();
-  call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
-}
-
 void annotate_call(llvm::CallBase* call,
                    const CallSiteAttributeMetadata& attrs,
                    bool is_gc_leaf_entry) {
   if (attrs.gc_leaf_by_flags() || is_gc_leaf_entry) {
-    mark_gc_leaf(call);
+    llvm::LLVMContext& ctx = call->getContext();
+    call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
   }
 }
 
@@ -104,39 +99,47 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
 
   // Always-supported intrinsics — no CPU feature dependency
   switch (id) {
-    // Simple LLVM builtins
+    // math
     case vmIntrinsics::_dabs:
     case vmIntrinsics::_fabs:
     case vmIntrinsics::_dsqrt:
     case vmIntrinsics::_dsqrt_strict:
     case vmIntrinsics::_iabs:
     case vmIntrinsics::_labs:
-    // Dual-path libm
     case vmIntrinsics::_dsin:
     case vmIntrinsics::_dcos:
     case vmIntrinsics::_dtan:
     case vmIntrinsics::_dlog:
     case vmIntrinsics::_dlog10:
     case vmIntrinsics::_dexp:
-    // JavaOp calls
+
+    // getClass
     case vmIntrinsics::_getClass:
+
+    // Reference*
     case vmIntrinsics::_Reference_get:
     case vmIntrinsics::_Reference_refersTo0:
     case vmIntrinsics::_PhantomReference_refersTo0:
+
+    // newArray
     case vmIntrinsics::_newArray:
-    // Custom LLVM IR — bitcast
+
+    // bitcast
     case vmIntrinsics::_floatToRawIntBits:
     case vmIntrinsics::_intBitsToFloat:
     case vmIntrinsics::_doubleToRawLongBits:
     case vmIntrinsics::_longBitsToDouble:
-    // Custom LLVM IR — fence
+
+    // fence
     case vmIntrinsics::_loadFence:
     case vmIntrinsics::_storeFence:
     case vmIntrinsics::_fullFence:
-    // Guard + trap
+
+    // Preconditions
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
-    // Inline IR — compare unsigned
+
+    // compare unsigned
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
       return true;
@@ -295,15 +298,6 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
 // Shared emit helpers
 // =============================================================================
 
-void JeandleIntrinsicLowering::attach_callee_return_klass_attr(llvm::CallBase* call) const {
-  if (_target == nullptr) {
-    return;
-  }
-  attach_java_klass_ret_attr(call,
-                             _target->signature()->return_type(),
-                             *_interp->_context);
-}
-
 llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(llvm::FunctionCallee callee,
                                                         llvm::CallingConv::ID cc,
                                                         llvm::ArrayRef<llvm::Value*> args,
@@ -322,7 +316,11 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(llvm::FunctionCallee cal
     apply_memory_attr(site, attrs);
   }
   annotate_call(site, attrs, is_gc_leaf_entry);
-  attach_callee_return_klass_attr(site);
+  if (_target != nullptr) {
+    attach_java_klass_ret_attr(site,
+                               _target->signature()->return_type(),
+                               *_interp->_context);
+  }
   return site;
 }
 
@@ -637,4 +635,3 @@ bool JeandleIntrinsicLowering::lower_new_array() {
   _interp->_jvm->apush(result);
   return true;
 }
-
