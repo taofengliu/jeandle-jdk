@@ -23,7 +23,6 @@
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -108,14 +107,6 @@ void annotate_call(llvm::CallBase* call,
 void apply_memory_attr(llvm::CallBase* call,
                        const CallSiteAttributeMetadata& attrs);
 
-// Emit a side-effecting inline-asm call and mark it gc-leaf. Used by the
-// blackhole sink.
-llvm::CallInst* emit_gc_leaf_inline_asm(llvm::IRBuilder<>& builder,
-                                        llvm::FunctionType* fn_ty,
-                                        llvm::StringRef asm_string,
-                                        llvm::StringRef constraints,
-                                        llvm::ArrayRef<llvm::Value*> args);
-
 using JeandleTrapReasonMask = uint32_t;
 static_assert(Deoptimization::Reason_LIMIT <= 32,
               "JeandleTrapReasonMask must be widened");
@@ -184,7 +175,6 @@ class JeandleIntrinsicLowering : public StackObj {
   // ========================================================================
   bool lower_llvm_bitcast();
   bool lower_llvm_fence(vmIntrinsics::ID id);
-  bool lower_llvm_sink();
   bool lower_preconditions_check_index(vmIntrinsics::ID id);
   bool lower_spin_wait_hint();       // arch-specific
   bool lower_pow();

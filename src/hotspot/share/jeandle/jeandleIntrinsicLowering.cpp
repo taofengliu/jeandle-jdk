@@ -22,7 +22,6 @@
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/InlineAsm.h"
 
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
@@ -72,18 +71,6 @@ void apply_memory_attr(llvm::CallBase* call, const CallSiteAttributeMetadata& at
   } else if (!reads && writes) {
     call->setOnlyWritesMemory();       // memory(write)
   }
-}
-
-llvm::CallInst* emit_gc_leaf_inline_asm(llvm::IRBuilder<>& builder,
-                                        llvm::FunctionType* fn_ty,
-                                        llvm::StringRef asm_string,
-                                        llvm::StringRef constraints,
-                                        llvm::ArrayRef<llvm::Value*> args) {
-  llvm::InlineAsm* ia = llvm::InlineAsm::get(fn_ty, asm_string, constraints,
-                                             /*hasSideEffects=*/true);
-  llvm::CallInst* call = builder.CreateCall(ia, args);
-  mark_gc_leaf(call);
-  return call;
 }
 
 // =============================================================================
@@ -170,8 +157,6 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_loadFence:
     case vmIntrinsics::_storeFence:
     case vmIntrinsics::_fullFence:
-    // Custom LLVM IR — blackhole sink
-    case vmIntrinsics::_blackhole:
     // Guard + trap
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
@@ -316,10 +301,6 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_storeFence:
     case vmIntrinsics::_fullFence:
       return lower_llvm_fence(id);
-
-    // blackhole
-    case vmIntrinsics::_blackhole:
-      return lower_llvm_sink();
 
     // onSpinWait
     case vmIntrinsics::_onSpinWait:
@@ -523,48 +504,6 @@ bool JeandleIntrinsicLowering::lower_llvm_fence(vmIntrinsics::ID id) {
   }
   _interp->_jvm->apop(); // Unsafe receiver
   builder.CreateFence(ordering);
-  return true;
-}
-
-// ---- lower_llvm_sink ----
-bool JeandleIntrinsicLowering::lower_llvm_sink() {
-  llvm::IRBuilder<>& builder = _interp->_ir_builder;
-  llvm::LLVMContext& ctx = *_interp->_context;
-
-  ciSignature* sig = _target->signature();
-
-  for (int i = sig->count() - 1; i >= 0; i--) {
-    BasicType bt = sig->type_at(i)->basic_type();
-    llvm::Value* val;
-    switch (bt) {
-      case T_INT: case T_BOOLEAN: case T_BYTE: case T_CHAR: case T_SHORT:
-        val = _interp->_jvm->ipop();
-        break;
-      case T_LONG:
-        val = _interp->_jvm->lpop();
-        break;
-      case T_FLOAT:
-        val = builder.CreateBitCast(_interp->_jvm->fpop(), builder.getInt32Ty());
-        break;
-      case T_DOUBLE:
-        val = builder.CreateBitCast(_interp->_jvm->dpop(), builder.getInt64Ty());
-        break;
-      case T_OBJECT: case T_ARRAY:
-        val = builder.CreatePtrToInt(_interp->_jvm->apop(), builder.getInt64Ty());
-        break;
-      default:
-        ShouldNotReachHere();
-        return false;
-    }
-    auto* fn_ty = llvm::FunctionType::get(
-        llvm::Type::getVoidTy(ctx), {val->getType()}, false);
-    emit_gc_leaf_inline_asm(builder, fn_ty, "", "r", {val});
-  }
-
-  if (!_target->is_static()) {
-    _interp->_jvm->apop();
-  }
-
   return true;
 }
 
