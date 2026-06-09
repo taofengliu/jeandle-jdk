@@ -74,30 +74,6 @@ void apply_memory_attr(llvm::CallBase* call, const CallSiteAttributeMetadata& at
 }
 
 // =============================================================================
-// Static helper for constant detection (used by lower_pow)
-// =============================================================================
-
-static bool is_double_constant(llvm::Value* value, double expected,
-                               const llvm::DataLayout& data_layout) {
-  llvm::Constant* constant = llvm::dyn_cast<llvm::Constant>(value);
-  if (constant == nullptr) {
-    if (llvm::Instruction* inst = llvm::dyn_cast<llvm::Instruction>(value)) {
-      constant = llvm::ConstantFoldInstruction(inst, data_layout);
-    }
-  }
-  if (constant == nullptr) {
-    return false;
-  }
-  constant = llvm::ConstantFoldConstant(constant, data_layout);
-  llvm::ConstantFP* fp_constant = llvm::dyn_cast<llvm::ConstantFP>(constant);
-  if (fp_constant == nullptr) {
-    return false;
-  }
-  llvm::APFloat expected_value(expected);
-  return fp_constant->getValueAPF().bitwiseIsEqual(expected_value);
-}
-
-// =============================================================================
 // JeandleIntrinsicLowering — construction
 // =============================================================================
 
@@ -160,9 +136,6 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     // Guard + trap
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
-    // Complex handlers
-    case vmIntrinsics::_dpow:
-    case vmIntrinsics::_countPositives:
     // Inline IR — compare unsigned
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
@@ -186,9 +159,6 @@ JeandleTrapReasonMask JeandleIntrinsicLowering::trap_throttle_mask(vmIntrinsics:
     case vmIntrinsics::_Preconditions_checkLongIndex:
       return trap_reason_mask_val(Deoptimization::Reason_intrinsic) |
              trap_reason_mask_val(Deoptimization::Reason_range_check);
-    case vmIntrinsics::_countPositives:
-      return trap_reason_mask_val(Deoptimization::Reason_intrinsic) |
-             trap_reason_mask_val(Deoptimization::Reason_null_check);
     default:
       return 0;
   }
@@ -310,14 +280,6 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
       return lower_preconditions_check_index(id);
-
-    // dpow
-    case vmIntrinsics::_dpow:
-      return lower_pow();
-
-    // countPositives
-    case vmIntrinsics::_countPositives:
-      return lower_count_positives();
 
     // CompareUnsigned
     case vmIntrinsics::_compareUnsigned_i:
@@ -676,104 +638,3 @@ bool JeandleIntrinsicLowering::lower_new_array() {
   return true;
 }
 
-// ---- lower_pow ----
-bool JeandleIntrinsicLowering::lower_pow() {
-  // pow is a pure leaf call: no deopt, no GC state, no exception edge.
-  static constexpr CallSiteAttributeMetadata pow_attrs = {CTRL_NONE, MEM_NONE};
-  llvm::IRBuilder<>& builder = _interp->_ir_builder;
-  llvm::LLVMContext& ctx = *_interp->_context;
-  llvm::Type* ret_ty = JeandleType::java2llvm(T_DOUBLE, ctx);
-
-  llvm::Value* exp = _interp->_jvm->dpop();
-  llvm::Value* base = _interp->_jvm->dpop();
-
-  // Constant fast path: pow(x, 2.0) => x * x.
-  if (is_double_constant(exp, 2.0, _interp->_module.getDataLayout())) {
-    llvm::Value* fast = builder.CreateFMul(base, base);
-    _interp->_jvm->dpush(fast);
-    return true;
-  }
-
-  // Resolve the Java-semantics pow routine: StubRoutines then SharedRuntime.
-  // SharedRuntime::dpow always exists, so resolution cannot fail.
-  JeandleRuntimeCalleeFn fn = nullptr;
-  if (JeandleRuntimeRoutine::find_routine_entry("StubRoutines_dpow") != nullptr) {
-    fn = &JeandleRuntimeRoutine::StubRoutines_dpow_callee;
-  } else if (JeandleRuntimeRoutine::find_routine_entry("SharedRuntime_dpow") != nullptr) {
-    fn = &JeandleRuntimeRoutine::SharedRuntime_dpow_callee;
-  }
-  guarantee(fn != nullptr, "Math.pow needs a HotSpot dpow stub or SharedRuntime routine");
-  llvm::FunctionCallee callee = fn(_interp->_module);
-
-  // Emit a full pow(base, exp) call to the resolved HotSpot pow routine.
-  auto emit_slow = [&]() -> llvm::Value* {
-    return emit_callsite(callee, llvm::CallingConv::C,
-                         {base, exp}, pow_attrs, /*is_gc_leaf_entry=*/true);
-  };
-
-  // Constant fast path: pow(x, 0.5) => x > 0.0 ? llvm.sqrt(x) : pow(x, 0.5).
-  if (is_double_constant(exp, 0.5, _interp->_module.getDataLayout())) {
-    llvm::Value* zero = llvm::ConstantFP::get(ret_ty, 0.0);
-    llvm::BasicBlock* fast_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_fast", _interp->_llvm_func);
-    llvm::BasicBlock* slow_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_slow", _interp->_llvm_func);
-    llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(ctx, "pow_0dot5_merge", _interp->_llvm_func);
-
-    llvm::Value* base_gt_zero = builder.CreateFCmpOGT(base, zero, "pow.base_gt_zero");
-    builder.CreateCondBr(base_gt_zero, fast_block, slow_block);
-
-    builder.SetInsertPoint(fast_block);
-    llvm::CallInst* fast = builder.CreateIntrinsic(ret_ty, llvm::Intrinsic::sqrt, {base});
-    builder.CreateBr(merge_block);
-
-    builder.SetInsertPoint(slow_block);
-    llvm::Value* slow = emit_slow();
-    builder.CreateBr(merge_block);
-
-    builder.SetInsertPoint(merge_block);
-    _interp->_block->set_tail_llvm_block(merge_block);
-    llvm::PHINode* result = builder.CreatePHI(ret_ty, 2, "pow_0dot5.result");
-    result->addIncoming(fast, fast_block);
-    result->addIncoming(slow, slow_block);
-    _interp->_jvm->dpush(result);
-    return true;
-  }
-
-  // General path.
-  _interp->_jvm->dpush(emit_slow());
-  return true;
-}
-
-// ---- lower_count_positives ----
-bool JeandleIntrinsicLowering::lower_count_positives() {
-  llvm::IRBuilder<>& builder = _interp->_ir_builder;
-  llvm::LLVMContext& ctx = *_interp->_context;
-
-  // Peek without popping so the deopt bundle captured by string_range_check sees
-  // all three arguments on the stack.
-  llvm::Value* len = _interp->_jvm->raw_peek(0).value();
-  llvm::Value* off = _interp->_jvm->raw_peek(1).value();
-  llvm::Value* ba  = _interp->_jvm->raw_peek(2).value();
-
-  _interp->string_range_check(ba, off, len);
-
-  _interp->_jvm->ipop(); // len
-  _interp->_jvm->ipop(); // off
-  _interp->_jvm->apop(); // ba
-
-  // ba_start = ba + array_base_offset(T_BYTE) + off.
-  llvm::Value* base_off   = builder.getInt32(arrayOopDesc::base_offset_in_bytes(T_BYTE));
-  llvm::Value* array_base = builder.CreateInBoundsPtrAdd(ba, base_off, "ba_base");
-  llvm::Value* ba_start   = builder.CreateInBoundsGEP(
-      llvm::Type::getInt8Ty(ctx), array_base, off, "ba_start");
-
-  // Resolve the callee inline: prefer the platform SIMD adapter when its stub has
-  // been generated, else the scalar C++ fallback.
-  llvm::FunctionCallee callee = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr
-      ? JeandleRuntimeRoutine::JeandleRuntime_count_positives_adapter_callee(_interp->_module)
-      : JeandleRuntimeRoutine::JeandleRuntime_count_positives_callee(_interp->_module);
-
-  // The guards above may deopt; the scan call itself only reads the byte[].
-  static constexpr CallSiteAttributeMetadata scan_attrs = {CTRL_NONE, MEM_READ};
-  _interp->_jvm->ipush(emit_callsite(callee, llvm::CallingConv::C, {ba_start, len}, scan_attrs, /*is_gc_leaf_entry=*/true));
-  return true;
-}

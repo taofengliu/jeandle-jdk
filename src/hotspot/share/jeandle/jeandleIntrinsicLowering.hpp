@@ -177,8 +177,6 @@ class JeandleIntrinsicLowering : public StackObj {
   bool lower_llvm_fence(vmIntrinsics::ID id);
   bool lower_preconditions_check_index(vmIntrinsics::ID id);
   bool lower_spin_wait_hint();       // arch-specific
-  bool lower_pow();
-  bool lower_count_positives();
   bool lower_compare_unsigned(vmIntrinsics::ID id);
   bool lower_new_array();
 

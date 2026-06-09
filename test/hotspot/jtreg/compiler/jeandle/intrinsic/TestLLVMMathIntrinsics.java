@@ -135,8 +135,6 @@ public class TestLLVMMathIntrinsics {
         checker.checkPattern("define hotspotcc double .*TestLLVMMathIntrinsics_double_exp.*");
         checker.check("call double @llvm.exp.f64");
 
-        // Math.pow is Hybrid-only now; TestPowDouble covers the generated-stub
-        // and SharedRuntime slow paths separately.
     }
 
     private static OutputAnalyzer runTestProcess(String testType) throws Exception {

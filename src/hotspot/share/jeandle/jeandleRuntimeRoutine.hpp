@@ -193,14 +193,6 @@
       llvm::Type::getDoubleTy(context),                              \
       llvm::Type::getDoubleTy(context))                              \
                                                                      \
-  def(StubRoutines_dpow,                                             \
-      StubRoutines::dpow(),                                          \
-      true,                                                          \
-      true,                                                          \
-      llvm::Type::getDoubleTy(context),                              \
-      llvm::Type::getDoubleTy(context),                              \
-      llvm::Type::getDoubleTy(context))                              \
-                                                                     \
   def(uncommon_trap,                                                 \
       SharedRuntime::uncommon_trap_blob()->entry_point(),            \
       true,                                                          \
@@ -266,14 +258,6 @@
       llvm::Type::getDoubleTy(context),                              \
       llvm::Type::getDoubleTy(context))                              \
                                                                      \
-  def(SharedRuntime_dpow,                                            \
-      SharedRuntime::dpow,                                           \
-      false,                                                         \
-      true,                                                          \
-      llvm::Type::getDoubleTy(context),                              \
-      llvm::Type::getDoubleTy(context),                              \
-      llvm::Type::getDoubleTy(context))                              \
-                                                                     \
   def(install_exceptional_return_for_call_vm,                        \
       JeandleRuntimeRoutine::install_exceptional_return_for_call_vm, \
       false,                                                         \
@@ -294,34 +278,7 @@
       false,                                                                        \
       true,                                                                         \
       llvm::Type::getVoidTy(context),                                               \
-      llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))    \
-                                                                                    \
-  /* StringCoding.countPositives: scalar C++ fallback wrapper.                     \
-   * Always available on all platforms; used when the platform SIMD adapter        \
-   * (JeandleRuntime_count_positives_adapter) has not been generated.              \
-   * Receives a pointer to ba[off] (inside the Java heap byte array) plus the      \
-   * scan length; returns the positive-byte prefix length.                         \
-   * Marked gc-leaf: reads heap memory but performs no allocation or GC action.  */\
-  def(JeandleRuntime_count_positives,                                               \
-      JeandleRuntimeRoutine::count_positives_impl,                                  \
-      false,                                                                        \
-      true,                                                                         \
-      llvm::Type::getInt32Ty(context),                                              \
-      llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace), \
-      llvm::Type::getInt32Ty(context))                                              \
-                                                                                    \
-  /* StringCoding.countPositives: platform SIMD adapter stub.                      \
-   * Address is populated at Jeandle startup by generate_count_positives_adapter();\
-   * null if not yet available (e.g., before startup or on an unsupported config). \
-   * GC-leaf registration is done manually in generate() so is_leaf=false here.   \
-   * reachable=false: stub address embedded as inttoptr constant.                */\
-  def(JeandleRuntime_count_positives_adapter,                                       \
-      JeandleRuntimeRoutine::count_positives_stub_adapter(),                        \
-      false,                                                                        \
-      false,                                                                        \
-      llvm::Type::getInt32Ty(context),                                              \
-      llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace), \
-      llvm::Type::getInt32Ty(context))                                              \
+      llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))\
 
 #define ALL_JEANDLE_ASSEMBLY_ROUTINES(def) \
   def(exceptional_return)                  \
@@ -446,29 +403,6 @@ class JeandleRuntimeRoutine : public AllStatic {
   static void multianewarrayN(Klass* elem_type, arrayOopDesc* dims, JavaThread* current);
 
   static jint instanceof_unloaded_or_null(Method* method, int cp_index, Klass* ex_klass, JavaThread* current);
-
-  // ArrayScan: count leading positive bytes in a byte array slice.
-  // ba_start  — pointer to ba[off] (inside the Java heap byte array)
-  // len       — number of bytes to scan
-  // returns   — number of consecutive bytes with bit 7 clear, i.e. the length
-  //             of the positive-byte prefix; equals len if all bytes are positive.
-  static jint count_positives_impl(jbyte* ba_start, jint len);
-
-  // Platform-specific SIMD adapter stub for countPositives.
-  // Set by generate_count_positives_adapter() during Jeandle startup when a
-  // platform-specific adapter is generated.  lower_count_positives uses it when
-  // present; otherwise it calls the scalar count_positives_impl fallback.
-  static address _count_positives_stub_adapter;
-
- public:
-  static address count_positives_stub_adapter() { return _count_positives_stub_adapter; }
-
- private:
-  // Generates a C-callable stub whose entry point is stored in _count_positives_stub_adapter.
-  // Adapts Jeandle's standard C ABI (ba_start, len) to the platform-specific SIMD calling
-  // convention and emits the counting code via the platform MacroAssembler.
-  // Implemented in cpu/<arch>/jeandleRuntimeRoutine_<arch>.cpp.
-  static void generate_count_positives_adapter();
 
   // Assembly routine implementations:
 
