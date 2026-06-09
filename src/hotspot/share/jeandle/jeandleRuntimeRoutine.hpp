@@ -348,6 +348,14 @@ class JeandleRuntimeRoutine : public AllStatic {
     return _routine_entry.contains(name);
   }
 
+  // Look up a routine entry by name. Returns nullptr if the entry is absent
+  // or if the registered address is null (e.g., StubRoutines not yet generated).
+  static address find_routine_entry(llvm::StringRef name) {
+    auto it = _routine_entry.find(name);
+    if (it == _routine_entry.end()) return nullptr;
+    return it->getValue();
+  }
+
   static bool is_gc_leaf(address addr) {
     return _gc_leaf_routines.contains(addr);
   }

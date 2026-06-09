@@ -25,6 +25,9 @@
 #include "llvm/IR/Instructions.h"
 
 #include "jeandle/jeandleCallSiteAttr.hpp"
+
+#include "jeandle/__hotspotHeadersBegin__.hpp"
+#include "classfile/vmIntrinsics.hpp"
 #include "memory/allocation.hpp"
 #include "runtime/deoptimization.hpp"
 
@@ -67,14 +70,10 @@ class JeandleIntrinsicLowering : public StackObj {
                                 const CallSiteAttributeMetadata& attrs,
                                 bool is_gc_leaf_entry = false);
 
-  // JavaOp call: resolve the JavaOp symbol from the module and call emit_callsite.
-  llvm::CallBase* emit_java_op_call(const char* java_op_name,
-                                    const CallSiteAttributeMetadata& attrs,
-                                    llvm::ArrayRef<llvm::Value*> args);
-
-  // Emit a single llvm.* builtin. Pops one arg, creates the intrinsic call,
-  // pushes the result (with truncation if needed).
-  bool emit_llvm_builtin(llvm::Intrinsic::ID llvm_id);
+  // Emit a llvm.* builtin. Pops all Java args from the JVM stack (from signature),
+  // appends extra_args, creates the intrinsic call, and pushes the result.
+  bool emit_llvm_builtin(llvm::Intrinsic::ID llvm_id,
+                          llvm::ArrayRef<llvm::Value*> extra_args = {});
 
   // ========================================================================
   // Pattern helpers — reusable lowering patterns shared by multiple intrinsics
@@ -84,7 +83,9 @@ class JeandleIntrinsicLowering : public StackObj {
   //   JeandleUseHotspotIntrinsics=true  -> try stub -> try SharedRuntime -> llvm builtin
   //   JeandleUseHotspotIntrinsics=false -> llvm builtin only
   bool lower_dual_path_libm(llvm::Intrinsic::ID llvm_id,
+                            const char* stub_name,
                             JeandleRuntimeCalleeFn stub_fn,
+                            const char* shared_name,
                             JeandleRuntimeCalleeFn shared_fn);
 
   // JavaOp-based intrinsic: resolve the named JavaOp, pop args, call, push result.
@@ -106,5 +107,15 @@ class JeandleIntrinsicLowering : public StackObj {
   // Attach JavaKlass/JavaKlassExact return-type attributes to a call site.
   void attach_callee_return_klass_attr(llvm::CallBase* call) const;
 };
+
+// =============================================================================
+// Arch-specific CPU feature checks for intrinsics.
+// Defined in cpu/<arch>/jeandleIntrinsicLowering_<arch>.cpp.
+// Return true if the current CPU supports the given intrinsic on this
+// architecture.
+// =============================================================================
+bool cpu_supports_rounding();   // floor/ceil/rint
+bool cpu_supports_popcount();   // bitCount_i/bitCount_l
+bool cpu_supports_spin_wait();  // onSpinWait
 
 #endif // SHARE_JEANDLE_INTRINSIC_LOWERING_HPP

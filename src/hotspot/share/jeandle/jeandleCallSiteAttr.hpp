@@ -28,7 +28,6 @@
 #include "llvm/IR/Value.h"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
-#include "classfile/vmIntrinsics.hpp"
 #include "memory/allocation.hpp"
 
 class JeandleAbstractInterpreter;
@@ -100,15 +99,6 @@ struct JeandleIntrinsicEntrypoint {
 };
 
 // =============================================================================
-// JeandleRuntimeAvailability — runtime-path availability for one intrinsic id.
-// =============================================================================
-struct JeandleRuntimeAvailability {
-  bool has_hotspot_stub;
-  bool has_shared_runtime;
-  bool any_runtime() const { return has_hotspot_stub || has_shared_runtime; }
-};
-
-// =============================================================================
 // Call-site IR annotation helpers.
 // =============================================================================
 
@@ -136,16 +126,5 @@ llvm::CallInst* emit_gc_leaf_inline_asm(llvm::IRBuilder<>& builder,
                                         llvm::StringRef asm_string,
                                         llvm::StringRef constraints,
                                         llvm::ArrayRef<llvm::Value*> args);
-
-// =============================================================================
-// Runtime availability probe.
-// Returns whether a HotSpot platform stub and/or SharedRuntime fallback exists
-// for the given intrinsic id.
-// =============================================================================
-JeandleRuntimeAvailability runtime_availability(vmIntrinsics::ID id);
-
-// Whether the target CPU supports rounding intrinsics (floor/ceil/rint).
-// x86-64 needs SSE4.1; AArch64 always supports it; others conservatively allow.
-bool cpu_supports_rounding();
 
 #endif // SHARE_JEANDLE_CALL_SITE_ATTR_HPP

@@ -53,10 +53,8 @@
   generate_##name();
 
 #define REGISTER_DIRECT_ROUTINE(name, routine_address, reachable, is_leaf, return_type, ...) \
-  if (reachable) {                                                                           \
-    _routine_entry.insert({llvm::StringRef(#name), (address)routine_address});               \
-  }                                                                                          \
-  if (is_leaf) {                                                                             \
+  _routine_entry.insert({llvm::StringRef(#name), (address)routine_address});                 \
+  if (is_leaf && (address)routine_address != nullptr) {                                      \
     _gc_leaf_routines.insert((address)routine_address);                                      \
   }
 

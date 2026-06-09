@@ -38,9 +38,6 @@
 #include "logging/log.hpp"
 #include "oops/arrayOop.hpp"
 #include "runtime/deoptimization.hpp"
-#include "runtime/sharedRuntime.hpp"
-#include "runtime/stubRoutines.hpp"
-#include "runtime/vm_version.hpp"
 
 // =============================================================================
 // Call-site IR annotation helpers (migrated from JeandleIntrinsicIRSemantics)
@@ -100,49 +97,6 @@ llvm::CallInst* emit_gc_leaf_inline_asm(llvm::IRBuilder<>& builder,
 }
 
 // =============================================================================
-// Runtime availability and CPU support (migrated from JeandleIntrinsicSupport)
-// =============================================================================
-
-// Probe a (StubRoutines, SharedRuntime) pair whose names match the intrinsic ID.
-#define MATCHED_STUB_PROBE(name)                                                           \
-  case vmIntrinsics::_##name:                                                              \
-    avail.has_hotspot_stub   = StubRoutines::name() != nullptr;                             \
-    avail.has_shared_runtime = CAST_FROM_FN_PTR(address, SharedRuntime::name) != nullptr;   \
-    break;
-
-static void probe_hotspot_stubs(vmIntrinsics::ID id, JeandleRuntimeAvailability& avail) {
-  switch (id) {
-    MATCHED_STUB_PROBE(dsin)
-    MATCHED_STUB_PROBE(dcos)
-    MATCHED_STUB_PROBE(dtan)
-    MATCHED_STUB_PROBE(dlog)
-    MATCHED_STUB_PROBE(dlog10)
-    MATCHED_STUB_PROBE(dexp)
-    MATCHED_STUB_PROBE(dpow)
-    case vmIntrinsics::_countPositives:
-      avail.has_hotspot_stub   = JeandleRuntimeRoutine::count_positives_stub_adapter() != nullptr;
-      avail.has_shared_runtime = true;
-      break;
-    default:
-      break;
-  }
-}
-
-JeandleRuntimeAvailability runtime_availability(vmIntrinsics::ID id) {
-  JeandleRuntimeAvailability avail{};
-  probe_hotspot_stubs(id, avail);
-  return avail;
-}
-
-bool cpu_supports_rounding() {
-#ifdef AMD64
-  return VM_Version::supports_sse4_1();
-#else
-  return true;
-#endif
-}
-
-// =============================================================================
 // Static helper for constant detection (used by lower_pow)
 // =============================================================================
 
@@ -178,19 +132,32 @@ JeandleIntrinsicLowering::JeandleIntrinsicLowering(JeandleAbstractInterpreter* i
 // =============================================================================
 
 bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
+  // CPU feature-dependent intrinsics — arch-specific checks
+  switch (id) {
+    case vmIntrinsics::_floor:
+    case vmIntrinsics::_ceil:
+    case vmIntrinsics::_rint:
+      return cpu_supports_rounding();
+
+    case vmIntrinsics::_bitCount_i:
+    case vmIntrinsics::_bitCount_l:
+      return cpu_supports_popcount();
+
+    case vmIntrinsics::_onSpinWait:
+      return cpu_supports_spin_wait();
+
+    default: break;
+  }
+
+  // Always-supported intrinsics — no CPU feature dependency
   switch (id) {
     // Simple LLVM builtins
     case vmIntrinsics::_dabs:
     case vmIntrinsics::_fabs:
     case vmIntrinsics::_dsqrt:
     case vmIntrinsics::_dsqrt_strict:
-    case vmIntrinsics::_floor:
-    case vmIntrinsics::_ceil:
-    case vmIntrinsics::_rint:
     case vmIntrinsics::_iabs:
     case vmIntrinsics::_labs:
-    case vmIntrinsics::_bitCount_i:
-    case vmIntrinsics::_bitCount_l:
     // Dual-path libm
     case vmIntrinsics::_dsin:
     case vmIntrinsics::_dcos:
@@ -215,8 +182,6 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_fullFence:
     // Custom LLVM IR — blackhole sink
     case vmIntrinsics::_blackhole:
-    // Platform-specific hint
-    case vmIntrinsics::_onSpinWait:
     // Guard + trap
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
@@ -271,18 +236,16 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
       return emit_llvm_builtin(llvm::Intrinsic::sqrt);
 
     case vmIntrinsics::_floor:
-      if (!cpu_supports_rounding()) return false;
       return emit_llvm_builtin(llvm::Intrinsic::floor);
     case vmIntrinsics::_ceil:
-      if (!cpu_supports_rounding()) return false;
       return emit_llvm_builtin(llvm::Intrinsic::ceil);
     case vmIntrinsics::_rint:
-      if (!cpu_supports_rounding()) return false;
       return emit_llvm_builtin(llvm::Intrinsic::rint);
 
     case vmIntrinsics::_iabs:
     case vmIntrinsics::_labs:
-      return emit_llvm_builtin(llvm::Intrinsic::abs);
+      return emit_llvm_builtin(llvm::Intrinsic::abs,
+                                {_interp->_ir_builder.getInt1(false)});
 
     case vmIntrinsics::_bitCount_i:
     case vmIntrinsics::_bitCount_l:
@@ -291,27 +254,39 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     // Dual-path libm (JeandleUseHotspotIntrinsics selects the path)
     case vmIntrinsics::_dsin:
       return lower_dual_path_libm(llvm::Intrinsic::sin,
+                                  "StubRoutines_dsin",
                                   &JeandleRuntimeRoutine::StubRoutines_dsin_callee,
+                                  "SharedRuntime_dsin",
                                   &JeandleRuntimeRoutine::SharedRuntime_dsin_callee);
     case vmIntrinsics::_dcos:
       return lower_dual_path_libm(llvm::Intrinsic::cos,
+                                  "StubRoutines_dcos",
                                   &JeandleRuntimeRoutine::StubRoutines_dcos_callee,
+                                  "SharedRuntime_dcos",
                                   &JeandleRuntimeRoutine::SharedRuntime_dcos_callee);
     case vmIntrinsics::_dtan:
       return lower_dual_path_libm(llvm::Intrinsic::tan,
+                                  "StubRoutines_dtan",
                                   &JeandleRuntimeRoutine::StubRoutines_dtan_callee,
+                                  "SharedRuntime_dtan",
                                   &JeandleRuntimeRoutine::SharedRuntime_dtan_callee);
     case vmIntrinsics::_dlog:
       return lower_dual_path_libm(llvm::Intrinsic::log,
+                                  "StubRoutines_dlog",
                                   &JeandleRuntimeRoutine::StubRoutines_dlog_callee,
+                                  "SharedRuntime_dlog",
                                   &JeandleRuntimeRoutine::SharedRuntime_dlog_callee);
     case vmIntrinsics::_dlog10:
       return lower_dual_path_libm(llvm::Intrinsic::log10,
+                                  "StubRoutines_dlog10",
                                   &JeandleRuntimeRoutine::StubRoutines_dlog10_callee,
+                                  "SharedRuntime_dlog10",
                                   &JeandleRuntimeRoutine::SharedRuntime_dlog10_callee);
     case vmIntrinsics::_dexp:
       return lower_dual_path_libm(llvm::Intrinsic::exp,
+                                  "StubRoutines_dexp",
                                   &JeandleRuntimeRoutine::StubRoutines_dexp_callee,
+                                  "SharedRuntime_dexp",
                                   &JeandleRuntimeRoutine::SharedRuntime_dexp_callee);
 
     // JavaOp calls
@@ -404,46 +379,41 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(llvm::FunctionCallee cal
   return site;
 }
 
-llvm::CallBase* JeandleIntrinsicLowering::emit_java_op_call(const char* java_op_name,
-                                                            const CallSiteAttributeMetadata& attrs,
-                                                            llvm::ArrayRef<llvm::Value*> args) {
-  assert(java_op_name != nullptr, "JavaOp lowering requires a JavaOp symbol");
-  llvm::Function* java_op = _interp->_module.getFunction(java_op_name);
-  assert(java_op != nullptr, "invalid JavaOp");
-  return emit_callsite(java_op, llvm::CallingConv::Hotspot_JIT, args, attrs);
-}
-
 // =============================================================================
-// emit_llvm_builtin — emit a single llvm.* intrinsic call
+// emit_llvm_builtin — emit a llvm.* intrinsic call
 // =============================================================================
 
-static bool llvm_intrinsic_takes_trailing_i1(llvm::Intrinsic::ID id) {
-  return id == llvm::Intrinsic::abs ||
-         id == llvm::Intrinsic::ctlz ||
-         id == llvm::Intrinsic::cttz;
-}
-
-bool JeandleIntrinsicLowering::emit_llvm_builtin(llvm::Intrinsic::ID llvm_id) {
+bool JeandleIntrinsicLowering::emit_llvm_builtin(llvm::Intrinsic::ID llvm_id,
+                                                   llvm::ArrayRef<llvm::Value*> extra_args) {
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   ciSignature* sig = _target->signature();
-  BasicType operand_type = sig->type_at(0)->basic_type();
-  BasicType result_type  = sig->return_type()->basic_type();
+  const int java_arg_count = sig->count();
+  assert(_target->is_static(), "emit_llvm_builtin only supports static methods");
 
-  llvm::SmallVector<llvm::Value*, 2> args;
-  args.push_back(_interp->_jvm->pop(operand_type));
-  if (llvm_intrinsic_takes_trailing_i1(llvm_id)) {
-    args.push_back(builder.getInt1(false));
+  BasicType return_type = sig->return_type()->basic_type();
+
+  // Compute computational types for JVM stack pops.
+  llvm::SmallVector<BasicType, 4> pop_types(java_arg_count);
+  for (int i = 0; i < java_arg_count; ++i) {
+    pop_types[i] = JeandleType::actual2computational(sig->type_at(i)->basic_type());
   }
+
+  // Pop Java args from the JVM stack in reverse order (LIFO).
+  llvm::SmallVector<llvm::Value*, 4> args;
+  args.reserve(java_arg_count + extra_args.size());
+  args.resize(java_arg_count);
+  for (int i = java_arg_count - 1; i >= 0; --i) {
+    args[i] = _interp->_jvm->pop(pop_types[i]);
+  }
+
+  // Append any extra LLVM-level arguments (e.g., i1 false for llvm.abs/ctlz/cttz).
+  args.append(extra_args.begin(), extra_args.end());
 
   llvm::CallInst* call = builder.CreateIntrinsic(
-      JeandleType::java2llvm(operand_type, ctx), llvm_id, args);
+      JeandleType::java2llvm(return_type, ctx), llvm_id, args);
 
-  llvm::Value* result = call;
-  if (result_type != operand_type) {
-    result = builder.CreateTrunc(call, JeandleType::java2llvm(result_type, ctx));
-  }
-  _interp->_jvm->push(result_type, result);
+  _interp->_jvm->push(return_type, call);
   return true;
 }
 
@@ -452,15 +422,16 @@ bool JeandleIntrinsicLowering::emit_llvm_builtin(llvm::Intrinsic::ID llvm_id) {
 // =============================================================================
 
 bool JeandleIntrinsicLowering::lower_dual_path_libm(llvm::Intrinsic::ID llvm_id,
+                                                     const char* stub_name,
                                                      JeandleRuntimeCalleeFn stub_fn,
+                                                     const char* shared_name,
                                                      JeandleRuntimeCalleeFn shared_fn) {
   if (JeandleUseHotspotIntrinsics) {
     // Try HotSpot runtime stub -> SharedRuntime -> llvm builtin
-    const JeandleRuntimeAvailability avail = runtime_availability(_target->intrinsic_id());
     JeandleRuntimeCalleeFn fn = nullptr;
-    if (avail.has_hotspot_stub && stub_fn != nullptr) {
+    if (JeandleRuntimeRoutine::find_routine_entry(stub_name) != nullptr) {
       fn = stub_fn;
-    } else if (avail.has_shared_runtime && shared_fn != nullptr) {
+    } else if (JeandleRuntimeRoutine::find_routine_entry(shared_name) != nullptr) {
       fn = shared_fn;
     }
     if (fn != nullptr) {
@@ -709,11 +680,10 @@ bool JeandleIntrinsicLowering::lower_pow() {
   // Resolve the Java-semantics pow routine: StubRoutines then SharedRuntime.
   // SharedRuntime::dpow always exists, so resolution cannot fail.
   JeandleIntrinsicEntrypoint entry;
-  const JeandleRuntimeAvailability avail = runtime_availability(vmIntrinsics::_dpow);
   JeandleRuntimeCalleeFn fn = nullptr;
-  if (avail.has_hotspot_stub) {
+  if (JeandleRuntimeRoutine::find_routine_entry("StubRoutines_dpow") != nullptr) {
     fn = &JeandleRuntimeRoutine::StubRoutines_dpow_callee;
-  } else if (avail.has_shared_runtime) {
+  } else if (JeandleRuntimeRoutine::find_routine_entry("SharedRuntime_dpow") != nullptr) {
     fn = &JeandleRuntimeRoutine::SharedRuntime_dpow_callee;
   }
   guarantee(fn != nullptr, "Math.pow needs a HotSpot dpow stub or SharedRuntime routine");
