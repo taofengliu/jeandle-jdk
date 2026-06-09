@@ -279,10 +279,19 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
                                   "SharedRuntime_dexp",
                                   &JeandleRuntimeRoutine::SharedRuntime_dexp_callee);
 
-    // JavaOp calls
+    // getClass
+    //
+    // TODO 1: When the receiver's Java type is known at compile time (e.g., the
+    // result of a `new` bytecode which carries a `java-klass` return attribute),
+    // we can skip the `jeandle.load_klass` call that reads the object header and
+    // use the known Klass pointer directly.
+    //
+    // TODO 2: Optimize the comparison between class pointers.
     case vmIntrinsics::_getClass:
       return lower_java_op("jeandle.get_class",
                            {CTRL_NONE, MEM_READ | MEM_NEEDS_GC_STATE});
+
+    // Reference*
     case vmIntrinsics::_Reference_get:
       return lower_java_op("jeandle.reference_get",
                            {CTRL_NONE, MEM_READ | MEM_NEEDS_GC_STATE});
@@ -290,6 +299,8 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_PhantomReference_refersTo0:
       return lower_java_op("jeandle.reference_refers_to",
                            {CTRL_NONE, MEM_READ | MEM_NEEDS_GC_STATE});
+
+    // newArray
     case vmIntrinsics::_newArray:
       return lower_java_op("jeandle.new_array",
                            {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE});

@@ -202,6 +202,9 @@ JAVA_OP_END
 //   2. Load the OopHandle pointer from klass + java_mirror_offset  -> oop* in C heap.
 //   3. Dereference the OopHandle to get the actual mirror oop in the Java heap.
 // The mirror is always reachable (a GC root inside the Klass), so no null check is needed.
+//
+// TODO: When the receiver's Klass is known at compile time (via `java-klass` attribute),
+// Step 1 (jeandle.load_klass) can be skipped.
 DEF_JAVA_OP(get_class, 1, llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace))  // obj (receiver)
   llvm::Value* obj = func->getArg(0);
@@ -248,7 +251,6 @@ DEF_JAVA_OP(reference_refers_to, 1, llvm::Type::getInt32Ty(context),
   // Raw load: no atomic ordering, no GC barrier.
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
   // TODO(reinstate-cpuorder-barrier): CPUOrder barrier missing after this load;
-  // blocked on the LLVM RS4GC inline-asm gap (see emit_reference_referent_cpu_order_barrier).
   llvm::Value* is_equal = ir_builder.CreateICmpEQ(referent, compare_to);
   // JVM boolean on the operand stack is i32
   llvm::Value* result = ir_builder.CreateZExt(is_equal, ir_builder.getInt32Ty());
@@ -271,7 +273,6 @@ DEF_JAVA_OP(reference_get, 1,
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
   referent->setAtomic(llvm::AtomicOrdering::Acquire);
   // TODO(reinstate-cpuorder-barrier): CPUOrder barrier missing after this load;
-  // blocked on the LLVM RS4GC inline-asm gap (see emit_reference_referent_cpu_order_barrier).
   if (UseG1GC) {
     llvm::Function* barrier_func = template_module.getFunction("jeandle.g1_pre_barrier_loaded");
     assert(barrier_func != nullptr, "jeandle.g1_pre_barrier_loaded not found");
