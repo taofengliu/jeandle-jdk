@@ -32,7 +32,7 @@
 // Arch-specific CPU feature checks (RISC-V)
 // =============================================================================
 
-bool cpu_supports_rounding() {
+bool JeandleIntrinsicLowering::cpu_supports_rounding() {
   // RISC-V rounding intrinsics are not yet supported by Jeandle.
   // When support is added, this should return true (LLVM provides custom
   // lowering via fcvt even without the Zfa extension).
@@ -40,14 +40,14 @@ bool cpu_supports_rounding() {
   return false;
 }
 
-bool cpu_supports_popcount() {
+bool JeandleIntrinsicLowering::cpu_supports_popcount() {
   // RISC-V popcount intrinsics are not yet supported by Jeandle.
   // When support is added, this should check UsePopCountInstruction (Zbb).
   ShouldNotReachHere();
   return false;
 }
 
-bool cpu_supports_spin_wait() {
+bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   // RISC-V PAUSE instruction requires the Zihintpause extension.
   // UseZihintpause is set by VM_Version when the hardware supports it.
   return UseZihintpause;

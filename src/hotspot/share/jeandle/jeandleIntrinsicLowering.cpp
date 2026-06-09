@@ -25,7 +25,6 @@
 #include "llvm/IR/InlineAsm.h"
 
 #include "jeandle/jeandleAbstractInterpreter.hpp"
-#include "jeandle/jeandleCallSiteAttr.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleType.hpp"
 #include "jeandle/jeandleUtils.hpp"
@@ -47,15 +46,6 @@
 static void mark_gc_leaf(llvm::CallBase* call) {
   llvm::LLVMContext& ctx = call->getContext();
   call->addFnAttr(llvm::Attribute::get(ctx, "gc-leaf-function"));
-}
-
-llvm::SmallVector<llvm::OperandBundleDef, 1>
-build_operand_bundles(JeandleAbstractInterpreter* interp, bool attach_deopt_bundle) {
-  llvm::SmallVector<llvm::OperandBundleDef, 1> bundles;
-  if (attach_deopt_bundle) {
-    bundles.push_back(interp->create_current_deopt_bundle());
-  }
-  return bundles;
 }
 
 void annotate_call(llvm::CallBase* call,
@@ -366,8 +356,10 @@ llvm::CallBase* JeandleIntrinsicLowering::emit_callsite(llvm::FunctionCallee cal
                                                         llvm::ArrayRef<llvm::Value*> args,
                                                         const CallSiteAttributeMetadata& attrs,
                                                         bool is_gc_leaf_entry) {
-  llvm::SmallVector<llvm::OperandBundleDef, 1> bundles =
-    build_operand_bundles(_interp, attrs.attach_deopt_bundle());
+  llvm::SmallVector<llvm::OperandBundleDef, 1> bundles;
+  if (attrs.attach_deopt_bundle()) {
+    bundles.push_back(_interp->create_current_deopt_bundle());
+  }
   llvm::CallBase* site;
   if (attrs.needs_exception_edge()) {
     site = _interp->create_call_ex(callee, args, cc, bundles);

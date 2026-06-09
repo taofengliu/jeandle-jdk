@@ -32,19 +32,19 @@
 // Arch-specific CPU feature checks (AArch64)
 // =============================================================================
 
-bool cpu_supports_rounding() {
+bool JeandleIntrinsicLowering::cpu_supports_rounding() {
   // AArch64 has FRINTM/FRINTP/FRINTX/FRINTI/FRINTA/FRINTN/FRINTZ as part of
   // the base FP ISA (ARMv8-A). Rounding is always available.
   return true;
 }
 
-bool cpu_supports_popcount() {
+bool JeandleIntrinsicLowering::cpu_supports_popcount() {
   // AArch64 always supports popcount via the NEON CNT instruction plus UADDV,
   // or via the CSSC scalar CNT instruction (ARMv8.8+/ARMv9.3+).
   return true;
 }
 
-bool cpu_supports_spin_wait() {
+bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   // The spin-wait hint uses YIELD/ISB/NOP depending on the OnSpinWaitInst flag.
   // When OnSpinWaitInst is "none" (diagnostic default unset), no hint is emitted.
   return VM_Version::supports_on_spin_wait();

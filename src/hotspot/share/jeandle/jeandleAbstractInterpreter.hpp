@@ -293,10 +293,6 @@ class JeandleAbstractInterpreter : public StackObj {
  private:
   friend class JeandleIntrinsicLowering;
 
-  // Free functions in jeandleCallSiteAttr.hpp that need access to private members.
-  friend llvm::SmallVector<llvm::OperandBundleDef, 1> build_operand_bundles(
-      JeandleAbstractInterpreter*, bool);
-
   ciMethod* _method;
   llvm::Function* _llvm_func;
   int _entry_bci;

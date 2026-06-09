@@ -64,21 +64,11 @@
 
 namespace {
 
-// We cannot obtain contexts such as BCI in DEF_JAVA_OP. 
+// We cannot obtain contexts such as BCI in DEF_JAVA_OP.
 // But we can pass the external deopt bundle into this empty one via inlining.
 llvm::OperandBundleDef create_empty_deopt_bundle() {
   return llvm::OperandBundleDef("deopt", llvm::SmallVector<llvm::Value*>{});
 }
-
-// TODO(reinstate-cpuorder-barrier): Reference.referent loads are MISSING the
-// Op_MemBarCPUOrder that C2 emits to stop the load being commoned across a
-// safepoint where GC may clear the field.  The barrier — an empty side-effecting
-// `asm sideeffect "", "~{memory}"` after the load — cannot be emitted until
-// jeandle-llvm's RewriteStatepointsForGC skips inline asm in its NeedsRewrite
-// predicate (add `if (Call->isInlineAsm()) return false;`, matching the sibling
-// PlaceSafepoints pass).  Without that skip, RS4GC wraps the barrier in a
-// gc.statepoint and aborts with "Cannot take the address of an inline asm!".
-// Once LLVM has the skip, emit the barrier here via the helper below.
 
 DEF_JAVA_OP(current_thread, 0, llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))
   llvm::NamedMDNode* thread_register = template_module.getNamedMetadata(llvm::jeandle::Metadata::CurrentThread);
@@ -205,10 +195,6 @@ DEF_JAVA_OP(post_barrier, 1, llvm::Type::getVoidTy(context),
   }
   ir_builder.CreateRetVoid();
 JAVA_OP_END
-
-// Note: jeandle.new_instance is defined in template.ll (with TLAB fast path).
-// Do not re-declare it here; DEF_JAVA_OP would obtain the existing function
-// via getOrInsertFunction() and shadow the original entry block.
 
 // Object.getClass(): load the java.lang.Class mirror for an object.
 // Two-level load via the OopHandle stored in Klass::_java_mirror:
@@ -473,7 +459,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("ObjectMonitor.succ_offset_no_monitor_value",       int32_type, static_cast<uint64_t>(OM_OFFSET_NO_MONITOR_VALUE_TAG(succ)));
   define_global("instanceOopDesc.base_offset_in_bytes",             int32_type, static_cast<uint64_t>(instanceOopDesc::base_offset_in_bytes()));
 
-  
+
   define_global("markWord.clear_lock_mask",                         int64_type, static_cast<uint64_t>(~(int32_t)markWord::lock_mask_in_place));
   define_global("markWord.monitor_value",                           int64_type, static_cast<uint64_t>(markWord::monitor_value));
   define_global("markWord.unlocked_value",                          int64_type, static_cast<uint64_t>(markWord::unlocked_value));
@@ -482,7 +468,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("JavaThread.tlab_end_offset",                       int64_type, static_cast<uint64_t>(JavaThread::tlab_end_offset()));
   define_global("JavaThread.tlab_top_offset",                       int64_type, static_cast<uint64_t>(JavaThread::tlab_top_offset()));
   define_global("markWord.prototype_value",                         int64_type, static_cast<uint64_t>(markWord::prototype().value()));
-  
+
   define_global("JVM_ACC_IS_VALUE_BASED_CLASS",                     int32_type, static_cast<uint64_t>(JVM_ACC_IS_VALUE_BASED_CLASS));
   define_global("oopSize",                                          int32_type, static_cast<uint64_t>(oopSize));
 

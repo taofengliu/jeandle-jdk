@@ -32,7 +32,7 @@
 // Arch-specific CPU feature checks (x86)
 // =============================================================================
 
-bool cpu_supports_rounding() {
+bool JeandleIntrinsicLowering::cpu_supports_rounding() {
   // SSE4.1 provides ROUNDSS/ROUNDSD instructions for floor/ceil/rint.
   // UseSSE >= 4 reflects both hardware detection and user overrides,
   // and is what apply_vm_flag_feature_overrides() reads to control the
@@ -40,14 +40,14 @@ bool cpu_supports_rounding() {
   return UseSSE >= 4;
 }
 
-bool cpu_supports_popcount() {
+bool JeandleIntrinsicLowering::cpu_supports_popcount() {
   // POPCNT instruction for bitCount_i/bitCount_l.
   // UsePopCountInstruction is set by VM_Version when the hardware supports
   // it and can be overridden via -XX:-UsePopCountInstruction.
   return UsePopCountInstruction;
 }
 
-bool cpu_supports_spin_wait() {
+bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   // PAUSE is part of SSE2, which is baseline on x86-64.
   return true;
 }
