@@ -21,11 +21,6 @@
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
-#include "asm/macroAssembler.hpp"
-#include "asm/macroAssembler.inline.hpp"
-#include "code/codeBlob.hpp"
-#include "compiler/oopMap.hpp"
-#include "memory/resourceArea.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 
 #define __ masm->
@@ -127,7 +122,7 @@ void JeandleRuntimeRoutine::generate_exceptional_return() {
 
   // For not confusing exception handler, clear the exception pc.
   __ str(zr, Address(rthread, JavaThread::exception_pc_offset()));
-  
+
   // Pop the exception pc to r3. Exception handler will use this.
   __ ldp(rfp, exception_pc, Address(__ post(sp, 2 * wordSize)));
 

@@ -325,8 +325,6 @@ bool RuntimeDefinedJavaOps::define_all(llvm::Module& template_module) {
   define_card_table_barrier(template_module);
   define_pre_barrier(template_module);
   define_post_barrier(template_module);
-  // jeandle.new_instance is defined inline in template.ll (with TLAB fast path).
-  // jeandle.new_array is defined inline in template.ll (unified array allocation JavaOp).
   define_get_class(template_module);
   define_reference_refers_to(template_module);
   define_reference_get(template_module);

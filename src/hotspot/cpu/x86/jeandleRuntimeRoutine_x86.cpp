@@ -24,7 +24,6 @@
 #include "asm/macroAssembler.hpp"
 #include "asm/macroAssembler.inline.hpp"
 #include "code/codeBlob.hpp"
-#include "compiler/oopMap.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/oopsHierarchy.hpp"
 #include "runtime/frame.hpp"
