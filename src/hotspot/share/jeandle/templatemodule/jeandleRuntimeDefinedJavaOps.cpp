@@ -232,9 +232,11 @@ DEF_JAVA_OP(get_class, 1, llvm::PointerType::get(context, llvm::jeandle::AddrSpa
   ir_builder.CreateRet(mirror);
 JAVA_OP_END
 
-// Reference.refersTo0: raw load of the referent field, compare with obj, return boolean as i32.
-// This intentionally bypasses GC barriers: refersTo0 compares raw pointer identity
-// without triggering reference processing.
+// Reference.refersTo0 / PhantomReference.refersTo0:
+// Load the referent field and compare with the given object, returning a boolean.
+// No GC barrier is applied (AS_NO_KEEPALIVE semantics): refersTo0 should not keep
+// the referent alive. Equivalent to C2's inline_reference_refersTo0() which uses
+// the AS_NO_KEEPALIVE decorator to suppress the G1 SATB pre-barrier.
 DEF_JAVA_OP(reference_refers_to, 1, llvm::Type::getInt32Ty(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),  // reference (this)
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace))  // obj
@@ -248,16 +250,26 @@ DEF_JAVA_OP(reference_refers_to, 1, llvm::Type::getInt32Ty(context),
   llvm::Value* offset = ir_builder.CreateLoad(ir_builder.getInt32Ty(), offset_gv);
   llvm::Value* referent_addr = ir_builder.CreateInBoundsGEP(ir_builder.getInt8Ty(), ref_obj, offset);
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
-  // Raw load: no atomic ordering, no GC barrier.
+  // Unordered atomic load: safe under concurrent GC writes (a plain non-atomic
+  // load has undefined behavior when the GC concurrently clears the referent).
+  // No GC barrier because refersTo0 uses AS_NO_KEEPALIVE semantics.
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
-  // TODO(reinstate-cpuorder-barrier): CPUOrder barrier missing after this load;
+  referent->setAtomic(llvm::AtomicOrdering::Unordered);
+  // CPUOrder fence: equivalent to C2's MemBarCPUOrder. Prevents the compiler from
+  // CSE'ing this referent load across safepoints (GC can change the referent at
+  // any safepoint). Singlethread scope ensures no hardware fence instructions.
+  ir_builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent,
+                         llvm::SyncScope::SingleThread);
   llvm::Value* is_equal = ir_builder.CreateICmpEQ(referent, compare_to);
   // JVM boolean on the operand stack is i32
   llvm::Value* result = ir_builder.CreateZExt(is_equal, ir_builder.getInt32Ty());
   ir_builder.CreateRet(result);
 JAVA_OP_END
 
-// Reference.get: acquire-load the referent and apply the collector barrier here.
+// Reference.get: load the referent, apply the G1 SATB pre-barrier (if using G1GC),
+// and insert a CPUOrder fence to prevent the optimizer from CSE'ing referent loads
+// across safepoints (GC can change the referent value asynchronously).
+// Equivalent to C2's inline_reference_get(): Unordered load + MemBarCPUOrder.
 DEF_JAVA_OP(reference_get, 1,
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace))
@@ -270,15 +282,27 @@ DEF_JAVA_OP(reference_get, 1,
   llvm::Value* offset = ir_builder.CreateLoad(ir_builder.getInt32Ty(), offset_gv);
   llvm::Value* referent_addr = ir_builder.CreateInBoundsGEP(ir_builder.getInt8Ty(), ref_obj, offset);
   llvm::Type* ref_type = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+  // Unordered atomic load: matches C2's LoadNode::Unordered for Reference.get().
+  // Acquire is unnecessarily strong on AArch64/RISC-V; Unordered plus the fence
+  // below provides the same compiler-side ordering guarantee as C2's MemBarCPUOrder.
   llvm::LoadInst* referent = ir_builder.CreateLoad(ref_type, referent_addr);
-  referent->setAtomic(llvm::AtomicOrdering::Acquire);
-  // TODO(reinstate-cpuorder-barrier): CPUOrder barrier missing after this load;
+  referent->setAtomic(llvm::AtomicOrdering::Unordered);
+  // G1 SATB pre-barrier: record the loaded referent value so concurrent marking
+  // does not miss it. In C2, the ON_WEAK_OOP_REF decorator triggers this in the
+  // GC barrier set; here we call the barrier directly with the already-loaded value.
   if (UseG1GC) {
     llvm::Function* barrier_func = template_module.getFunction("jeandle.g1_pre_barrier_loaded");
     assert(barrier_func != nullptr, "jeandle.g1_pre_barrier_loaded not found");
     llvm::CallInst* call = ir_builder.CreateCall(barrier_func, {referent});
     call->setCallingConv(llvm::CallingConv::Hotspot_JIT);
   }
+  // CPUOrder fence: equivalent to C2's MemBarCPUOrder. Prevents the compiler from
+  // commoning/CSE'ing this referent load across safepoints, since GC can clear the
+  // referent at any safepoint. The singlethread scope ensures no hardware fence
+  // instructions are emitted (x86/AArch64/RISC-V lower this to ISD::MEMBARRIER,
+  // which becomes a no-op in assembly).
+  ir_builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent,
+                         llvm::SyncScope::SingleThread);
   ir_builder.CreateRet(referent);
 JAVA_OP_END
 

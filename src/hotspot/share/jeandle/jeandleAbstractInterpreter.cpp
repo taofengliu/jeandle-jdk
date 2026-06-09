@@ -2323,11 +2323,24 @@ void JeandleAbstractInterpreter::do_get_xxx(ciField* field, bool is_static) {
   // rather than inserting the barrier here in the frontend.
   // Late insertion is preferred for GC barriers as it preserves
   // optimization opportunities in earlier passes.
-  if (UseG1GC && !is_static && is_reference_type(field->layout_type()) &&
+  //
+  // CPUOrder fence after loading the Reference.referent field. Prevents the
+  // optimizer from CSE'ing the referent load across safepoints, since GC can
+  // change the referent value at any safepoint. This is the same MemBarCPUOrder
+  // that C2 inserts unconditionally after referent loads in
+  // inline_reference_get() and inline_reference_refersTo0().
+  // The CPUOrder fence is GC-independent — it is needed regardless of which
+  // collector is in use. The singlethread scope ensures no hardware fence
+  // instructions are emitted on any supported platform.
+  if (!is_static && is_reference_type(field->layout_type()) &&
       field->holder()->is_subclass_of(ciEnv::current()->Reference_klass()) &&
       field->offset_in_bytes() == java_lang_ref_Reference::referent_offset()) {
     assert(value != nullptr, "must be loaded already");
-    call_java_op("jeandle.g1_pre_barrier_loaded", {value});
+    if (UseG1GC) {
+      call_java_op("jeandle.g1_pre_barrier_loaded", {value});
+    }
+    _ir_builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent,
+                            llvm::SyncScope::SingleThread);
   }
 
   // Attach java-klass metadata to loads of object/array fields.
