@@ -302,8 +302,7 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
 
     // newArray
     case vmIntrinsics::_newArray:
-      return lower_java_op("jeandle.new_array",
-                           {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE});
+      return lower_new_array();
 
     // bitcast
     case vmIntrinsics::_floatToRawIntBits:
@@ -656,6 +655,95 @@ bool JeandleIntrinsicLowering::lower_compare_unsigned(vmIntrinsics::ID id) {
   llvm::Value* result = _interp->_ir_builder.CreateSelect(
       is_less, JeandleType::int_const(_interp->_ir_builder, -1), select_greater);
   _interp->_jvm->ipush(result);
+  return true;
+}
+
+// ---- lower_new_array ----
+//
+// Generates inline IR for Array.newInstance(Class<?>, int):
+//   1. Null-check mirror  →  slow path (NPE)
+//   2. Acquire-load klass from mirror  →  if null → slow path
+//   3. Fast path: call unified jeandle.new_array(klass, length)
+//   4. Slow path: call new_array_from_mirror(mirror, length, thread)
+//   5. PHI merge
+bool JeandleIntrinsicLowering::lower_new_array() {
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  llvm::Module& module = _interp->_module;
+
+  // Pop mirror (Class<?>) and length (int) from JVM stack.
+  // Array.newInstance(Class<?>, int) is a static method.
+  llvm::Value* length = _interp->_jvm->ipop();
+  llvm::Value* mirror = _interp->_jvm->apop();
+
+  llvm::PointerType* java_heap_ptr_ty =
+      llvm::PointerType::get(ctx, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+  llvm::PointerType* c_heap_ptr_ty =
+      llvm::PointerType::get(ctx, llvm::jeandle::AddrSpace::CHeapAddrSpace);
+
+  // Create basic blocks for the fast/slow dispatch.
+  llvm::BasicBlock* klass_load_bb =
+      llvm::BasicBlock::Create(ctx, "newarray_klass_load", _interp->_llvm_func);
+  llvm::BasicBlock* fast_bb =
+      llvm::BasicBlock::Create(ctx, "newarray_fast", _interp->_llvm_func);
+  llvm::BasicBlock* slow_bb =
+      llvm::BasicBlock::Create(ctx, "newarray_slow", _interp->_llvm_func);
+  llvm::BasicBlock* merge_bb =
+      llvm::BasicBlock::Create(ctx, "newarray_merge", _interp->_llvm_func);
+
+  // Null guard: null mirror → slow path (will throw NPE via Reflection).
+  llvm::Value* mirror_is_null = builder.CreateICmpEQ(
+      mirror, llvm::ConstantPointerNull::get(java_heap_ptr_ty));
+  builder.CreateCondBr(mirror_is_null, slow_bb, klass_load_bb);
+
+  // Klass-load block: acquire-load the cached array_klass from the mirror.
+  builder.SetInsertPoint(klass_load_bb);
+  llvm::GlobalVariable* offset_gv =
+      module.getGlobalVariable("java_lang_Class.array_klass_offset", /*AllowInternal=*/true);
+  llvm::Value* offset = builder.CreateLoad(builder.getInt32Ty(), offset_gv);
+  llvm::Value* klass_field_addr =
+      builder.CreateInBoundsGEP(builder.getInt8Ty(), mirror, offset);
+  llvm::LoadInst* klass = builder.CreateLoad(c_heap_ptr_ty, klass_field_addr);
+  klass->setAtomic(llvm::AtomicOrdering::Acquire);
+  klass->setAlignment(llvm::Align(sizeof(void*)));
+  llvm::Value* klass_is_null = builder.CreateICmpEQ(
+      klass, llvm::ConstantPointerNull::get(c_heap_ptr_ty));
+  builder.CreateCondBr(klass_is_null, slow_bb, fast_bb);
+
+  // Fast path: klass resolved → call unified jeandle.new_array(klass, length).
+  builder.SetInsertPoint(fast_bb);
+  static constexpr CallSiteAttributeMetadata fast_attrs =
+      {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE};
+  llvm::Function* new_array_op = module.getFunction("jeandle.new_array");
+  llvm::CallBase* fast_call =
+      emit_callsite(new_array_op, llvm::CallingConv::Hotspot_JIT, {klass, length}, fast_attrs);
+  // emit_callsite with exception edge moves builder to a new normal_dest block.
+  builder.CreateBr(merge_bb);
+  llvm::BasicBlock* fast_normal_bb = builder.GetInsertBlock();
+
+  // Slow path: klass not cached or mirror is null → call new_array_from_mirror.
+  builder.SetInsertPoint(slow_bb);
+  llvm::Function* current_thread_fn = module.getFunction("jeandle.current_thread");
+  llvm::CallInst* current_thread = builder.CreateCall(current_thread_fn);
+  current_thread->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+
+  static constexpr CallSiteAttributeMetadata slow_attrs =
+      {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE};
+  llvm::CallBase* slow_call = emit_callsite(
+      JeandleRuntimeRoutine::new_array_from_mirror_callee(module),
+      llvm::CallingConv::Hotspot_JIT,
+      {mirror, length, current_thread}, slow_attrs);
+  builder.CreateBr(merge_bb);
+  llvm::BasicBlock* slow_normal_bb = builder.GetInsertBlock();
+
+  // Merge results via PHI.
+  builder.SetInsertPoint(merge_bb);
+  _interp->_block->set_tail_llvm_block(merge_bb);
+  llvm::PHINode* result = builder.CreatePHI(java_heap_ptr_ty, 2, "newarray.result");
+  result->addIncoming(fast_call, fast_normal_bb);
+  result->addIncoming(slow_call, slow_normal_bb);
+
+  _interp->_jvm->apush(result);
   return true;
 }
 

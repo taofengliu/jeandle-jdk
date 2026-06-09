@@ -190,6 +190,7 @@ class JeandleIntrinsicLowering : public StackObj {
   bool lower_pow();
   bool lower_count_positives();
   bool lower_compare_unsigned(vmIntrinsics::ID id);
+  bool lower_new_array();
 
   // Attach JavaKlass/JavaKlassExact return-type attributes to a call site.
   void attach_callee_return_klass_attr(llvm::CallBase* call) const;

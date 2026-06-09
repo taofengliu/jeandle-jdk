@@ -3056,7 +3056,7 @@ void JeandleAbstractInterpreter::do_unified_newarray(Klass* array_klass) {
   llvm::Value* array_klass_addr = _ir_builder.getInt64((intptr_t)array_klass);
   llvm::Value* array_klass_ptr =  _ir_builder.CreateIntToPtr(array_klass_addr, klass_type);
 
-  llvm::InvokeInst* result = call_java_op_ex("jeandle.newarray", {array_klass_ptr, length}, {create_current_deopt_bundle()});
+  llvm::InvokeInst* result = call_java_op_ex("jeandle.new_array", {array_klass_ptr, length}, {create_current_deopt_bundle()});
 
   // newarray always produces an exact type.
   result->addRetAttr(llvm::Attribute::get(*_context,
@@ -3124,7 +3124,7 @@ void JeandleAbstractInterpreter::multianewarray() {
 
     llvm::Value* dimensions_array_length = _ir_builder.getInt32(ndimensions);
 
-    llvm::InvokeInst* dimensions_array_oop = call_java_op_ex("jeandle.newarray", {int_array_klass_ptr, dimensions_array_length},
+    llvm::InvokeInst* dimensions_array_oop = call_java_op_ex("jeandle.new_array", {int_array_klass_ptr, dimensions_array_length},
                                                              {create_current_deopt_bundle()});
     RETURN_VOID_ON_JEANDLE_ERROR();
 

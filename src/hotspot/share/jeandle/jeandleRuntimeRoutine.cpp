@@ -187,6 +187,16 @@ JRT_END
 // Called as the slow path when the cached array_klass field in the mirror is null.
 // Delegates to Reflection::reflect_new_array which handles klass resolution, primitive
 // types, dimension limit checks, and NegativeArraySizeException / NullPointerException.
+//
+// Unlike C2, which calls back into the Java method Array.newInstance() via a
+// CallStaticJavaNode (eventually reaching JVM_NewArray -> Reflection::reflect_new_array),
+// Jeandle calls Reflection::reflect_new_array directly. This avoids the overhead of
+// JNI transitions (Java -> native -> VM) and JNI handle marshalling. The two approaches
+// are functionally equivalent: both end up invoking the same underlying allocation logic
+// with identical exception semantics (NPE, NegativeArraySizeException, dimension limits).
+// The only minor difference is that JVMTI VMObjectAlloc events are not posted here,
+// but note that C2's intrinsified fast path (AllocateArrayNode) also skips those events,
+// so this is consistent with standard JIT intrinsification behavior.
 JRT_BLOCK_ENTRY(void, JeandleRuntimeRoutine::new_array_from_mirror(oopDesc* mirror, int length, JavaThread* current))
   JRT_BLOCK
 #ifndef PRODUCT
