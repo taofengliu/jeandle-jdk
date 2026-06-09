@@ -544,9 +544,9 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(vmIntrinsics::ID 
   builder.CreateCondBr(idx_oob, fail_range, pass);
 
   _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
-                         Deoptimization::Action_maybe_recompile, fail_pre);
+                         Deoptimization::Action_make_not_entrant, fail_pre);
   _interp->uncommon_trap(Deoptimization::Reason_range_check,
-                         Deoptimization::Action_maybe_recompile, fail_range);
+                         Deoptimization::Action_make_not_entrant, fail_range);
 
   builder.SetInsertPoint(pass);
   _interp->_block->set_tail_llvm_block(pass);
@@ -558,16 +558,6 @@ bool JeandleIntrinsicLowering::lower_preconditions_check_index(vmIntrinsics::ID 
     _interp->_jvm->ipop(); // length
     _interp->_jvm->ipop(); // index
   }
-
-  llvm::Value* len_nonneg = builder.CreateICmp(llvm::CmpInst::ICMP_SGE, length, zero,
-                                               "checkIndex.len_nonneg");
-  llvm::Value* non_neg    = builder.CreateICmp(llvm::CmpInst::ICMP_SGE, index, zero,
-                                               "checkIndex.nonneg");
-  llvm::Value* below_len  = builder.CreateICmp(llvm::CmpInst::ICMP_SLT, index, length,
-                                               "checkIndex.below_len");
-  builder.CreateIntrinsic(llvm::Intrinsic::assume, llvm::ArrayRef<llvm::Type*>{}, {len_nonneg});
-  builder.CreateIntrinsic(llvm::Intrinsic::assume, llvm::ArrayRef<llvm::Type*>{}, {non_neg});
-  builder.CreateIntrinsic(llvm::Intrinsic::assume, llvm::ArrayRef<llvm::Type*>{}, {below_len});
 
   if (is_long) {
     _interp->_jvm->lpush(index);
