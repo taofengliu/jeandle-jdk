@@ -194,7 +194,7 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
 
     case vmIntrinsics::_bitCount_i:
     case vmIntrinsics::_bitCount_l:
-      return emit_llvm_builtin(llvm::Intrinsic::ctpop);
+      return lower_bit_count(id);
 
     // Dual-path libm (JeandleUseHotspotIntrinsics selects the path)
     // TODO/FIXME: LLVM's `llvm.sin`, `llvm.cos`, etc. do **not** guarantee
@@ -547,6 +547,30 @@ bool JeandleIntrinsicLowering::lower_compare_unsigned(vmIntrinsics::ID id) {
   llvm::Value* result = _interp->_ir_builder.CreateSelect(
       is_less, JeandleType::int_const(_interp->_ir_builder, -1), select_greater);
   _interp->_jvm->ipush(result);
+  return true;
+}
+
+// ---- lower_bit_count ----
+// Integer.bitCount(int) -> llvm.ctpop.i32 -> i32        (type matches, no truncate)
+// Long.bitCount(long)   -> llvm.ctpop.i64 -> i64 -> trunc i32  (type mismatch: Java returns int)
+bool JeandleIntrinsicLowering::lower_bit_count(vmIntrinsics::ID id) {
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  bool is_long = (id == vmIntrinsics::_bitCount_l);
+
+  llvm::Value* arg = is_long ? _interp->_jvm->lpop() : _interp->_jvm->ipop();
+  llvm::Type* arg_ty = arg->getType(); // i32 or i64
+
+  // llvm.ctpop requires return type == argument type.
+  llvm::CallInst* call = builder.CreateIntrinsic(arg_ty, llvm::Intrinsic::ctpop, {arg});
+
+  if (is_long) {
+    // Long.bitCount(long) returns int in Java, but llvm.ctpop.i64 returns i64.
+    // Truncate the result to i32.
+    _interp->_jvm->ipush(builder.CreateTrunc(call, JeandleType::java2llvm(BasicType::T_INT, ctx)));
+  } else {
+    _interp->_jvm->ipush(call);
+  }
   return true;
 }
 
