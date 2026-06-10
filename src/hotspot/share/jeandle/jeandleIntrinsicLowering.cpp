@@ -54,9 +54,6 @@ void apply_memory_attr(llvm::CallBase* call, const CallSiteAttributeMetadata& at
   if (attrs.needs_gc_state() || attrs.may_deopt() || attrs.needs_exception_edge()) {
     return;
   }
-  if (attrs.only_orders_memory()) {
-    return;
-  }
   const bool reads = attrs.reads_memory();
   const bool writes = attrs.writes_memory();
   if (!reads && !writes) {
