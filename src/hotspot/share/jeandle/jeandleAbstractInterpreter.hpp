@@ -380,13 +380,6 @@ class JeandleAbstractInterpreter : public StackObj {
   llvm::Value* find_or_insert_oop(ciObject* oop);
   TypedValue constant_to_value(ciConstant con);
   TypedValue try_fold_field_load(ciField* field, ciObject* holder);
-  TypedValue try_fold_unsafe_get(TypedValue base, llvm::Value* offset, BasicType type);
-
-  int _oop_idx;
-  std::string next_oop_name(const char* klass_name) {
-      assert(klass_name != nullptr, "klass_name can not be null");
-      return std::string("oop_handle_") + std::string(klass_name) + "_" + std::to_string(_oop_idx++);
-  }
 
   // Implementation of _get* and _put* bytecodes.
   void do_getstatic() { do_field_access(true, true); }
@@ -405,7 +398,7 @@ class JeandleAbstractInterpreter : public StackObj {
 
   void do_get_xxx(ciField* field, bool is_static);
   void do_put_xxx(ciField* field, bool is_static);
-  bool inline_unsafe_get(BasicType type);
+  bool inline_unsafe_get(BasicType type, bool is_volatile);
 
   void arraylength();
 

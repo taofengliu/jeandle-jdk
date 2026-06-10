@@ -116,7 +116,7 @@ public:
   llvm::Value*           value() const { return _value; }
   ciObject*      constant_oop() const { return _constant_oop; }
 
-  TypedValue clone_with_value(llvm::Value* value) const {
+  TypedValue copy_with_value(llvm::Value* value) const {
     return TypedValue(_basic_type, value, _constant_oop);
   }
 

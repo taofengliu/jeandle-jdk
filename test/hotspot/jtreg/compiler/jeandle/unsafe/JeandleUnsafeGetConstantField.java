@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,7 +27,7 @@
  * @summary Jeandle tests on constant folding of unsafe get operations.
  *          Copied from test/hotspot/jtreg/compiler/unsafe/UnsafeGetConstantField.java
  *          for Jeandle-specific issue #387 coverage. This version adds Jeandle
- *          checks that Unsafe get folding handles final and @Stable fields,
+ *          checks that Unsafe get folding handles final and Stable fields,
  *          including constant oop values that flow through control-flow merge.
  *          Stable array element folding is intentionally left out of this test.
  * @library /test/lib /compiler/jsr292/patches
