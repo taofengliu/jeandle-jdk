@@ -57,8 +57,7 @@ enum JeandleMemoryFlag : uint16_t {
   MEM_NONE              = 0,
   MEM_READ              = 1u << 0,
   MEM_WRITE             = 1u << 1,
-  MEM_ORDERING_ONLY     = 1u << 2,
-  MEM_NEEDS_GC_STATE    = 1u << 3,
+  MEM_NEEDS_GC_STATE    = 1u << 2,
 };
 
 // =============================================================================
@@ -74,7 +73,6 @@ struct CallSiteAttributeMetadata {
   bool needs_exception_edge() const { return (control_flags & CTRL_NEEDS_EXCEPTION_EDGE) != 0; }
   bool reads_memory()         const { return (memory_flags  & MEM_READ) != 0; }
   bool writes_memory()        const { return (memory_flags  & MEM_WRITE) != 0; }
-  bool only_orders_memory()   const { return (memory_flags  & MEM_ORDERING_ONLY) != 0; }
   bool needs_gc_state()       const { return (memory_flags  & MEM_NEEDS_GC_STATE) != 0; }
   bool attach_deopt_bundle()  const {
     return may_deopt() || needs_gc_state() || needs_exception_edge();

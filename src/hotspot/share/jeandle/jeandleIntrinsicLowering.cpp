@@ -200,6 +200,12 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
       return emit_llvm_builtin(llvm::Intrinsic::ctpop);
 
     // Dual-path libm (JeandleUseHotspotIntrinsics selects the path)
+    // TODO/FIXME: LLVM's `llvm.sin`, `llvm.cos`, etc. do **not** guarantee
+    // fdlibm-compatible results, especially for large inputs where range
+    // reduction quality varies by target. This will cause the calculation
+    // results to be inconsistent with those of the interpreter.
+    //
+    // issue: https://github.com/jeandle/jeandle-jdk/issues/424
     case vmIntrinsics::_dsin:
       return lower_dual_path_libm(llvm::Intrinsic::sin,
                                   "StubRoutines_dsin",
