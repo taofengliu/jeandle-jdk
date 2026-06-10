@@ -118,6 +118,58 @@ public class TestPreconditionsCheckIndex {
             } catch (IndexOutOfBoundsException e) {
                 // expected
             }
+
+            // ---- Boundary tests ----
+
+            // Last valid index: checkIndex(length-1, length) should pass
+            Asserts.assertEquals(9, check_int_valid(9, 10), "checkIndex(9, 10) should pass");
+            Asserts.assertEquals(99L, check_long_valid(99L, 100L), "checkIndex(99L, 100L) should pass");
+
+            // Index == length: out of bounds (one past the end)
+            try {
+                check_int_valid(10, 10);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for index == length");
+            } catch (IndexOutOfBoundsException e) {
+                // expected
+            }
+            try {
+                check_long_valid(10L, 10L);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for index == length (long)");
+            } catch (IndexOutOfBoundsException e) {
+                // expected
+            }
+
+            // Empty range: checkIndex(0, 0) — index 0 is out of bounds in an empty range
+            try {
+                check_int_valid(0, 0);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for index 0 in empty range");
+            } catch (IndexOutOfBoundsException e) {
+                // expected
+            }
+            try {
+                check_long_valid(0L, 0L);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for index 0 in empty range (long)");
+            } catch (IndexOutOfBoundsException e) {
+                // expected
+            }
+
+            // Smallest valid range: checkIndex(0, 1)
+            Asserts.assertEquals(0, check_int_valid(0, 1), "checkIndex(0, 1) should pass");
+            Asserts.assertEquals(0L, check_long_valid(0L, 1L), "checkIndex(0L, 1L) should pass");
+
+            // Negative index with valid length (unsigned comparison catches it)
+            try {
+                check_int_valid(-1, 10);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for negative index");
+            } catch (IndexOutOfBoundsException e) {
+                // expected — -1 interpreted as unsigned is very large, so uge check catches it
+            }
+            try {
+                check_long_valid(-1L, 10L);
+                throw new RuntimeException("Expected IndexOutOfBoundsException for negative index (long)");
+            } catch (IndexOutOfBoundsException e) {
+                // expected
+            }
         }
 
         static int check_int_valid(int index, int length) {

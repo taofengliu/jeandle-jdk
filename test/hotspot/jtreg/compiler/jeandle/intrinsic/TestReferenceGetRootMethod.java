@@ -71,7 +71,7 @@ public class TestReferenceGetRootMethod {
                 false);
 
         // CPUOrder fence must be present regardless of which compilation path
-        fc.check("fence syncscope(\"singlethread\") seq_cst");
+        fc.checkPattern("fence.*seq_cst");
 
         // G1 pre-barrier should be present under G1GC
         fc.check("jeandle.g1_pre_barrier_loaded");

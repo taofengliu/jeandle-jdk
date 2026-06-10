@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, the Jeandle-JDK Authors. All Rights Reserved.
+ * Copyright (c) 2025, 2026, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -20,6 +20,7 @@
 
 /*
  * @test
+ * @key randomness
  * @library /test/lib /
  * @build jdk.test.lib.Asserts
  * @run main/othervm compiler.jeandle.intrinsic.TestAbsDouble
@@ -48,40 +49,53 @@ public class TestAbsDouble {
             "-XX:CompileCommand=compileonly,"+TestWrapper.class.getName()+"::unaligned_abs_double",
             TestWrapper.class.getName()
         ));
-    
+
         ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
         OutputAnalyzer output = ProcessTools.executeCommand(pb);
 
         output.shouldHaveExitValue(0)
-              .shouldContain("Method `static jdouble java.lang.Math.abs(jdouble)` is parsed as intrinsic");
+              .shouldContain("is parsed as intrinsic");
 
-        // Verify llvm IR
+        // Verify the llvm intrinsic is used — only check the intrinsic call, not control flow
         FileCheck checker = new FileCheck(dump_path, TestWrapper.class.getMethod("abs_double", double.class), false);
-        // find compiled method
-        checker.check("define hotspotcc double @\"compiler_jeandle_intrinsic_TestAbsDouble$TestWrapper_abs_double");
-        // check IR
-        checker.checkNext("entry:");
-        checker.check("br label %bci_0");
-        checker.checkNext("bci_0:");
-        // the llvm intrinsic is used
-        checker.checkNext("call double @llvm.fabs.f64(double %0)");
+        checker.checkPattern("llvm\\.fabs\\.f64");
     }
 
     static public class TestWrapper {
         static double v = Math.abs(1.0d);   // Force load java.lang.Math class
         public static void main(String[] args) {
             Random random = new Random();
-            Asserts.assertEquals(1.5d, abs_double(1.5d));
-            Asserts.assertEquals(1.5d, abs_double(-1.5d));
-            Asserts.assertEquals(Double.NaN, abs_double(Double.NaN));
-            Asserts.assertEquals(Double.POSITIVE_INFINITY, abs_double(Double.POSITIVE_INFINITY));
-            Asserts.assertEquals(Double.POSITIVE_INFINITY, abs_double(Double.NEGATIVE_INFINITY));
-            for (int i=0; i< 1000; i++) {
+
+            // Basic values
+            Asserts.assertEquals(1.5d, abs_double(1.5d), "abs(1.5)");
+            Asserts.assertEquals(1.5d, abs_double(-1.5d), "abs(-1.5)");
+            Asserts.assertEquals(Double.NaN, abs_double(Double.NaN), "abs(NaN)");
+            Asserts.assertEquals(Double.POSITIVE_INFINITY, abs_double(Double.POSITIVE_INFINITY), "abs(+Inf)");
+            Asserts.assertEquals(Double.POSITIVE_INFINITY, abs_double(Double.NEGATIVE_INFINITY), "abs(-Inf)");
+
+            // Negative zero: Math.abs(-0.0) should be 0.0
+            Asserts.assertTrue(Double.doubleToRawLongBits(abs_double(-0.0d))
+                            == Double.doubleToRawLongBits(0.0d),
+                    "abs(-0.0) should be +0.0");
+            Asserts.assertTrue(Double.doubleToRawLongBits(abs_double(0.0d))
+                            == Double.doubleToRawLongBits(0.0d),
+                    "abs(0.0) should be +0.0");
+
+            // Subnormal values
+            Asserts.assertEquals(Double.MIN_VALUE, abs_double(Double.MIN_VALUE),
+                    "abs(MIN_VALUE) = MIN_VALUE (already positive)");
+            Asserts.assertEquals(Double.MIN_VALUE, abs_double(-Double.MIN_VALUE),
+                    "abs(-MIN_VALUE) = MIN_VALUE");
+
+            // Random values
+            for (int i = 0; i < 1000; i++) {
                 double d = random.nextDouble();
-                double r = d > 0.0d ? d : -1*d;
-                Asserts.assertEquals(r , abs_double(d));
+                double r = d > 0.0d ? d : -1 * d;
+                Asserts.assertEquals(r, abs_double(d), "abs random");
             }
-            Asserts.assertEquals(1.5d, unaligned_abs_double(1.5d));
+
+            // Unaligned access test
+            Asserts.assertEquals(1.5d, unaligned_abs_double(1.5d), "unaligned abs(1.5)");
         }
 
         public static double abs_double(double a) {

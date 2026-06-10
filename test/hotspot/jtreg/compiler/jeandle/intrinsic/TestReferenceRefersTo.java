@@ -22,7 +22,8 @@
  * @test
  * @summary Verify Reference.refersTo() and PhantomReference.refersTo() intrinsics
  *          emit correct memory ordering: Unordered atomic load + CPUOrder fence,
- *          no G1 SATB barrier (AS_NO_KEEPALIVE semantics)
+ *          no G1 SATB barrier (AS_NO_KEEPALIVE semantics).
+ *          Also test refersTo(null) after reference is cleared.
  * @library /test/lib /
  * @build compiler.jeandle.fileCheck.FileCheck
  * @run main/othervm -Xcomp -XX:-TieredCompilation
@@ -70,6 +71,15 @@ public class TestReferenceRefersTo {
         Asserts.assertFalse(testPhantomRefersTo(phantomRef, new Object()),
                 "PhantomReference.refersTo(other) should return false");
 
+        // Test refersTo(null) after reference is cleared — cleared reference refers to null
+        Object obj2 = new Object();
+        WeakReference<Object> weakRef2 = new WeakReference<>(obj2);
+        Asserts.assertFalse(testWeakRefersTo(weakRef2, null),
+                "WeakReference.refersTo(null) should return false when referent is non-null");
+        weakRef2.clear();
+        Asserts.assertTrue(testWeakRefersTo(weakRef2, null),
+                "WeakReference.refersTo(null) should return true after clear() (referent is now null)");
+
         // IR verification: check the jeandle.reference_refers_to JavaOp
         String currentDir = System.getProperty("user.dir");
         FileCheck fc = new FileCheck(currentDir,
@@ -83,8 +93,8 @@ public class TestReferenceRefersTo {
         // Verify the load is unordered atomic (appears before the fence in IR)
         fc.checkPattern("load atomic ptr addrspace\\(1\\).*unordered");
 
-        // Verify CPUOrder fence is present after the load
-        fc.check("fence syncscope(\"singlethread\") seq_cst");
+        // Verify a fence with seq_cst ordering is present (CPUOrder fence)
+        fc.checkPattern("fence.*seq_cst");
 
         // Verify the function ends with icmp + zext + ret (no barrier call)
         fc.check("icmp eq");

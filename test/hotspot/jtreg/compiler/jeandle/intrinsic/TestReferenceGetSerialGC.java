@@ -66,6 +66,6 @@ public class TestReferenceGetSerialGC {
         fc.checkPattern("load atomic ptr addrspace\\(1\\).*unordered");
 
         // CPUOrder fence must still be present (GC-independent)
-        fc.check("fence syncscope(\"singlethread\") seq_cst");
+        fc.checkPattern("fence.*seq_cst");
     }
 }

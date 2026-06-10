@@ -16,12 +16,15 @@
  * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  *
+ */
+
+/*
  * @test
- * @summary Test unified jeandle.new_array JavaOp: both intrinsic (Array.newInstance)
- *          and bytecode (newarray/anewarray/multianewarray) paths
+ * @summary Test the intrinsic implementation of Array.newInstance (jeandle.new_array)
+ *          and bytecode array allocation paths
  * @library /test/lib
  * @run main/othervm -XX:+UseJeandleCompiler -XX:-TieredCompilation -Xcomp
- *      -XX:CompileCommand=compileonly,TestNewArray::*
+ *      -XX:CompileCommand=compileonly,TestNewArray$TestWrapper::*
  *      TestNewArray
  */
 
