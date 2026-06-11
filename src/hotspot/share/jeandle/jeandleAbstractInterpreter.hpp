@@ -62,13 +62,10 @@ class JeandleVMState : public JeandleCompilationResourceObj {
   size_t max_stack() const { return _stack.capacity(); }
 
   llvm::Value* stack_at(int index) { return _stack[index].value(); }
-  TypedValue   stack_typed_value_at(int index) { return _stack[index]; }
   BasicType    stack_type_at(int index) { return _stack[index].actual_type(); }
   BasicType    stack_computational_type_at(int index) { return _stack[index].computational_type(); }
 
-  void push(TypedValue value);
   void push(BasicType type, llvm::Value* value);
-  TypedValue pop_typed_value(BasicType type);
   llvm::Value* pop(BasicType type);
 
   void ipush(llvm::Value* value) { push(BasicType::T_INT, value); }
@@ -102,7 +99,6 @@ class JeandleVMState : public JeandleCompilationResourceObj {
   void invalidate_local(int index) { _locals[index] = TypedValue::null_value(); }
 
   llvm::Value* locals_at(int index) { return _locals[index].value(); }
-  TypedValue locals_typed_value_at(int index) { return _locals[index]; }
   BasicType locals_type_at(int index) { return _locals[index].actual_type(); }
   BasicType locals_computational_type_at(int index) { return _locals[index].computational_type(); }
   void set_locals_at(int index, TypedValue value) { _locals[index] = value; }
@@ -117,9 +113,7 @@ class JeandleVMState : public JeandleCompilationResourceObj {
   void astore(int index, llvm::Value* value) { store(BasicType::T_OBJECT, index, value); }
 
   llvm::Value* load(BasicType type, int index);
-  TypedValue load_typed_value(BasicType type, int index);
   void store(BasicType type, int index, llvm::Value* value);
-  void store(int index, TypedValue value);
 
   llvm::Value* fload(int index) { return load(BasicType::T_FLOAT, index); }
   void fstore(int index, llvm::Value* value) { store(BasicType::T_FLOAT, index, value); }
@@ -379,7 +373,6 @@ class JeandleAbstractInterpreter : public StackObj {
 
   llvm::Value* find_or_insert_oop(ciObject* oop);
   TypedValue constant_to_value(ciConstant con);
-  TypedValue try_fold_field_load(ciField* field, ciObject* holder);
 
   // Implementation of _get* and _put* bytecodes.
   void do_getstatic() { do_field_access(true, true); }
@@ -398,7 +391,6 @@ class JeandleAbstractInterpreter : public StackObj {
 
   void do_get_xxx(ciField* field, bool is_static);
   void do_put_xxx(ciField* field, bool is_static);
-  bool inline_unsafe_get(BasicType type, bool is_volatile);
 
   void arraylength();
 
