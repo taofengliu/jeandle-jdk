@@ -151,55 +151,39 @@ bool jeandle_constant_field(int oop_id, int offset, ciField** field, ciConstant*
   return true;
 }
 
-bool jeandle_is_constant_field(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  return jeandle_constant_field(oop_id, offset, &field, &con);
-}
-
-int jeandle_get_field_basic_type_by_oop(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
-    return T_ILLEGAL;
-  }
-  return field->layout_type();
-}
-
-int jeandle_get_constant_field_int(int oop_id, int offset) {
+int64_t jeandle_get_constant_field_value(int oop_id, int offset) {
   ciField* field = nullptr;
   ciConstant con;
   if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
     return 0;
   }
-  return con.as_int();
-}
 
-int64_t jeandle_get_constant_field_long(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
+  switch (field->layout_type()) {
+  case T_BOOLEAN:
+  case T_BYTE:
+  case T_CHAR:
+  case T_SHORT:
+  case T_INT:
+    return static_cast<int64_t>(con.as_int());
+  case T_LONG:
+    return con.as_long();
+  case T_FLOAT:
+    return static_cast<int64_t>(static_cast<uint32_t>(jint_cast(con.as_float())));
+  case T_DOUBLE:
+    return jlong_cast(con.as_double());
+  case T_OBJECT:
+  case T_ARRAY: {
+    ciObject* object = con.as_object();
+    if (object->is_null_object()) {
+      return static_cast<int64_t>(-1);
+    }
+    JeandleCompiledCode* compiled_code = JeandleCompilation::current()->compiled_code();
+    int result_id = compiled_code->find_or_insert_oop(object);
+    return static_cast<int64_t>(result_id);
+  }
+  default:
     return 0;
   }
-  return con.as_long();
-}
-
-int jeandle_get_constant_field_float_bits(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
-    return 0;
-  }
-  return jint_cast(con.as_float());
-}
-
-int64_t jeandle_get_constant_field_double_bits(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
-    return 0;
-  }
-  return jlong_cast(con.as_double());
 }
 
 int jeandle_get_constant_field_info(int oop_id, int offset) {
@@ -210,22 +194,10 @@ int jeandle_get_constant_field_info(int oop_id, int offset) {
   return field->layout_type();
 }
 
-int jeandle_get_constant_field_oop(int oop_id, int offset) {
-  ciField* field = nullptr;
-  ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
-    return -1;
-  }
-
-  ciObject* object = con.as_object();
-  if (object->is_null_object()) {
-    return -1;
-  }
-
-  JeandleCompiledCode* compiled_code = JeandleCompilation::current()->compiled_code();
-  int result_id = compiled_code->find_or_insert_oop(object);
-  compiled_code->ensure_oop_handle_alias(result_id);
-  return result_id;
+const char* jeandle_get_oop_handle_name(int oop_id) {
+  JeandleCompilation* compilation = JeandleCompilation::current();
+  assert(compilation != nullptr, "no active compilation");
+  return compilation->compiled_code()->oop_handle_name_cstr(oop_id);
 }
 
 } // anonymous namespace
@@ -238,14 +210,9 @@ void register_jeandle_vm_callbacks() {
   callbacks.IsInterface = &jeandle_is_interface;
   callbacks.IsObjectKlass = &jeandle_is_object_klass;
   callbacks.IsEffectivelyFinal = &jeandle_is_effectively_final;
-  callbacks.IsConstantField = &jeandle_is_constant_field;
-  callbacks.GetFieldBasicTypeByOop = &jeandle_get_field_basic_type_by_oop;
-  callbacks.GetConstantFieldInt = &jeandle_get_constant_field_int;
-  callbacks.GetConstantFieldLong = &jeandle_get_constant_field_long;
-  callbacks.GetConstantFieldFloatBits = &jeandle_get_constant_field_float_bits;
-  callbacks.GetConstantFieldDoubleBits = &jeandle_get_constant_field_double_bits;
-  callbacks.GetConstantFieldOop = &jeandle_get_constant_field_oop;
+  callbacks.GetConstantFieldValue = &jeandle_get_constant_field_value;
   callbacks.GetConstantFieldInfo = &jeandle_get_constant_field_info;
+  callbacks.GetOopHandleName = &jeandle_get_oop_handle_name;
   llvm::jeandle::registerVMCallbacks(callbacks);
 
   if (JeandleRecordVMCallbacks) {

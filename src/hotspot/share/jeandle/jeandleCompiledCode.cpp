@@ -63,10 +63,6 @@ static std::string oop_handle_name_for(const char* klass_name, int oop_id) {
   return std::string("oop_handle_") + klass_name + "_" + std::to_string(oop_id);
 }
 
-static std::string oop_handle_alias_name(int oop_id) {
-  return std::string("oop_handle_") + std::to_string(oop_id);
-}
-
 int JeandleCompiledCode::find_or_insert_oop(ciObject* oop) {
   jobject oop_handle = oop->constant_encoding();
   auto existing = _oop_handle_ids.find(oop_handle);
@@ -82,7 +78,6 @@ int JeandleCompiledCode::find_or_insert_oop(ciObject* oop) {
   _oops_by_id[oop_id] = oop;
   _oop_handle_names_by_id[oop_id] = oop_name;
   _oop_handles[oop_name] = oop_handle;
-  _oop_handles[oop_handle_alias_name(oop_id)] = oop_handle;
   return oop_id;
 }
 
@@ -102,10 +97,10 @@ std::string JeandleCompiledCode::oop_handle_name(int oop_id) {
   return it->second;
 }
 
-void JeandleCompiledCode::ensure_oop_handle_alias(int oop_id) {
-  jobject oop_handle = oop_handle_at(oop_id);
-  assert(oop_handle != nullptr, "unknown oop id");
-  _oop_handles[oop_handle_alias_name(oop_id)] = oop_handle;
+const char* JeandleCompiledCode::oop_handle_name_cstr(int oop_id) {
+  auto it = _oop_handle_names_by_id.find(oop_id);
+  assert(it != _oop_handle_names_by_id.end(), "unknown oop id");
+  return it->second.c_str();
 }
 
 bool JeandleCompiledCode::needs_clinit_barrier_on_entry() {

@@ -223,7 +223,7 @@ class JeandleCompiledCode : public StackObj {
   ciObject* oop_at(int oop_id);
   jobject oop_handle_at(int oop_id);
   std::string oop_handle_name(int oop_id);
-  void ensure_oop_handle_alias(int oop_id);
+  const char* oop_handle_name_cstr(int oop_id);
 
   const char* object_start() const { return _obj->getBufferStart(); }
   size_t object_size() const { return _obj->getBufferSize(); }

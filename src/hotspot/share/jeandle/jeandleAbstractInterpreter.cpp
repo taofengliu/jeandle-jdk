@@ -2998,7 +2998,7 @@ void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reaso
         _ir_builder.SetInsertPoint(insert_block);
       }
       if (env->jvmti_can_post_on_exceptions()) {
-         // Check whether exception events must be posted; if so, take an uncommon trap.
+        // Check whether exception events must be posted; if so, take an uncommon trap.
         uncommon_trap_if_should_post_on_exceptions(reason);
       }
 
