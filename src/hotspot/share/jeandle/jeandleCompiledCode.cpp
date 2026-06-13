@@ -67,40 +67,30 @@ int JeandleCompiledCode::find_or_insert_oop(ciObject* oop) {
   jobject oop_handle = oop->constant_encoding();
   auto existing = _oop_handle_ids.find(oop_handle);
   if (existing != _oop_handle_ids.end()) {
-    _oops_by_id[existing->second] = oop;
     return existing->second;
   }
 
-  int oop_id = _next_oop_id++;
+  int oop_id = _oop_handle_info.size();
   std::string oop_name = oop_handle_name_for(oop->klass()->external_name(), oop_id);
   _oop_handle_ids[oop_handle] = oop_id;
-  _oop_handles_by_id[oop_id] = oop_handle;
-  _oops_by_id[oop_id] = oop;
-  _oop_handle_names_by_id[oop_id] = oop_name;
   _oop_handles[oop_name] = oop_handle;
+  _oop_handle_info.push_back({oop_handle, oop, std::move(oop_name)});
   return oop_id;
 }
 
 ciObject* JeandleCompiledCode::oop_at(int oop_id) {
-  auto it = _oops_by_id.find(oop_id);
-  return it == _oops_by_id.end() ? nullptr : it->second;
-}
-
-jobject JeandleCompiledCode::oop_handle_at(int oop_id) {
-  auto it = _oop_handles_by_id.find(oop_id);
-  return it == _oop_handles_by_id.end() ? nullptr : it->second;
+  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
+  return _oop_handle_info[oop_id].oop;
 }
 
 std::string JeandleCompiledCode::oop_handle_name(int oop_id) {
-  auto it = _oop_handle_names_by_id.find(oop_id);
-  assert(it != _oop_handle_names_by_id.end(), "unknown oop id");
-  return it->second;
+  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
+  return _oop_handle_info[oop_id].name;
 }
 
 const char* JeandleCompiledCode::oop_handle_name_cstr(int oop_id) {
-  auto it = _oop_handle_names_by_id.find(oop_id);
-  assert(it != _oop_handle_names_by_id.end(), "unknown oop id");
-  return it->second.c_str();
+  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
+  return _oop_handle_info[oop_id].name.c_str();
 }
 
 bool JeandleCompiledCode::needs_clinit_barrier_on_entry() {
