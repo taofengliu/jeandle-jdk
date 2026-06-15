@@ -200,6 +200,21 @@ const char* jeandle_get_oop_handle_name(int oop_id) {
   return compilation->compiled_code()->oop_handle_name_cstr(oop_id);
 }
 
+uintptr_t jeandle_get_oop_klass(int oop_id) {
+  ciObject* oop = jeandle_oop_by_id(oop_id);
+  if (oop == nullptr || oop->is_null_object()) {
+    return 0;
+  }
+  ciKlass* klass = oop->klass();
+  if (klass == nullptr || !klass->is_loaded()) {
+    return 0;
+  }
+  // The constant oop is a single, compile-time-known object instance, so its
+  // klass is the value's exact dynamic type. Mirrors the encoding used by the
+  // frontend when attaching !java-klass metadata (jeandleAbstractInterpreter.cpp).
+  return (uintptr_t)(Klass*)(klass->constant_encoding());
+}
+
 } // anonymous namespace
 
 void register_jeandle_vm_callbacks() {
@@ -213,6 +228,7 @@ void register_jeandle_vm_callbacks() {
   callbacks.GetConstantFieldValue = &jeandle_get_constant_field_value;
   callbacks.GetConstantFieldInfo = &jeandle_get_constant_field_info;
   callbacks.GetOopHandleName = &jeandle_get_oop_handle_name;
+  callbacks.GetOopKlass = &jeandle_get_oop_klass;
   llvm::jeandle::registerVMCallbacks(callbacks);
 
   if (JeandleRecordVMCallbacks) {
