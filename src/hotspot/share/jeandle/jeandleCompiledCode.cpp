@@ -60,6 +60,36 @@ static bool need_stack_overflow_check(bool is_method_compilation,
          frame_size_in_bytes > (int)(os::vm_page_size() >> 3) DEBUG_ONLY(|| true);
 }
 
+static std::string oop_handle_name_for(const char* klass_name, int oop_id) {
+  assert(klass_name != nullptr, "klass_name can not be null");
+  return std::string("oop_handle_") + klass_name + "_" + std::to_string(oop_id);
+}
+
+int JeandleCompiledCode::find_or_insert_oop(ciObject* oop) {
+  jobject oop_handle = oop->constant_encoding();
+  auto existing = _oop_handle_ids.find(oop_handle);
+  if (existing != _oop_handle_ids.end()) {
+    return existing->second;
+  }
+
+  int oop_id = _oop_handle_info.size();
+  std::string oop_name = oop_handle_name_for(oop->klass()->external_name(), oop_id);
+  _oop_handle_ids[oop_handle] = oop_id;
+  _oop_handles[oop_name] = oop_handle;
+  _oop_handle_info.push_back({oop_handle, oop, std::move(oop_name)});
+  return oop_id;
+}
+
+ciObject* JeandleCompiledCode::oop_at(int oop_id) {
+  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
+  return _oop_handle_info[oop_id].oop;
+}
+
+std::string JeandleCompiledCode::oop_handle_name(int oop_id) {
+  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
+  return _oop_handle_info[oop_id].name;
+}
+
 bool JeandleCompiledCode::needs_clinit_barrier_on_entry() {
   if (_method == nullptr) {
     return false;
