@@ -154,9 +154,13 @@ bool jeandle_constant_field(int oop_id, int offset, ciField** field, ciConstant*
 int64_t jeandle_get_constant_field_value(int oop_id, int offset) {
   ciField* field = nullptr;
   ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con)) {
-    return 0;
-  }
+  // Callers must confirm foldability via jeandle_get_constant_field_info first
+  // (it returns the HotSpot BasicType >= 0, or -1 when not foldable). This
+  // function is only reached on that path; constancy is decided solely by
+  // _info, never by the value returned here.
+  bool foldable = jeandle_constant_field(oop_id, offset, &field, &con);
+  assert(foldable, "jeandle_get_constant_field_value called on a non-foldable "
+                   "field; caller must verify via jeandle_get_constant_field_info");
 
   switch (field->layout_type()) {
   case T_BOOLEAN:
@@ -182,7 +186,7 @@ int64_t jeandle_get_constant_field_value(int oop_id, int offset) {
     return static_cast<int64_t>(result_id);
   }
   default:
-    return 0;
+    ShouldNotReachHere();
   }
 }
 
@@ -197,7 +201,14 @@ int jeandle_get_constant_field_info(int oop_id, int offset) {
 const char* jeandle_get_oop_handle_name(int oop_id) {
   JeandleCompilation* compilation = JeandleCompilation::current();
   assert(compilation != nullptr, "no active compilation");
-  return compilation->compiled_code()->oop_handle_name_cstr(oop_id);
+  JeandleCompiledCode* cc = compilation->compiled_code();
+  // _oop_handles entries are individually heap-allocated and never relocated on
+  // insert, so getKeyData() stays valid for the whole compilation — unlike the
+  // std::strings in _oop_handle_info's SmallVector, whose buffers can move when
+  // the vector reallocates.
+  auto it = cc->oop_handles().find(cc->oop_handle_name(oop_id));
+  assert(it != cc->oop_handles().end(), "oop handle name missing from map");
+  return it->getKeyData();
 }
 
 uintptr_t jeandle_get_oop_klass(int oop_id) {

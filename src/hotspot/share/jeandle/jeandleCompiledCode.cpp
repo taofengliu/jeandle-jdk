@@ -90,11 +90,6 @@ std::string JeandleCompiledCode::oop_handle_name(int oop_id) {
   return _oop_handle_info[oop_id].name;
 }
 
-const char* JeandleCompiledCode::oop_handle_name_cstr(int oop_id) {
-  assert(oop_id >= 0 && (size_t)oop_id < _oop_handle_info.size(), "unknown oop id");
-  return _oop_handle_info[oop_id].name.c_str();
-}
-
 bool JeandleCompiledCode::needs_clinit_barrier_on_entry() {
   if (_method == nullptr) {
     return false;

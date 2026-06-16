@@ -245,7 +245,11 @@ class JeandleCompiledCode : public StackObj {
   int find_or_insert_oop(ciObject* oop);
   ciObject* oop_at(int oop_id);
   std::string oop_handle_name(int oop_id);
-  const char* oop_handle_name_cstr(int oop_id);
+  // StringMap entries are individually heap-allocated and never relocated on
+  // insertion, so their keys stay valid for the life of this JeandleCompiledCode
+  // (unlike the std::strings in _oop_handle_info's SmallVector). Exposed so that
+  // the GetOopHandleName callback can return a stable name pointer.
+  llvm::StringMap<jobject>& oop_handles() { return _oop_handles; }
 
   const char* object_start() const { return _obj->getBufferStart(); }
   size_t object_size() const { return _obj->getBufferSize(); }
