@@ -182,6 +182,7 @@ struct OopHandleInfo {
   std::string name;
 };
 
+class JeandleEntryBarrierStub;
 class JeandleAssembler;
 class JeandleCompiledCode : public StackObj {
  public:
@@ -274,6 +275,7 @@ class JeandleCompiledCode : public StackObj {
   bool needs_clinit_barrier(ciMethod* ik,        ciMethod* accessing_method);
   bool needs_clinit_barrier(ciInstanceKlass* ik, ciMethod* accessing_method);
   bool needs_clinit_barrier_on_entry();
+  bool needs_nmethod_entry_barrier();
   void update_interpreter_frame_size_in_bytes(int frame_size) { _interpreter_frame_size_in_bytes = MAX2(frame_size, _interpreter_frame_size_in_bytes); }
   int interpreter_frame_size_in_bytes() { return _interpreter_frame_size_in_bytes; }
 
@@ -311,6 +313,7 @@ class JeandleCompiledCode : public StackObj {
   int _orig_pc_offset_in_bytes;
   int _interpreter_frame_size_in_bytes;
   bool _has_method_handle_invoke;
+  JeandleEntryBarrierStub* _entry_barrier_stub = nullptr;
 
   void setup_frame_size();
 
