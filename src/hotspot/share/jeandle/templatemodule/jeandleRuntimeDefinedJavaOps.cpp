@@ -316,6 +316,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("markWord.prototype_value",                         int64_type, static_cast<uint64_t>(markWord::prototype().value()));
   
   define_global("JVM_ACC_IS_VALUE_BASED_CLASS",                     int32_type, static_cast<uint64_t>(JVM_ACC_IS_VALUE_BASED_CLASS));
+  define_global("JVM_ACC_HAS_FINALIZER",                            int32_type, static_cast<uint64_t>(JVM_ACC_HAS_FINALIZER));
   define_global("oopSize",                                          int32_type, static_cast<uint64_t>(oopSize));
 
   define_global("check_recursive_mask_value",                       int64_type, static_cast<uint64_t>(7 - (int)os::vm_page_size()));

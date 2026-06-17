@@ -115,6 +115,7 @@
 
 ; Global definitions
 @JVM_ACC_IS_VALUE_BASED_CLASS = external global i32
+@JVM_ACC_HAS_FINALIZER = external global i32
 @oopSize = external global i32
 @check_recursive_mask_value = external global i64
 
@@ -338,6 +339,7 @@ entry:
 
 declare hotspotcc ptr @jeandle.current_thread()
 declare hotspotcc ptr addrspace(1) @new_array(ptr, i32, ptr)
+declare hotspotcc void @SharedRuntime_register_finalizer(ptr, ptr addrspace(1))
 
 ; Implementation of Java anewarray and newarray operation
 define private hotspotcc ptr addrspace(1) @jeandle.newarray(ptr %array_klass, i32 %length) noinline "lower-phase"="1"  {
@@ -615,6 +617,27 @@ entry:
   %masked_value = and i32 %access_flags, %is_value_based_mask
   %is_value_based = icmp ne i32 %masked_value, 0
   ret i1 %is_value_based
+}
+
+; Register finalizer for an object only when its exact klass requires it.
+define hotspotcc void @jeandle.register_finalizer_if_needed(ptr addrspace(1) %obj) noinline "lower-phase"="0" {
+entry:
+  %obj_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) %obj)
+  %access_flags_offset = load i32, ptr @Klass.access_flags_offset
+  %access_flags_addr = getelementptr inbounds i8, ptr addrspace(0) %obj_klass, i32 %access_flags_offset
+  %access_flags = load i32, ptr addrspace(0) %access_flags_addr
+  %has_finalizer_mask = load i32, ptr @JVM_ACC_HAS_FINALIZER
+  %masked_value = and i32 %access_flags, %has_finalizer_mask
+  %has_finalizer = icmp ne i32 %masked_value, 0
+  br i1 %has_finalizer, label %register_finalizer, label %return
+
+register_finalizer:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  call hotspotcc void @SharedRuntime_register_finalizer(ptr %current_thread, ptr addrspace(1) %obj)
+  br label %return
+
+return:
+  ret void
 }
 
 ; Check if the lock is inflated
