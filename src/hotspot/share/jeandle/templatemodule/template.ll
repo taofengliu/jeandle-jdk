@@ -67,6 +67,7 @@
 
 ; Byte offsets for Klass structure fields.
 @Klass.access_flags_offset = external global i32
+@Klass.java_mirror_offset = external global i32
 @Klass.secondary_super_cache_offset = external global i32
 @Klass.secondary_supers_offset = external global i32
 @Klass.super_check_offset_offset = external global i32
@@ -90,6 +91,14 @@
 ; Heap layout switches consumed by VMConstants::fromModule on the LLVM side.
 @VMOptions.UseCompressedClassPointers = external global i1
 @VMOptions.UseCompressedOops = external global i1
+
+; Byte offsets for java.lang.ref.Reference instance fields.
+@java_lang_ref_Reference.referent_offset = external global i32
+
+; Byte offset of the cached array klass in java.lang.Class (injected field).
+; Stores the array Klass* for this component type once the array type has been loaded.
+; Zero/null means the array klass has not yet been resolved.
+@java_lang_Class.array_klass_offset = external global i32
 
 ; Byte offsets for BasicLock structure fields.
 @BasicLock.displaced_header_offset_in_bytes = external global i32
@@ -355,8 +364,10 @@ declare hotspotcc void @SharedRuntime_register_finalizer(ptr, ptr addrspace(1))
 ; jeandleRuntimeDefinedJavaOps.cpp — same pattern as the G1 barrier globals.
 declare hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1), ptr addrspace(0), ptr)
 
-; Implementation of Java anewarray and newarray operation
-define private hotspotcc ptr addrspace(1) @jeandle.newarray(ptr %array_klass, i32 %length) noinline "lower-phase"="1"  {
+; Unified array allocation JavaOp.  Both bytecode (newarray/anewarray) and intrinsic
+; (_newArray / Array.newInstance) paths call this function.
+; LLVM passes identify array allocation by matching on this function name.
+define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length) noinline "lower-phase"="1" {
 entry:
   %current_thread = call hotspotcc ptr @jeandle.current_thread()
   %array_oop = call hotspotcc ptr addrspace(1) @new_array(ptr %array_klass, i32 %length, ptr %current_thread) [ "deopt"() ]
