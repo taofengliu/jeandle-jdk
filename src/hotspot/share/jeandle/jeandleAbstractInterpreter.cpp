@@ -3254,17 +3254,42 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
 
   int cur_bci = _bytecodes.cur_bcp() == nullptr ? -1 : _bytecodes.cur_bci();
 
-  llvm::BasicBlock* monitorenter_slow_path = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitorenter_slow_path", _llvm_func);
-  llvm::BasicBlock* monitor_entered = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitor_entered", _llvm_func);
-
+  // The monitor op is a single complete JavaOp whose body contains both the
+  // fast path and the slow path (a call to SharedRuntime_complete_monitor_locking_C).
+  // PEA runs before JavaOperationLower(0), so it sees only this one opaque call
+  // and can fold it atomically — the slow-path runtime call is invisible to PEA.
   if (DiagnoseSyncOnValueBasedClasses != 0) {
+    // Off-by-default diagnostic: keep the value-based check and its own slow
+    // path in user IR. PEA already materializes on jeandle.check_if_value_based,
+    // so atomicity on this rare path is not expected; the value-based warning
+    // is triggered by routing directly to the SharedRuntime slow routine.
+    llvm::BasicBlock* monitorenter_slow_path = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitorenter_slow_path", _llvm_func);
+    llvm::BasicBlock* monitor_entered = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitor_entered", _llvm_func);
     llvm::BasicBlock* not_value_based = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_not_value_based", _llvm_func);
     llvm::CallInst* check = call_java_op("jeandle.check_if_value_based", {lock.object().value()});
     _ir_builder.CreateCondBr(check, monitorenter_slow_path, not_value_based);
 
     _ir_builder.SetInsertPoint(not_value_based);
-  }
+    emit_monitorenter_java_op(lock, lock_depth);
+    _ir_builder.CreateBr(monitor_entered);
 
+    _ir_builder.SetInsertPoint(monitorenter_slow_path);
+    llvm::FunctionCallee monitorenter_callee = JeandleRuntimeRoutine::SharedRuntime_complete_monitor_locking_C_callee(_module);
+    llvm::CallInst* current_thread = call_java_op("jeandle.current_thread", {});
+    llvm::CallInst* call_monitorenter = _ir_builder.CreateCall(monitorenter_callee, {lock.object().value(), lock.lock(), current_thread});
+    call_monitorenter->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+    _ir_builder.CreateBr(monitor_entered);
+
+    _ir_builder.SetInsertPoint(monitor_entered);
+    _block->set_tail_llvm_block(monitor_entered);
+  } else {
+    // Common case: just the JavaOp. No cond_br, no slow-path block, no
+    // current_thread fetch — all of that now lives inside the JavaOp body.
+    emit_monitorenter_java_op(lock, lock_depth);
+  }
+}
+
+void JeandleAbstractInterpreter::emit_monitorenter_java_op(LockValue lock, int lock_depth) {
   llvm::CallInst* call;
   if (LockingMode == LM_MONITOR) {
     call = call_java_op("jeandle.monitorenter_with_monitor_lock", {lock.object().value(), lock.lock()});
@@ -3280,54 +3305,27 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
   // check. Format: a single i32 holding the 0-based depth.
   // When this metadata is absent (e.g. lit-only LLVM tests), the PEA pass
   // falls back to its analyzer-run-monotonic Order proxy.
-  {
-    llvm::MDNode* lock_depth_md = llvm::MDNode::get(*_context, {
-        llvm::ConstantAsMetadata::get(_ir_builder.getInt32(lock_depth))
-    });
-    call->setMetadata("jeandle.lock_depth", lock_depth_md);
-  }
-  _ir_builder.CreateCondBr(call, monitor_entered, monitorenter_slow_path);
-
-  _ir_builder.SetInsertPoint(monitorenter_slow_path);
-
-  llvm::FunctionCallee monitorenter_callee = JeandleRuntimeRoutine::SharedRuntime_complete_monitor_locking_C_callee(_module);
-  llvm::CallInst* current_thread = call_java_op("jeandle.current_thread", {});
-  llvm::CallInst* call_monitorenter = _ir_builder.CreateCall(monitorenter_callee, {lock.object().value(), lock.lock(), current_thread});
-  call_monitorenter->setCallingConv(llvm::CallingConv::Hotspot_JIT);
-  _ir_builder.CreateBr(monitor_entered);
-
-  _ir_builder.SetInsertPoint(monitor_entered);
-  _block->set_tail_llvm_block(monitor_entered);
+  llvm::MDNode* lock_depth_md = llvm::MDNode::get(*_context, {
+      llvm::ConstantAsMetadata::get(_ir_builder.getInt32(lock_depth))
+  });
+  call->setMetadata("jeandle.lock_depth", lock_depth_md);
 }
 
 void JeandleAbstractInterpreter::shared_unlock(LockValue lock) {
   assert(!lock.is_null(), "sanity");
 
-  int cur_bci = _bytecodes.cur_bci();
-
-  llvm::BasicBlock* monitorexit_slow_path = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitorexit_slow_path", _llvm_func);
-  llvm::BasicBlock* monitor_exited = llvm::BasicBlock::Create(*_context, "bci_" + std::to_string(cur_bci) + "_monitor_exited", _llvm_func);
-
-  llvm::CallInst* call;
+  // The monitor op is a single complete JavaOp whose body contains both the
+  // fast path and the slow path (a call to SharedRuntime_complete_monitor_unlocking_C).
+  // PEA sees only this one opaque call and can fold it atomically. No cond_br,
+  // slow-path block, or current_thread fetch is emitted here.
   if (LockingMode == LM_MONITOR) {
-    call = call_java_op("jeandle.monitorexit_with_monitor_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorexit_with_monitor_lock", {lock.object().value(), lock.lock()});
   } else if (LockingMode == LM_LEGACY) {
-    call = call_java_op("jeandle.monitorexit_with_thin_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorexit_with_thin_lock", {lock.object().value(), lock.lock()});
   } else {
     assert(LockingMode == LM_LIGHTWEIGHT, "");
-    call = call_java_op("jeandle.monitorexit_with_lightweight_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorexit_with_lightweight_lock", {lock.object().value(), lock.lock()});
   }
-  _ir_builder.CreateCondBr(call, monitor_exited, monitorexit_slow_path);
-
-  _ir_builder.SetInsertPoint(monitorexit_slow_path);
-  llvm::FunctionCallee monitorexit_callee = JeandleRuntimeRoutine::SharedRuntime_complete_monitor_unlocking_C_callee(_module);
-  llvm::CallInst* current_thread = call_java_op("jeandle.current_thread", {});
-  llvm::CallInst* call_monitorexit = _ir_builder.CreateCall(monitorexit_callee, {lock.object().value(), lock.lock(), current_thread});
-  call_monitorexit->setCallingConv(llvm::CallingConv::C);
-  _ir_builder.CreateBr(monitor_exited);
-
-  _ir_builder.SetInsertPoint(monitor_exited);
-  _block->set_tail_llvm_block(monitor_exited);
 }
 
 void JeandleAbstractInterpreter::monitorenter() {

@@ -137,6 +137,11 @@
 @G1BarrierSetRuntime.write_ref_field_pre_entry = external global i64
 @G1BarrierSetRuntime.write_ref_field_post_entry = external global i64
 
+; Address for the monitorexit slow-path routine (SharedRuntime::complete_monitor_unlocking_C).
+; It is a direct routine with reachable=false, so the monitorexit slow paths call it via this
+; baked absolute address (load + inttoptr + indirect call) rather than a PC-relative branch.
+@SharedRuntime.complete_monitor_unlocking_C = external global i64
+
 ; Keep use to lately-used java operations, until it is lowered.
 @llvm.used = appending addrspace(1) global [5 x ptr] [
   ptr @jeandle.card_table_barrier,
@@ -340,6 +345,15 @@ entry:
 declare hotspotcc ptr @jeandle.current_thread()
 declare hotspotcc ptr addrspace(1) @new_array(ptr, i32, ptr)
 declare hotspotcc void @SharedRuntime_register_finalizer(ptr, ptr addrspace(1))
+; Slow-path runtime routines for monitor JavaOps. The LOCKING routine is an
+; indirect routine called via a JIT stub (hotspotcc); declared here and
+; resolved at link time via a routine-call reloc to the stub. The UNLOCKING
+; routine is a direct leaf (reachable=false) whose far C++ address cannot be
+; reached by a PC-relative jump, so it is NOT declared here; the monitorexit
+; slow paths call it via a baked absolute-address global
+; (@SharedRuntime.complete_monitor_unlocking_C) defined in
+; jeandleRuntimeDefinedJavaOps.cpp — same pattern as the G1 barrier globals.
+declare hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1), ptr addrspace(0), ptr)
 
 ; Implementation of Java anewarray and newarray operation
 define private hotspotcc ptr addrspace(1) @jeandle.newarray(ptr %array_klass, i32 %length) noinline "lower-phase"="1"  {
@@ -725,29 +739,36 @@ release_path:
   ret void
 }
 
-; Fast path implementation of monitorenter when LockingMode == 0
-define hotspotcc i1 @jeandle.monitorenter_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorenter when LockingMode == 0. A complete JavaOp:
+; the fast path attempts the lock; every failure path falls through to the
+; slow path, which delegates to the SharedRuntime slow routine. The fast path
+; increments held_monitor_count on success; the slow path does NOT (the runtime
+; routine manages its own counter), preserving the pre-refactor semantics.
+define hotspotcc void @jeandle.monitorenter_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
   %mark_word = load atomic i64, ptr addrspace(1) %mark_word_addr unordered, align 8
   %is_inflated = call hotspotcc i1 @jeandle.check_inflated(i64 %mark_word)
-  br i1 %is_inflated, label %monitor_lock_fast_path, label %return_false
+  br i1 %is_inflated, label %monitor_lock_fast_path, label %slow_path
 
 monitor_lock_fast_path:
   %acquired = call hotspotcc i1 @jeandle.try_acquire_monitor_lock(i64 %mark_word, ptr addrspace(0) %lock)
-  br i1 %acquired, label %increment_lock_count_and_return_true, label %return_false
+  br i1 %acquired, label %increment_lock_count_and_return, label %slow_path
 
-increment_lock_count_and_return_true:
+increment_lock_count_and_return:
   call hotspotcc void @jeandle.increment_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  call hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread)
+  ret void
 }
 
-; Fast path implementation of monitorenter when LockingMode == 1
-define hotspotcc i1 @jeandle.monitorenter_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorenter when LockingMode == 1. Complete JavaOp:
+; thin-lock fast path (with recursive-owner check); all failures go to slow_path.
+define hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -762,7 +783,7 @@ thin_lock_path:
   %lock_as_int = ptrtoint ptr %lock to i64
   %thin_lock_cas = cmpxchg ptr addrspace(1) %mark_word_addr, i64 %unlocked_mark_word, i64 %lock_as_int acq_rel monotonic, align 8
   %thin_lock_acquired = extractvalue { i64, i1 } %thin_lock_cas, 1
-  br i1 %thin_lock_acquired, label %increment_lock_count_and_return_true, label %check_recursive_thin_lock
+  br i1 %thin_lock_acquired, label %increment_lock_count_and_return, label %check_recursive_thin_lock
 
 check_recursive_thin_lock:
   %stack_top = call hotspotcc i64 @jeandle.get_stack_pointer()
@@ -772,22 +793,26 @@ check_recursive_thin_lock:
   %recursive_masked_value = and i64 %offset_from_sp, %check_recursive_mask_value
   store i64 %recursive_masked_value, ptr %lock, align 8
   %is_recursive_thin_lock = icmp eq i64 %recursive_masked_value, 0
-  br i1 %is_recursive_thin_lock, label %increment_lock_count_and_return_true, label %return_false
+  br i1 %is_recursive_thin_lock, label %increment_lock_count_and_return, label %slow_path
 
 monitor_lock_fast_path:
   %acquired = call hotspotcc i1 @jeandle.try_acquire_monitor_lock(i64 %mark_word, ptr addrspace(0) %lock)
-  br i1 %acquired, label %increment_lock_count_and_return_true, label %return_false
+  br i1 %acquired, label %increment_lock_count_and_return, label %slow_path
 
-increment_lock_count_and_return_true:
+increment_lock_count_and_return:
   call hotspotcc void @jeandle.increment_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  call hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread)
+  ret void
 }
 
-; Fast path implementation of monitorenter when LockingMode == 2
-define hotspotcc i1 @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorenter when LockingMode == 2. Complete JavaOp:
+; lightweight-lock fast path (CAS + lock-stack push); all failures (stack full,
+; CAS lost, inflated-monitor acquire fail) go to slow_path.
+define hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -802,7 +827,7 @@ lightweight_lock_path:
   %lock_stack_top = load i32, ptr addrspace(2) %lock_stack_top_addr, align 4
   %lock_stack_end = load i32, ptr @JavaThread.lock_stack_end
   %is_lock_stack_full = icmp sge i32 %lock_stack_top, %lock_stack_end
-  br i1 %is_lock_stack_full, label %return_false, label %lightweight_lock
+  br i1 %is_lock_stack_full, label %slow_path, label %lightweight_lock
 
 lightweight_lock:
   %markWord_clear_lock_mask = load i64, ptr @markWord.clear_lock_mask
@@ -811,7 +836,7 @@ lightweight_lock:
   %unlocked_mark_word = or i64 %mark_word_clear_lock, %markWord_unlocked_value
   %lightweight_lock_cas = cmpxchg ptr addrspace(1) %mark_word_addr, i64 %unlocked_mark_word, i64 %mark_word_clear_lock acq_rel monotonic, align 8
   %lightweight_lock_acquired = extractvalue { i64, i1 } %lightweight_lock_cas, 1
-  br i1 %lightweight_lock_acquired, label %push_oop_to_lock_stack, label %return_false
+  br i1 %lightweight_lock_acquired, label %push_oop_to_lock_stack, label %slow_path
 
 push_oop_to_lock_stack:
   %lock_stack_top_zext = zext i32 %lock_stack_top to i64
@@ -820,45 +845,57 @@ push_oop_to_lock_stack:
   %oopSize = load i32, ptr @oopSize
   %lock_stack_top_increased = add i32 %lock_stack_top, %oopSize
   store i32 %lock_stack_top_increased, ptr addrspace(2) %lock_stack_top_addr, align 4
-  br label %increment_lock_count_and_return_true
+  br label %increment_lock_count_and_return
 
 monitor_lock_fast_path:
   %acquired = call hotspotcc i1 @jeandle.try_acquire_monitor_lock(i64 %mark_word, ptr addrspace(0) %lock)
-  br i1 %acquired, label %increment_lock_count_and_return_true, label %return_false
+  br i1 %acquired, label %increment_lock_count_and_return, label %slow_path
 
-increment_lock_count_and_return_true:
+increment_lock_count_and_return:
   call hotspotcc void @jeandle.increment_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  call hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread)
+  ret void
 }
 
-; Fast path implementation of monitorexit when LockingMode == 0
-define hotspotcc i1 @jeandle.monitorexit_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorexit when LockingMode == 0. Complete JavaOp: the
+; fast path releases the lock and decrements held_monitor_count on success;
+; failure falls through to the slow path. The slow path does NOT call
+; decrement_lock_count (the pre-refactor user-IR slow path did not either);
+; the runtime routine handles release on its own.
+define hotspotcc void @jeandle.monitorexit_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
   %mark_word = load atomic i64, ptr addrspace(1) %mark_word_addr unordered, align 8
   %released = call hotspotcc i1 @jeandle.try_release_monitor_lock(i64 %mark_word)
-  br i1 %released, label %decrement_lock_count_and_return_true, label %return_false
+  br i1 %released, label %decrement_lock_count_and_return, label %slow_path
 
-decrement_lock_count_and_return_true:
+decrement_lock_count_and_return:
   call hotspotcc void @jeandle.decrement_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  %callee_addr = load i64, ptr @SharedRuntime.complete_monitor_unlocking_C
+  %callee = inttoptr i64 %callee_addr to ptr
+  call void %callee(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread) #0
+  ret void
 }
 
-; Fast path implementation of monitorexit when LockingMode == 1
-define hotspotcc i1 @jeandle.monitorexit_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorexit when LockingMode == 1. Complete JavaOp: thin
+; recursive-unlock fast path, else inflated release, else thin-unlock CAS;
+; all failures fall through to slow_path.
+define hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %displaced_header_offset = load i32, ptr @BasicLock.displaced_header_offset_in_bytes
   %displaced_header_addr = getelementptr inbounds i8, ptr %lock, i32 %displaced_header_offset
   %displaced_header = load i64, ptr %displaced_header_addr, align 8
   %is_recursive_stack_unlock = icmp eq i64 %displaced_header, 0
-  br i1 %is_recursive_stack_unlock, label %decrement_lock_count_and_return_true, label %check_if_lock_is_inflated
+  br i1 %is_recursive_stack_unlock, label %decrement_lock_count_and_return, label %check_if_lock_is_inflated
 
 check_if_lock_is_inflated:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
@@ -871,22 +908,28 @@ thin_unlock_path:
   %lock_as_int = ptrtoint ptr %lock to i64
   %thin_lock_cas = cmpxchg ptr addrspace(1) %mark_word_addr, i64 %lock_as_int, i64 %displaced_header acq_rel monotonic, align 8
   %thin_lock_released = extractvalue { i64, i1 } %thin_lock_cas, 1
-  br i1 %thin_lock_released, label %decrement_lock_count_and_return_true, label %return_false
+  br i1 %thin_lock_released, label %decrement_lock_count_and_return, label %slow_path
 
 monitor_unlock_fast_path:
   %released = call hotspotcc i1 @jeandle.try_release_monitor_lock(i64 %mark_word)
-  br i1 %released, label %decrement_lock_count_and_return_true, label %return_false
+  br i1 %released, label %decrement_lock_count_and_return, label %slow_path
 
-decrement_lock_count_and_return_true:
+decrement_lock_count_and_return:
   call hotspotcc void @jeandle.decrement_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  %callee_addr = load i64, ptr @SharedRuntime.complete_monitor_unlocking_C
+  %callee = inttoptr i64 %callee_addr to ptr
+  call void %callee(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread) #0
+  ret void
 }
 
-; Fast path implementation of monitorexit when LockingMode == 2
-define hotspotcc i1 @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
+; Implementation of monitorexit when LockingMode == 2. Complete JavaOp:
+; lightweight-unlock fast path (CAS + lock-stack pop); inflated release with an
+; anonymous-owner guard. All failures fall through to slow_path.
+define hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -899,7 +942,7 @@ lightweight_unlock_path:
   %unlocked_mark_word = or i64 %mark_word, %markWord_unlocked_value
   %lightweight_lock_cas = cmpxchg ptr addrspace(1) %mark_word_addr, i64 %mark_word, i64 %unlocked_mark_word acq_rel monotonic, align 8
   %lightweight_lock_released = extractvalue { i64, i1 } %lightweight_lock_cas, 1
-  br i1 %lightweight_lock_released, label %pop_oop_from_lock_stack, label %return_false
+  br i1 %lightweight_lock_released, label %pop_oop_from_lock_stack, label %slow_path
 
 pop_oop_from_lock_stack:
   %lock_stack_top_offset = load i32, ptr @JavaThread.lock_stack_top_offset
@@ -910,7 +953,7 @@ pop_oop_from_lock_stack:
   %new_lock_stack_top = sub i32 %lock_stack_top, %oopSize
   store i32 %new_lock_stack_top, ptr addrspace(2) %lock_stack_top_addr, align 4
   call hotspotcc void @jeandle.clear_oop_in_lock_stack_top(i32 %new_lock_stack_top)
-  br label %decrement_lock_count_and_return_true
+  br label %decrement_lock_count_and_return
 
 check_anonymous_owner:
   %monitor_ptr = inttoptr i64 %mark_word to ptr
@@ -920,18 +963,22 @@ check_anonymous_owner:
   %anonymous_owner_mask = load i64, ptr @ObjectMonitor.ANONYMOUS_OWNER
   %masked_owner = and i64 %owner, %anonymous_owner_mask
   %is_anonymous_owner = icmp ne i64 %masked_owner, 0
-  br i1 %is_anonymous_owner, label %return_false, label %monitor_unlock_fast_path
+  br i1 %is_anonymous_owner, label %slow_path, label %monitor_unlock_fast_path
 
 monitor_unlock_fast_path:
   %released = call hotspotcc i1 @jeandle.try_release_monitor_lock(i64 %mark_word)
-  br i1 %released, label %decrement_lock_count_and_return_true, label %return_false
+  br i1 %released, label %decrement_lock_count_and_return, label %slow_path
 
-decrement_lock_count_and_return_true:
+decrement_lock_count_and_return:
   call hotspotcc void @jeandle.decrement_lock_count()
-  ret i1 true
+  ret void
 
-return_false:
-  ret i1 false
+slow_path:
+  %current_thread = call hotspotcc ptr @jeandle.current_thread()
+  %callee_addr = load i64, ptr @SharedRuntime.complete_monitor_unlocking_C
+  %callee = inttoptr i64 %callee_addr to ptr
+  call void %callee(ptr addrspace(1) %obj, ptr addrspace(0) %lock, ptr %current_thread) #0
+  ret void
 }
 
 attributes #0 = { "gc-leaf-function" } 

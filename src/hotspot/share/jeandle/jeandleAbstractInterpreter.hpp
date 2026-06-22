@@ -432,6 +432,11 @@ class JeandleAbstractInterpreter : public StackObj {
   void monitorenter();
   void monitorexit();
 
+  // Emit the single complete monitorenter JavaOp (fast+slow path folded into
+  // the JavaOp body) and tag it with !jeandle.lock_depth. Shared by the common
+  // path and the DiagnoseSyncOnValueBasedClasses path in shared_lock.
+  void emit_monitorenter_java_op(LockValue lock, int lock_depth);
+
   void null_check(llvm::Value* obj);
 
   void zero_check(llvm::Value* divisor);

@@ -42,6 +42,7 @@
 #include "runtime/javaThread.hpp"
 #include "runtime/objectMonitor.hpp"
 #include "runtime/safepointMechanism.hpp"
+#include "runtime/sharedRuntime.hpp"
 
 //                  name, lower_phase, return_type, arg_types
 #define DEF_JAVA_OP(name, lower_phase, return_type, ...)                                        \
@@ -63,7 +64,7 @@
 
 namespace {
 
-// We cannot obtain contexts such as BCI in DEF_JAVA_OP. 
+// We cannot obtain contexts such as BCI in DEF_JAVA_OP.
 // But we can pass the external deopt bundle into this empty one via inlining.
 llvm::OperandBundleDef create_empty_deopt_bundle() {
   return llvm::OperandBundleDef("deopt", llvm::SmallVector<llvm::Value*>{});
@@ -305,7 +306,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("ObjectMonitor.succ_offset_no_monitor_value",       int32_type, static_cast<uint64_t>(OM_OFFSET_NO_MONITOR_VALUE_TAG(succ)));
   define_global("instanceOopDesc.base_offset_in_bytes",             int32_type, static_cast<uint64_t>(instanceOopDesc::base_offset_in_bytes()));
 
-  
+
   define_global("markWord.clear_lock_mask",                         int64_type, static_cast<uint64_t>(~(int32_t)markWord::lock_mask_in_place));
   define_global("markWord.monitor_value",                           int64_type, static_cast<uint64_t>(markWord::monitor_value));
   define_global("markWord.unlocked_value",                          int64_type, static_cast<uint64_t>(markWord::unlocked_value));
@@ -314,7 +315,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("JavaThread.tlab_end_offset",                       int64_type, static_cast<uint64_t>(JavaThread::tlab_end_offset()));
   define_global("JavaThread.tlab_top_offset",                       int64_type, static_cast<uint64_t>(JavaThread::tlab_top_offset()));
   define_global("markWord.prototype_value",                         int64_type, static_cast<uint64_t>(markWord::prototype().value()));
-  
+
   define_global("JVM_ACC_IS_VALUE_BASED_CLASS",                     int32_type, static_cast<uint64_t>(JVM_ACC_IS_VALUE_BASED_CLASS));
   define_global("JVM_ACC_HAS_FINALIZER",                            int32_type, static_cast<uint64_t>(JVM_ACC_HAS_FINALIZER));
   define_global("oopSize",                                          int32_type, static_cast<uint64_t>(oopSize));
@@ -334,6 +335,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("ci_card_table_address",                            int64_type, static_cast<uint64_t>(p2i(ci_card_table_address())));
   define_global("G1BarrierSetRuntime.write_ref_field_pre_entry",    int64_type, static_cast<uint64_t>(p2i(CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_pre_entry))));
   define_global("G1BarrierSetRuntime.write_ref_field_post_entry",   int64_type, static_cast<uint64_t>(p2i(CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_post_entry))));
+  define_global("SharedRuntime.complete_monitor_unlocking_C",       int64_type, static_cast<uint64_t>(p2i(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C))));
 
   define_global("VMOptions.UseTLAB",                                int1_type, static_cast<uint64_t>(UseTLAB));
   define_global("VMOptions.ZeroTLAB",                               int1_type, static_cast<uint64_t>(ZeroTLAB));
