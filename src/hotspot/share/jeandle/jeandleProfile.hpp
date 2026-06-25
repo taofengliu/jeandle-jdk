@@ -49,15 +49,17 @@ class JeandleProfile : public StackObj {
     uint taken;
     uint not_taken;
     bool valid;
-    // A side reached the saturating max (max_juint): its ratio is no longer
-    // trustworthy. Speculative use (weights, prune) treats it conservatively.
+    // Set when a side's count is too large to fit in a signed int
+    // (interpreter saturation at UINT64_MAX / C1 wrap). Mirrors C2's
+    // counters_are_meaningful; speculative use (weights, prune) treats it
+    // conservatively.
     bool overflow;
   };
   BranchCounts branch_at(int bci) const;
 
   // Per-case + default execution counts for a tableswitch/lookupswitch at
   // `bci`. Appends one count per case to `case_counts` in bytecode order.
-  // `overflow` is set when any count saturated at max_juint.
+  // `overflow` is set when any count is too large to fit in a signed int.
   void switch_at(int bci, GrowableArray<uint>& case_counts,
                  uint& default_count, bool& valid, bool& overflow) const;
 };

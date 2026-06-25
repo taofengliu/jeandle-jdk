@@ -47,6 +47,21 @@ uint JeandleProfile::entry_count() const {
   return count > 0 ? (uint) count : 0;
 }
 
+// A branch/case count too large to fit in a signed int is treated as
+// untrustworthy, mirroring C2's counters_are_meaningful (opto/parse2.cpp),
+// which reads JumpData::taken() into an int and rejects negative values.
+//
+// There is no JVM-wide overflow invariant on these cells: the interpreter
+// saturates the full 64-bit cell at UINT64_MAX (cpu/x86/interp_masm_x86.cpp,
+// addptr+sbbptr in profile_taken_branch), C1 plain-adds and wraps, and
+// JumpData::inc_taken (a uint32-saturating helper) has no callers. The old
+// == max_juint test only caught full 64-bit saturation; this covers every
+// count whose magnitude C2 would also reject. Same idiom as
+// CounterData::count() (methodData.hpp).
+static bool count_overflowed(uint c) {
+  return c > (uint) max_jint;
+}
+
 JeandleProfile::BranchCounts JeandleProfile::branch_at(int bci) const {
   BranchCounts result = {0, 0, false, false};
   if (!has_profile()) {
@@ -62,10 +77,8 @@ JeandleProfile::BranchCounts JeandleProfile::branch_at(int bci) const {
   result.taken     = branch->taken();
   result.not_taken = branch->not_taken();
   result.valid     = true;
-  // BranchData counters saturate at max_juint (inc_taken clamps, never wrapping
-  // to 0). A saturated side means the taken/not_taken ratio is no longer
-  // trustworthy; flag it so callers can be conservative.
-  result.overflow  = (result.taken == max_juint || result.not_taken == max_juint);
+  result.overflow  = count_overflowed(result.taken) ||
+                     count_overflowed(result.not_taken);
   return result;
 }
 
@@ -83,11 +96,11 @@ void JeandleProfile::switch_at(int bci, GrowableArray<uint>& case_counts,
   }
   MultiBranchData* multi = data->as_MultiBranchData();
   default_count = multi->default_count();
-  overflow = (default_count == max_juint);
+  overflow = count_overflowed(default_count);
   int num_cases = multi->number_of_cases();
   for (int i = 0; i < num_cases; i++) {
     uint c = multi->count_at(i);
-    if (c == max_juint) overflow = true;
+    if (count_overflowed(c)) overflow = true;
     case_counts.append(c);
   }
   valid = true;
