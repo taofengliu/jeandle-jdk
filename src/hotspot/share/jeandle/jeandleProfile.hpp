@@ -43,8 +43,6 @@ class JeandleProfile : public StackObj {
   // transforms (unstable-if prune, guarded devirt) must gate on this.
   bool is_mature() const;
 
-  uint entry_count() const;
-
   struct BranchCounts {
     uint taken;
     uint not_taken;

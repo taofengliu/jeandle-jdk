@@ -39,14 +39,6 @@ bool JeandleProfile::is_mature() const {
   return _mdo != nullptr && _mdo->is_mature();
 }
 
-uint JeandleProfile::entry_count() const {
-  if (!JeandleUseProfile || _method == nullptr) {
-    return 0;
-  }
-  int count = _method->interpreter_invocation_count();
-  return count > 0 ? (uint) count : 0;
-}
-
 // A branch/case count too large to fit in a signed int is treated as
 // untrustworthy, mirroring C2's counters_are_meaningful (opto/parse2.cpp),
 // which reads JumpData::taken() into an int and rejects negative values.
