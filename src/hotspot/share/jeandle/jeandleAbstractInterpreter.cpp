@@ -1662,6 +1662,8 @@ void JeandleAbstractInterpreter::do_if_branch(llvm::Value* cond) {
                       md_builder.createBranchWeights(
                           cond_true_is_hot ? hot_weight : cold_weight,
                           cond_true_is_hot ? cold_weight : hot_weight));
+      // TODO: Here maybe we can use the liveness of the pruned branch's bci,
+      // then the liveness info will be more accurate.
       uncommon_trap(Deoptimization::Reason_unstable_if,
                     Deoptimization::Action_reinterpret, trap_block);
       // Skip the pruned JBB in the post-loop successor merge; its preallocated

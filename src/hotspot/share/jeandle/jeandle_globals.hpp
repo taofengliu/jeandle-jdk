@@ -59,7 +59,7 @@
   product(bool, JeandleRecordVMCallbacks, false,                            \
           "Record VM callback invocations for standalone LLVM testing")     \
                                                                             \
-  product(bool, JeandleUseProfile, false,                                   \
+  product(bool, JeandleUseProfile, true,                                    \
           "Use interpreter/C1 profile (MDO) for branch/switch weights, "    \
           "unstable-if branch pruning")                                     \
                                                                             \
