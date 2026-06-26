@@ -21,11 +21,13 @@
 #ifndef SHARE_JEANDLE_PROFILE_HPP
 #define SHARE_JEANDLE_PROFILE_HPP
 
+#include "jeandle/__llvmHeadersBegin__.hpp"
+#include "llvm/ADT/SmallVector.h"
+
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "ci/ciMethod.hpp"
 #include "ci/ciMethodData.hpp"
 #include "memory/allocation.hpp"
-#include "utilities/growableArray.hpp"
 
 // Read-only view of a method's MDO for the Jeandle JIT. Callers must treat
 // has_profile()==false as "emit the conservative shape", never as an error --
@@ -55,11 +57,16 @@ class JeandleProfile : public StackObj {
   };
   BranchCounts branch_at(int bci) const;
 
-  // Per-case + default execution counts for a tableswitch/lookupswitch at
-  // `bci`. Appends one count per case to `case_counts` in bytecode order.
-  // `overflow` is set when any count is too large to fit in a signed int.
-  void switch_at(int bci, GrowableArray<uint>& case_counts,
-                 uint& default_count, bool& valid, bool& overflow) const;
+  // Per-case + default execution counts for a tableswitch/lookupswitch.
+  // case_counts holds one count per case in bytecode order.
+  // overflow is set when any count is too large to fit in a signed int.
+  struct SwitchCounts {
+    llvm::SmallVector<uint32_t, 8> case_counts;
+    uint32_t default_count;
+    bool valid;
+    bool overflow;
+  };
+  SwitchCounts switch_at(int bci) const;
 };
 
 #endif // SHARE_JEANDLE_PROFILE_HPP

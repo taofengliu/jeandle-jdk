@@ -19,7 +19,6 @@
  */
 
 #include "jeandle/jeandleProfile.hpp"
-
 #include "jeandle/jeandle_globals.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
@@ -74,26 +73,27 @@ JeandleProfile::BranchCounts JeandleProfile::branch_at(int bci) const {
   return result;
 }
 
-void JeandleProfile::switch_at(int bci, GrowableArray<uint>& case_counts,
-                               uint& default_count, bool& valid, bool& overflow) const {
-  valid = false;
-  overflow = false;
-  default_count = 0;
+JeandleProfile::SwitchCounts JeandleProfile::switch_at(int bci) const {
+  SwitchCounts result;
+  result.default_count = 0;
+  result.valid = false;
+  result.overflow = false;
   if (!has_profile()) {
-    return;
+    return result;
   }
   ciProfileData* data = _mdo->bci_to_data(bci, nullptr);
   if (data == nullptr || !data->is_MultiBranchData()) {
-    return;
+    return result;
   }
   MultiBranchData* multi = data->as_MultiBranchData();
-  default_count = multi->default_count();
-  overflow = count_overflowed(default_count);
+  result.default_count = (uint32_t) multi->default_count();
+  result.overflow = count_overflowed(multi->default_count());
   int num_cases = multi->number_of_cases();
   for (int i = 0; i < num_cases; i++) {
     uint c = multi->count_at(i);
-    if (count_overflowed(c)) overflow = true;
-    case_counts.append(c);
+    if (count_overflowed(c)) result.overflow = true;
+    result.case_counts.push_back((uint32_t) c);
   }
-  valid = true;
+  result.valid = true;
+  return result;
 }

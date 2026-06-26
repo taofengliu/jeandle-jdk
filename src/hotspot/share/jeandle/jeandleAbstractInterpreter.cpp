@@ -1536,10 +1536,11 @@ void JeandleAbstractInterpreter::increment() {
 
 void JeandleAbstractInterpreter::attach_branch_weights(llvm::BranchInst* br, int bci) {
   JeandleProfile::BranchCounts counts = _profile.branch_at(bci);
-  if (!counts.valid || counts.overflow ||
-      (counts.taken == 0 && counts.not_taken == 0)) {
-    return;  // overflow: a saturated side makes the taken/not_taken ratio meaningless
+
+  if (!_profile.is_mature() || !counts.valid || counts.overflow) {
+    return;
   }
+
   // Clamp zero counts to 1: an unpruned branch must not advertise an impossible
   // edge to LLVM. A genuinely-never-observed strict-zero side is handled by the unstable-if prune
   // pruning; reaching here with a 0 count means immature profile, where 0 is
@@ -1552,29 +1553,27 @@ void JeandleAbstractInterpreter::attach_branch_weights(llvm::BranchInst* br, int
 }
 
 void JeandleAbstractInterpreter::attach_switch_weights(llvm::SwitchInst* switch_inst, int bci) {
-  GrowableArray<uint> case_counts;
-  uint default_count = 0;
-  bool valid = false;
-  bool overflow = false;
-  _profile.switch_at(bci, case_counts, default_count, valid, overflow);
-  if (!valid || overflow) {
+  if (!_profile.is_mature()) {
+    return;  // immature profile: let LLVM assume a uniform distribution
+  }
+  JeandleProfile::SwitchCounts counts = _profile.switch_at(bci);
+  if (!counts.valid || counts.overflow) {
     return;  // overflow: a saturated case count makes the weights unreliable
   }
   // A SwitchInst's successors are [default, case0, case1, ...]; the cases were added
   // in bytecode order, matching MultiBranchData::count_at(i). Require an exact size
   // match so a weight can never land on the wrong successor.
-  if (case_counts.length() != (int) switch_inst->getNumCases()) {
+  if (counts.case_counts.size() != switch_inst->getNumCases()) {
     return;
   }
   // Clamp zero counts to 1 (see attach_branch_weights): an unpruned switch arm must
   // not be advertised as an impossible edge. Skip attaching entirely only when there
   // is no information at all (every count zero).
   llvm::SmallVector<uint32_t, 8> weights;
-  weights.push_back(default_count == 0 ? 1u : (uint32_t) default_count);
-  bool any_nonzero = default_count != 0;
-  for (int i = 0; i < case_counts.length(); i++) {
-    uint count = case_counts.at(i);
-    weights.push_back(count == 0 ? 1u : (uint32_t) count);
+  weights.push_back(counts.default_count == 0 ? 1u : counts.default_count);
+  bool any_nonzero = counts.default_count != 0;
+  for (uint32_t count : counts.case_counts) {
+    weights.push_back(count == 0 ? 1u : count);
     any_nonzero = any_nonzero || (count != 0);
   }
   if (!any_nonzero) {
