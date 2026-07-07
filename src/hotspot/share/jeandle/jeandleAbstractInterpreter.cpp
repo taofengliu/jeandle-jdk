@@ -3510,18 +3510,6 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
 
   _jvm->push_lock(lock);
 
-  // bytecode-level lock depth of the just-pushed monitor. After
-  // push_lock above, this lock occupies the topmost slot of the
-  // JeandleVMState lock stack; its 0-based depth is `locks_size() - 1`.
-  // This is the Java-bytecode-level monitor depth — stable across analyzer
-  // re-visits of the same bytecode within a loop fixpoint, which is what
-  // jeandle-llvm's PEA needs for its depth-aware lock cascade
-  // (PartialEscape.h:MonitorIdRef / PartialEscapeAnalysis.cpp:LockEnter).
-  int lock_depth = _jvm->locks_size() - 1;
-  if (lock_depth < 0) {
-    lock_depth = 0;  // defensive — shared_lock is only invoked after push.
-  }
-
   int cur_bci = _bytecodes.cur_bcp() == nullptr ? -1 : _bytecodes.cur_bci();
 
   // The monitor op is a single complete JavaOp whose body contains both the
@@ -3540,7 +3528,7 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
     _ir_builder.CreateCondBr(check, monitorenter_slow_path, not_value_based);
 
     _ir_builder.SetInsertPoint(not_value_based);
-    emit_monitorenter_java_op(lock, lock_depth);
+    emit_monitorenter_java_op(lock);
     _ir_builder.CreateBr(monitor_entered);
 
     _ir_builder.SetInsertPoint(monitorenter_slow_path);
@@ -3555,30 +3543,19 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
   } else {
     // Common case: just the JavaOp. No cond_br, no slow-path block, no
     // current_thread fetch — all of that now lives inside the JavaOp body.
-    emit_monitorenter_java_op(lock, lock_depth);
+    emit_monitorenter_java_op(lock);
   }
 }
 
-void JeandleAbstractInterpreter::emit_monitorenter_java_op(LockValue lock, int lock_depth) {
-  llvm::CallInst* call;
+void JeandleAbstractInterpreter::emit_monitorenter_java_op(LockValue lock) {
   if (LockingMode == LM_MONITOR) {
-    call = call_java_op("jeandle.monitorenter_with_monitor_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorenter_with_monitor_lock", {lock.object().value(), lock.lock()});
   } else if (LockingMode == LM_LEGACY) {
-    call = call_java_op("jeandle.monitorenter_with_thin_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorenter_with_thin_lock", {lock.object().value(), lock.lock()});
   } else {
     assert(LockingMode == LM_LIGHTWEIGHT, "");
-    call = call_java_op("jeandle.monitorenter_with_lightweight_lock", {lock.object().value(), lock.lock()});
+    call_java_op("jeandle.monitorenter_with_lightweight_lock", {lock.object().value(), lock.lock()});
   }
-  // tag the monitorenter call with !jeandle.lock_depth so
-  // jeandle-llvm's PEA pass can read the Java-bytecode-level monitor depth
-  // for its narrow lock cascade rule and merge-time stack-identity
-  // check. Format: a single i32 holding the 0-based depth.
-  // When this metadata is absent (e.g. lit-only LLVM tests), the PEA pass
-  // falls back to its analyzer-run-monotonic Order proxy.
-  llvm::MDNode* lock_depth_md = llvm::MDNode::get(*_context, {
-      llvm::ConstantAsMetadata::get(_ir_builder.getInt32(lock_depth))
-  });
-  call->setMetadata("jeandle.lock_depth", lock_depth_md);
 }
 
 void JeandleAbstractInterpreter::shared_unlock(LockValue lock) {
