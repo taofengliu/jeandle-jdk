@@ -35,7 +35,9 @@
 #include "jeandle/jeandle_globals.hpp"
 #include "logging/log.hpp"
 #include "oops/arrayOop.hpp"
+#include "oops/klass.hpp"
 #include "runtime/deoptimization.hpp"
+#include "runtime/globals.hpp"
 
 // =============================================================================
 // Call-site IR annotation helpers (migrated from JeandleIntrinsicIRSemantics)
@@ -139,6 +141,15 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     // compare unsigned
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
+
+    // count leading/trailing zeros
+    // No CPU gating: LLVM lowers ctlz/cttz to native sequences on both x86-64
+    // (bsr/bsf fallback when LZCNT/TZCNT are absent) and aarch64 (CLZ, RBIT+CLZ),
+    // never to a libcall. Matches C2, which always intrinsifies these.
+    case vmIntrinsics::_numberOfLeadingZeros_i:
+    case vmIntrinsics::_numberOfLeadingZeros_l:
+    case vmIntrinsics::_numberOfTrailingZeros_i:
+    case vmIntrinsics::_numberOfTrailingZeros_l:
       return true;
     default:
       return false;
@@ -198,6 +209,13 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_bitCount_i:
     case vmIntrinsics::_bitCount_l:
       return lower_bit_count(id);
+
+    case vmIntrinsics::_numberOfLeadingZeros_i:
+    case vmIntrinsics::_numberOfLeadingZeros_l:
+      return lower_count_zeros(id, llvm::Intrinsic::ctlz);
+    case vmIntrinsics::_numberOfTrailingZeros_i:
+    case vmIntrinsics::_numberOfTrailingZeros_l:
+      return lower_count_zeros(id, llvm::Intrinsic::cttz);
 
     // Dual-path libm (JeandleUseHotspotIntrinsics selects the path)
     // TODO/FIXME: LLVM's `llvm.sin`, `llvm.cos`, etc. do **not** guarantee
@@ -581,6 +599,33 @@ bool JeandleIntrinsicLowering::lower_bit_count(vmIntrinsics::ID id) {
   return true;
 }
 
+// ---- lower_count_zeros ----
+// numberOfLeadingZeros  -> llvm.ctlz
+// numberOfTrailingZeros -> llvm.cttz
+// The _l variants return int in Java but llvm.ctlz/cttz.i64 returns i64, so trunc.
+bool JeandleIntrinsicLowering::lower_count_zeros(vmIntrinsics::ID id,
+                                                 llvm::Intrinsic::ID llvm_id) {
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  bool is_long = (id == vmIntrinsics::_numberOfLeadingZeros_l ||
+                  id == vmIntrinsics::_numberOfTrailingZeros_l);
+
+  llvm::Value* arg = is_long ? _interp->_jvm->lpop() : _interp->_jvm->ipop();
+  llvm::Type* arg_ty = arg->getType(); // i32 or i64
+
+  // ctlz/cttz take a trailing i1 is_zero_poison flag; pass false so that
+  // numberOf{Leading,Trailing}Zeros(0) is the bit width (32/64), not poison.
+  llvm::CallInst* call =
+      builder.CreateIntrinsic(arg_ty, llvm_id, {arg, builder.getInt1(false)});
+
+  if (is_long) {
+    _interp->_jvm->ipush(builder.CreateTrunc(call, JeandleType::java2llvm(BasicType::T_INT, ctx)));
+  } else {
+    _interp->_jvm->ipush(call);
+  }
+  return true;
+}
+
 // ---- lower_new_array ----
 //
 // Generates inline IR for Array.newInstance(Class<?>, int):
@@ -633,13 +678,53 @@ bool JeandleIntrinsicLowering::lower_new_array() {
       klass, llvm::ConstantPointerNull::get(c_heap_ptr_ty));
   builder.CreateCondBr(klass_is_null, slow_bb, fast_bb);
 
-  // Fast path: klass resolved → call unified jeandle.new_array(klass, length).
+  // Fast path: klass resolved → call unified jeandle.new_array.
+  // Unlike the bytecode path, the array klass is loaded from the mirror at runtime, so the
+  // element layout isn't a compile-time constant. Decode it from Klass::layout_helper the way
+  // C2's GraphKit::new_array does for reflective sites:
+  //   base_offset = (lh >> _lh_header_size_shift) & _lh_header_size_mask
+  //   log2_esize  = lh & 0x1f   (_lh_log2_element_size_shift == 0; masked < 32 for the shift,
+  //                              valid l2esz is <= LogBytesPerLong)
   builder.SetInsertPoint(fast_bb);
+  llvm::Value* lh_addr = builder.CreateInBoundsGEP(
+      builder.getInt8Ty(), klass, builder.getInt32(in_bytes(Klass::layout_helper_offset())));
+  llvm::Value* layout_helper = builder.CreateLoad(builder.getInt32Ty(), lh_addr);
+  llvm::Value* base_offset = builder.CreateAnd(
+      builder.CreateLShr(layout_helper, builder.getInt32(Klass::_lh_header_size_shift)),
+      builder.getInt32(Klass::_lh_header_size_mask));
+  llvm::Value* log2_esize = builder.CreateAnd(layout_helper, builder.getInt32(0x1f));
+  llvm::Value* size_in_bytes = _interp->emit_array_size_in_bytes(length, log2_esize, base_offset);
+  // Fast-path length cap, mirroring C2's reflective array path: the unscaled
+  // FastAllocateSizeLimit bounds the byte size to <= FastAllocateSizeLimit << LogBytesPerLong
+  // (~1MB) for any element type, so size_in_bytes cannot overflow i32. Larger reflective arrays
+  // fall to the slow path.
+  // TODO: this cap is a flat limit on element count, applied the same way regardless of element
+  // type. Because it isn't scaled by element size, it effectively assumes every element is 8
+  // bytes wide, so arrays of smaller elements (byte[], or reference arrays under compressed oops)
+  // fall back to the slow path far earlier than their real byte size requires. The constant-klass
+  // bytecode path (emit_jeandle_newarray) already scales it by element size:
+  //     FastAllocateSizeLimit << (LogBytesPerLong - log2_esize)
+  // We can do the same here using the log2_esize decoded just above -- one shift, covers every
+  // element type, no extra branching.
+  //
+  // Going further like C2 (speculatively assuming a reference array so the whole layout folds to
+  // constants) isn't worth it here: C2's real gain comes from optimizing the code after the
+  // allocation -- folding a trailing arraycopy's address math and deleting the now-redundant
+  // zeroing. Neither is reachable for us: the zeroing lives inside the opaque jeandle.new_array
+  // helper, and this reflection site just returns the array with no copy to merge with.
+  //
+  // If that after-allocation win is ever worth pursuing, the path forward is not C2's guard but
+  // making the zeroing removable at the call site: expose it as stores the optimizer can see (or
+  // flag the region as already-zeroed) so a following overwrite can delete it, and let the
+  // allocation fuse with the arraycopy.
+  llvm::Value* length_limit = builder.getInt32((int)FastAllocateSizeLimit);
+
   static constexpr CallSiteAttributeMetadata fast_attrs =
       {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE};
   llvm::Function* new_array_op = module.getFunction("jeandle.new_array");
   llvm::CallBase* fast_call =
-      emit_callsite(new_array_op, llvm::CallingConv::Hotspot_JIT, {klass, length}, fast_attrs);
+      emit_callsite(new_array_op, llvm::CallingConv::Hotspot_JIT,
+                    {klass, length, size_in_bytes, base_offset, length_limit}, fast_attrs);
   // emit_callsite with exception edge moves builder to a new normal_dest block.
   builder.CreateBr(merge_bb);
   llvm::BasicBlock* fast_normal_bb = builder.GetInsertBlock();
