@@ -668,6 +668,7 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
   GrowableArray<ScopeValue*>* locals = num_deopts > 0 ? new GrowableArray<ScopeValue*>(current_method->max_locals()) : nullptr;
   GrowableArray<ScopeValue*>* stack  = num_deopts > 0 ? new GrowableArray<ScopeValue*>(current_method->max_stack()) : nullptr;
   GrowableArray<MonitorValue*>* monitors = num_deopts > 0 ? new GrowableArray<MonitorValue*>() : nullptr;
+  llvm::DenseSet<int> narrow_oop_locations;
   while (num_deopts > 0) {
     // local and stack deopt arguments are passed as a pair: <encode, value>
     // monitor deopt arguments are passed as a tuple: <encode, object, lock>
@@ -726,6 +727,19 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
         // record; only the youngest scope consumes the oopmap tail.
         return new JeandleStackMap(bci, current_method, nullptr, locals, stack, monitors, reexecute);
       }
+      case DeoptValueEncoding::NarrowOopMarkerType: {
+        assert(UseCompressedOops, "narrowoop only valid with CompressedOops");
+        assert(location != record->location_end(), "must be in range");
+        auto narrow_oop_location = *(location++);
+        StackMapParser::LocationKind narrow_oop_kind = narrow_oop_location.getKind();
+        if (narrow_oop_kind == StackMapParser::LocationKind::Register ||
+            narrow_oop_kind == StackMapParser::LocationKind::Indirect) {
+          VMReg narrow_oop_reg = resolve_vmreg(narrow_oop_location, narrow_oop_kind);
+          narrow_oop_locations.insert(narrow_oop_reg->value());
+        }
+        num_deopts -= 2;
+        break;
+      }
       default:
         Unimplemented();
     }
@@ -745,6 +759,7 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
     }
   };
 
+
   while (location != record->location_end()) {
     // Each GC pair is encoded as: base location, derived location.
     auto base_location = *(location++);
@@ -755,23 +770,30 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
     StackMapParser::LocationKind base_kind = base_location.getKind();
     StackMapParser::LocationKind derived_kind = derived_location.getKind();
 
-    if (base_kind != StackMapParser::LocationKind::Register &&
-        base_kind != StackMapParser::LocationKind::Indirect) {
+    if (derived_kind != StackMapParser::LocationKind::Register &&
+        derived_kind != StackMapParser::LocationKind::Indirect) {
       continue;
     }
 
-    assert(base_kind != StackMapParser::LocationKind::Direct, "invalid location kind");
-
-    VMReg reg_base = resolve_vmreg(base_location, base_kind);
     VMReg reg_derived = resolve_vmreg(derived_location, derived_kind);
+    bool is_narrowoop = UseCompressedOops && narrow_oop_locations.contains(reg_derived->value());
 
-    if(reg_base == reg_derived) {
-      // No derived pointer.
-      set_wide_oop_once(reg_base);
+    if (!is_narrowoop) {
+
+      if (base_kind != StackMapParser::LocationKind::Register &&
+          base_kind != StackMapParser::LocationKind::Indirect) {
+        continue;
+      }
+      VMReg reg_base = resolve_vmreg(base_location, base_kind);
+
+      if (reg_base == reg_derived) {
+        set_wide_oop_once(reg_derived);
+      } else {
+        set_wide_oop_once(reg_base);
+        oop_map->set_derived_oop(reg_derived, reg_base);
+      }
     } else {
-      // Derived pointer.
-      set_wide_oop_once(reg_base);
-      oop_map->set_derived_oop(reg_derived, reg_base);
+      oop_map->set_narrowoop(reg_derived);
     }
   }
   return new JeandleStackMap(bci, current_method, oop_map, locals, stack, monitors, reexecute);

@@ -2576,7 +2576,36 @@ void JeandleAbstractInterpreter::do_get_xxx(ciField* field, bool is_static) {
   }
 
   bool is_volatile = field->is_volatile();
-  llvm::Value* value = load_from_address(addr, field->layout_type(), is_volatile);
+  BasicType bt = field->layout_type();
+  if (UseCompressedOops && is_reference_type(bt)) {
+    bt = T_NARROWOOP;
+  }
+  llvm::Value* value = load_from_address(addr, bt, is_volatile);
+
+  // Attach java-klass metadata to the actual field load before decoding.
+  // Skip interface types: the verifier does not enforce interface types,
+  // so a field declared as an interface could hold any Object at runtime.
+  if (field->type()->is_klass()) {
+    ciKlass* field_klass = field->type()->as_klass();
+    if (field_klass->is_loaded() && !is_unverified_interface(field_klass)) {
+      Klass* klass_enc = (Klass*)(field_klass->constant_encoding());
+      if (llvm::Instruction* load_inst = llvm::dyn_cast<llvm::Instruction>(value)) {
+        llvm::MDNode* klass_md = llvm::MDNode::get(*_context, {
+            llvm::ConstantAsMetadata::get(_ir_builder.getInt64((intptr_t)klass_enc))
+        });
+        load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlass, klass_md);
+        if (is_effectively_final(field_klass)) {
+          load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlassExact,
+                                 llvm::MDNode::get(*_context, {}));
+        }
+      }
+    }
+  }
+
+  if (bt == T_NARROWOOP) {
+    llvm::Type* oop_type = JeandleType::java2llvm(T_OBJECT, *_context);
+    value = _ir_builder.CreateAddrSpaceCast(value, oop_type);
+  }
 
   // TODO: Move to a late-insertion pass (like InsertGCBarriers)
   // rather than inserting the barrier here in the frontend.
@@ -2602,25 +2631,6 @@ void JeandleAbstractInterpreter::do_get_xxx(ciField* field, bool is_static) {
                             llvm::SyncScope::SingleThread);
   }
 
-  // Attach java-klass metadata to loads of object/array fields.
-  // Skip interface types: the verifier does not enforce interface types,
-  // so a field declared as an interface could hold any Object at runtime.
-  if (field->type()->is_klass()) {
-    ciKlass* field_klass = field->type()->as_klass();
-    if (field_klass->is_loaded() && !is_unverified_interface(field_klass)) {
-      Klass* klass_enc = (Klass*)(field_klass->constant_encoding());
-      if (llvm::Instruction* load_inst = llvm::dyn_cast<llvm::Instruction>(value)) {
-        llvm::MDNode* klass_md = llvm::MDNode::get(*_context, {
-            llvm::ConstantAsMetadata::get(_ir_builder.getInt64((intptr_t)klass_enc))
-        });
-        load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlass, klass_md);
-        if (is_effectively_final(field_klass)) {
-          load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlassExact,
-                                 llvm::MDNode::get(*_context, {}));
-        }
-      }
-    }
-  }
 
   _jvm->push(field->type()->basic_type(), value);
 }
@@ -2638,7 +2648,13 @@ void JeandleAbstractInterpreter::do_put_xxx(ciField* field, bool is_static) {
   }
 
   bool is_volatile = field->is_volatile();
-  store_to_address(addr, value, field->layout_type(), is_volatile);
+  BasicType bt = field->layout_type();
+  if (UseCompressedOops && is_reference_type(bt)) {
+    llvm::Type* narrow_oop_type = JeandleType::java2llvm(T_NARROWOOP, *_context);
+    value = _ir_builder.CreateAddrSpaceCast(value, narrow_oop_type);
+    bt = T_NARROWOOP;
+  }
+  store_to_address(addr, value, bt, is_volatile);
 }
 
 llvm::Value* JeandleAbstractInterpreter::compute_instance_field_address(llvm::Value* obj, int offset) {
@@ -2801,8 +2817,10 @@ void JeandleAbstractInterpreter::do_array_load(BasicType basic_type) {
       break;
     }
     case T_OBJECT: {
-      llvm::Value* load_value = do_array_load_inner(
-              T_OBJECT, llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace));
+      llvm::Type* load_type = UseCompressedOops
+          ? llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::NarrowOopAddrSpace)
+          : llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+      llvm::Value* load_value = do_array_load_inner(T_OBJECT, load_type);
 
       // Attach element type metadata if the array's type is known.
       // TODO: maybe we can do this in LLVM side, then we can use context-sensitive type information of array.
@@ -2827,6 +2845,11 @@ void JeandleAbstractInterpreter::do_array_load(BasicType basic_type) {
         }
       }
 
+      if (UseCompressedOops) {
+        llvm::Type* oop_type = JeandleType::java2llvm(T_OBJECT, *_context);
+        load_value = _ir_builder.CreateAddrSpaceCast(load_value, oop_type);
+      }
+
       _jvm->apush(load_value);
       break;
     }
@@ -2849,17 +2872,11 @@ void JeandleAbstractInterpreter::do_array_load(BasicType basic_type) {
   }
 }
 
-void JeandleAbstractInterpreter::do_array_store_inner(BasicType basic_type, llvm::Type* store_type, llvm::Value* value) {
+llvm::Value* JeandleAbstractInterpreter::do_array_store_inner(BasicType basic_type, llvm::Type* store_type, llvm::Value* value) {
   llvm::Value* element_address = compute_array_element_address(basic_type, store_type);
   llvm::StoreInst* store_inst = _ir_builder.CreateStore(value, element_address);
   store_inst->setAtomic(llvm::AtomicOrdering::Unordered);
-
-  // TODO: A workaround for card table barrier of array element, not to block the development progress.
-  // Currently, we can't get array type in LLVM pass. Once a clearer design is available, the barrier
-  // insertion operation will be moved to the LLVM pass.
-  if (basic_type == T_OBJECT) {
-    call_java_op("jeandle.post_barrier", {element_address, value});
-  }
+  return element_address;
 }
 
 void JeandleAbstractInterpreter::do_array_store(BasicType basic_type) {
@@ -2905,7 +2922,18 @@ void JeandleAbstractInterpreter::do_array_store(BasicType basic_type) {
     }
     case T_OBJECT: {
       value = _jvm->apop();
-      do_array_store_inner(T_OBJECT, llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace), value);
+      llvm::Value* element_address;
+      if (UseCompressedOops) {
+        llvm::Type* store_type = llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::NarrowOopAddrSpace);
+        element_address = do_array_store_inner(T_OBJECT, store_type, _ir_builder.CreateAddrSpaceCast(value, store_type));
+      } else {
+        llvm::Type* store_type = llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+        element_address = do_array_store_inner(T_OBJECT, store_type, value);
+      }
+      // TODO: A workaround for card table barrier of array element, not to block the development progress.
+      // Currently, we can't get array type in LLVM pass. Once a clearer design is available, the barrier
+      // insertion operation will be moved to the LLVM pass.
+      call_java_op("jeandle.post_barrier", {element_address, value});
       break;
     }
     case T_BYTE: {
@@ -3291,8 +3319,9 @@ void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reaso
       int offset = java_lang_Throwable::get_detailMessage_offset();
       llvm::Value* exception_oop_field_addr = compute_instance_field_address(value, offset);
 
-      llvm::StoreInst* store_inst = _ir_builder.CreateStore(llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(JeandleType::java2llvm(BasicType::T_OBJECT, *_context))),
-          exception_oop_field_addr, true /* is_volatile */);
+      BasicType oop_field_type = UseCompressedOops ? T_NARROWOOP : T_OBJECT;
+      llvm::Value* null_oop = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(JeandleType::java2llvm(oop_field_type, *_context)));
+      llvm::StoreInst* store_inst = _ir_builder.CreateStore(null_oop, exception_oop_field_addr, true /* is_volatile */);
 
       store_inst->setAtomic(llvm::AtomicOrdering::Unordered);
       dispatch_exception_to_handler(value);
@@ -3671,9 +3700,7 @@ void JeandleAbstractInterpreter::call_register_finalizer() {
   // TODO: know statically that registration isn't required
 
   // dynamic test for whether the instance needs finalization
-  llvm::Value* klass_offset = llvm::ConstantInt::get(_ir_builder.getInt32Ty(), (uint64_t)oopDesc::klass_offset_in_bytes());
-  llvm::Value* klass_addr = _ir_builder.CreateInBoundsGEP(llvm::Type::getInt8Ty(*_context), receiver, klass_offset);
-  llvm::Value* klass = _ir_builder.CreateLoad(_ir_builder.getPtrTy(), klass_addr);
+  llvm::Value* klass = call_java_op("jeandle.load_klass", {receiver});
 
   llvm::Value* access_flags_offset = llvm::ConstantInt::get(_ir_builder.getInt32Ty(), (uint64_t)in_bytes(Klass::access_flags_offset()));
   llvm::Value* access_flags_addr = _ir_builder.CreateInBoundsGEP(llvm::Type::getInt8Ty(*_context), klass, access_flags_offset);
