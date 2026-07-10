@@ -2111,7 +2111,7 @@ void JeandleAbstractInterpreter::invoke() {
 
   // Record this call.
   uint32_t id = _compiled_code.next_statepoint_id();
-  _compiled_code.push_non_routine_call_site(new CallSiteInfo(call_type, dest, _bytecodes.cur_bci(), is_method_handle_invoke, id));
+  _compiled_code.push_non_routine_call_site(new CallSiteInfo(call_type, dest, is_method_handle_invoke, id));
 
   // Every invoke instruction may throw exceptions, handle them here.
   DispatchedDest dispatched = dispatch_exception_for_invoke();
