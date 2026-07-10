@@ -304,8 +304,7 @@ void JeandleCompiledCode::resolve_reloc_info(JeandleAssembler& assembler) {
 
           int inst_end_offset = JeandleAssembler::fixup_call_inst_offset(static_cast<int>(block->getAddress().getValue() + edge.getOffset()));
 
-          // TODO: Set the right bci.
-          CallSiteInfo* call_info = new CallSiteInfo(JeandleCompiledCall::ROUTINE_CALL, target_addr, -1/* bci */);
+          CallSiteInfo* call_info = new CallSiteInfo(JeandleCompiledCall::ROUTINE_CALL, target_addr);
           if (JeandleRuntimeRoutine::is_gc_leaf(target_addr)) {
             relocs.push_back(new JeandleCallReloc(inst_end_offset, _env, _method, call_info));
           } else {
@@ -319,8 +318,7 @@ void JeandleCompiledCode::resolve_reloc_info(JeandleAssembler& assembler) {
 
           int inst_end_offset = JeandleAssembler::fixup_call_inst_offset(static_cast<int>(block->getAddress().getValue() + edge.getOffset()));
 
-          // TODO: Set the right bci.
-          CallSiteInfo* call_info = new CallSiteInfo(JeandleCompiledCall::EXTERNAL_CALL, target_addr, -1/* bci */);
+          CallSiteInfo* call_info = new CallSiteInfo(JeandleCompiledCall::EXTERNAL_CALL, target_addr);
           // LLVM doesn't rewrite intrinsic calls to statepoints, so we don't need oopmaps for external calls.
           relocs.push_back(new JeandleCallReloc(inst_end_offset, _env, _method, call_info));
         } else if (JeandleAssembler::is_section_word_reloc(target, edge.getKind())) {
@@ -399,7 +397,7 @@ void JeandleCompiledCode::resolve_reloc_info(JeandleAssembler& assembler) {
         // frame with the right ciMethod for BCI and scope-value decoding.
         do {
           ciMethod* next_inlinee = nullptr;
-          reloc->add_stack_map(parse_stackmap(stackmaps, record, location, call_info, num_deopts,
+          reloc->add_stack_map(parse_stackmap(stackmaps, record, location, num_deopts,
                                               parse_context, next_inlinee));
           if (next_inlinee != nullptr) {
             parse_context = JeandleParseContext::inlinee(next_inlinee);
@@ -634,7 +632,6 @@ int JeandleCompiledCode::parse_stackmap_prologue(StackMapParser::record_iterator
 JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
                                                      StackMapParser::record_iterator& record,
                                                      StackMapParser::RecordAccessor::location_iterator& location,
-                                                     CallSiteInfo* call_info,
                                                      int& num_deopts,
                                                      const JeandleParseContext& parse_context,
                                                      ciMethod*& next_inlinee) {
@@ -650,7 +647,6 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
     bci = (location++)->getSmallConstant();
     guarantee(bci == (int)((location++)->getSmallConstant()), "duplicated bci must match");
     num_deopts -= 2;
-    call_info->set_bci(bci);
 
     if (bci != InvocationEntryBci) {
       Bytecodes::Code code = current_method->java_code_at_bci(bci);
