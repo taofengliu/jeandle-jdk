@@ -23,6 +23,7 @@
 
 #include "jeandle/__llvmHeadersBegin__.hpp"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ExecutionEngine/JITLink/JITLink.h"
 #include "llvm/IR/Statepoint.h"
@@ -60,13 +61,14 @@ public:
     ScalarValueType = 4,
     OrigPcSlotType = 5,
     MethodType = 6,
-    LastType = MethodType + 1
+    NarrowOopMarkerType = 7,
+    LastType = NarrowOopMarkerType + 1
   };
   DeoptValueEncoding(int index, DeoptValueType value_type, BasicType basic_type):
     _index(index), _value_type(value_type), _basic_type(basic_type) {
     assert(_value_type == LocalType || _value_type == StackType ||
            _value_type == MonitorType || _value_type == OrigPcSlotType ||
-           _value_type == MethodType,
+           _value_type == MethodType || _value_type == NarrowOopMarkerType,
            "Unsupported value type");
   }
 
@@ -97,6 +99,7 @@ public:
       case ScalarValueType: return "ScalarValueType";
       case OrigPcSlotType: return "OrigPcSlotType";
       case MethodType: return "MethodType";
+      case NarrowOopMarkerType: return "NarrowOopMarkerType";
       default: return "Unknown";
     }
   }
