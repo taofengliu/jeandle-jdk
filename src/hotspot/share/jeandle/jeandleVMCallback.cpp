@@ -35,6 +35,7 @@
 #include "ci/ciInstance.hpp"
 #include "ci/ciInstanceKlass.hpp"
 #include "ci/ciObject.hpp"
+#include "ci/ciUtilities.inline.hpp"
 #include "oops/fieldInfo.inline.hpp"
 #include "oops/fieldStreams.inline.hpp"
 #include "oops/instanceMirrorKlass.hpp"
@@ -56,26 +57,41 @@ uintptr_t jeandle_get_common_super_klass(uintptr_t k1, uintptr_t k2) {
 }
 
 uintptr_t jeandle_get_field_type(uintptr_t klass_ptr, int offset) {
+  // The LLVM optimizer invokes this callback from the compile thread while it
+  // is in _thread_in_native. Resolving a class/array field's signature
+  // dereferences oops (the holder's class loader and protection domain) via
+  // SystemDictionary, which requires _thread_in_vm. VM_ENTRY_MARK is the
+  // canonical compiler-thread native->VM transition (ThreadInVMfromNative +
+  // HandleMarkCleaner); its destructor restores _thread_in_native on return,
+  // so the early returns below are safe.
+  VM_ENTRY_MARK;
   Klass* klass = (Klass*)klass_ptr;
-  if (!klass->is_instance_klass()) return 0;
 
-  InstanceKlass* ik = InstanceKlass::cast(klass);
-  for (JavaFieldStream fs(ik); !fs.done(); fs.next()) {
-    if (fs.offset() == offset) {
-      Symbol* sig = fs.signature();
-      if (sig->char_at(0) == JVM_SIGNATURE_CLASS ||
-          sig->char_at(0) == JVM_SIGNATURE_ARRAY) {
-        Thread* current = Thread::current();
-        HandleMark hm(current);
-        Klass* field_klass = SystemDictionary::find_instance_or_array_klass(
-            current, sig, Handle(current, ik->class_loader()),
-            Handle(current, ik->protection_domain()));
-        return (uintptr_t)field_klass; // 0 if not loaded
+  // Walk the superclass chain so that an inherited field (declared in a
+  // superclass of the base oop's declared klass) is still resolved by offset.
+  // HotSpot assigns each field a unique offset across the hierarchy, so an
+  // offset unambiguously identifies a single field.
+  for (InstanceKlass* ik = klass->is_instance_klass()
+           ? InstanceKlass::cast(klass)
+           : nullptr;
+       ik != nullptr; ik = ik->super() == nullptr
+                                 ? nullptr
+                                 : InstanceKlass::cast(ik->super())) {
+    for (JavaFieldStream fs(ik); !fs.done(); fs.next()) {
+      if (fs.offset() == offset) {
+        Symbol* sig = fs.signature();
+        if (sig->char_at(0) == JVM_SIGNATURE_CLASS ||
+            sig->char_at(0) == JVM_SIGNATURE_ARRAY) {
+          Klass* field_klass = SystemDictionary::find_instance_or_array_klass(
+              thread, sig, Handle(thread, ik->class_loader()),
+              Handle(thread, ik->protection_domain()));
+          return (uintptr_t)field_klass; // 0 if not loaded
+        }
+        return 0; // primitive field
       }
-      return 0; // primitive field
     }
   }
-  return 0; // field not found at offset
+  return 0; // no field at this offset in the hierarchy (incl. array klasses)
 }
 
 bool jeandle_is_interface(uintptr_t klass_ptr) {
@@ -96,6 +112,13 @@ bool jeandle_is_effectively_final(uintptr_t klass_ptr) {
     return jeandle_is_effectively_final(
         (uintptr_t)ObjArrayKlass::cast(klass)->bottom_klass());
   return false;
+}
+
+bool jeandle_is_unverified_interface(uintptr_t klass_ptr) {
+  // Reuses the shared helper that recurses through objArray bottom klasses,
+  // matching the frontend's rule for which declared field types are unsafe to
+  // attach (interface instance klasses and arrays whose element is such).
+  return is_unverified_interface((Klass*)klass_ptr);
 }
 
 ciObject* jeandle_oop_by_id(int oop_id) {
@@ -348,6 +371,7 @@ void register_jeandle_vm_callbacks() {
   callbacks.GetFieldType = &jeandle_get_field_type;
   callbacks.IsInterface = &jeandle_is_interface;
   callbacks.IsObjectKlass = &jeandle_is_object_klass;
+  callbacks.IsUnverifiedInterface = &jeandle_is_unverified_interface;
   callbacks.IsEffectivelyFinal = &jeandle_is_effectively_final;
   callbacks.GetConstantFieldValue = &jeandle_get_constant_field_value;
   callbacks.GetConstantFieldInfo = &jeandle_get_constant_field_info;
