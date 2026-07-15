@@ -22,6 +22,10 @@
 #define SHARE_JEANDLE_VM_CALLBACK_HPP
 
 #include "memory/allocation.hpp"
+#include <string>
+
+class ciInstanceKlass;
+class Klass;
 
 // JeandleVMCallback collects the VM callbacks that the LLVM-side optimization
 // pipeline queries during a Jeandle compilation. All members are static.
@@ -48,7 +52,7 @@ class JeandleVMCallback : public AllStatic {
   static int       get_constant_field_info(int oop_id, int offset);
 
   // Oop handles.
-  static const char* get_oop_handle_name(int oop_id);
+  static std::string get_oop_handle_name(int oop_id);
   static uintptr_t   get_oop_klass(int oop_id);
 
   // Inlining.
@@ -57,6 +61,21 @@ class JeandleVMCallback : public AllStatic {
   static bool      is_ok_to_inline(int scope_id, int bci, uintptr_t callee_method);
   static bool      record_inline_result(int scope_id, int bci, uintptr_t callee_method, int result);
   static bool      record_inlining_complete();
+
+  // CHA devirtualization.
+  static std::string get_cha_opt_info(uintptr_t caller_ptr, uintptr_t callee_ptr,
+                                      uintptr_t holder_ptr, uintptr_t receiver_klass_ptr,
+                                      bool is_exact, int bytecode);
+  static bool update_to_static_opt_virtual_call(int64_t id);
+
+  // Replaces the now-removed ciEnv::get_instance_klass_for_klass: maps a raw
+  // receiver Klass* to a ciInstanceKlass*, preserving the null-check + assert +
+  // VM_ENTRY_MARK the old public wrapper carried. Public because it is called
+  // from the file-local CHA helpers in jeandleVMCallback.cpp (anonymous-namespace
+  // free functions, which have no member access). The private ciEnv::get_instance
+  // klass it delegates to is reachable because JeandleVMCallback is a friend of
+  // ciEnv.
+  static ciInstanceKlass* get_receiver_instance_klass(Klass* receiver_klass);
 };
 
 #endif // SHARE_JEANDLE_VM_CALLBACK_HPP
