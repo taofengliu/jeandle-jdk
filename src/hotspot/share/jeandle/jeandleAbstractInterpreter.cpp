@@ -26,13 +26,14 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/Deoptimization.h"
 #include "llvm/IR/Jeandle/GCStrategy.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 
-
 #include "jeandle/jeandleAbstractInterpreter.hpp"
 #include "jeandle/jeandleCompiledCall.hpp"
+#include "jeandle/jeandleCompiledCode.hpp"
 #include "jeandle/jeandleIntrinsicLowering.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleType.hpp"
@@ -56,6 +57,9 @@
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "utilities/ostream.hpp"
+
+using llvm::jeandle::DeoptValueEncoding;
+using llvm::jeandle::HotspotBasicType;
 
 JeandleVMState::JeandleVMState(int max_stack, int max_locals, llvm::LLVMContext *context) :
                                _stack(), _locals(max_locals), _locks(), _context(context) {
@@ -233,7 +237,8 @@ void JeandleVMState::store(BasicType type, int index, llvm::Value* value) {
 llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& builder,
                                                            MethodLivenessResult liveness,
                                                            const JeandleParseContext& parse_context,
-                                                           int bci) {
+                                                           int bci,
+                                                           bool should_reexecute) {
 #ifdef ASSERT
   if (log_is_enabled(Trace, jeandle)) {
     tty->print_cr("Build deopt bundle at bci %d :", bci);
@@ -242,8 +247,8 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
 
   llvm::SmallVector<llvm::Value*> args;
   // Total   deopt bundle: [Root deopt bundle] + [Inlined deopt bundle] + [Inlined deopt bundle] + ...
-  // Root    deopt bundle:                |--- bci ---|--- bci ---|--- locals ---|--- stack ---|--- monitor ---|--- orig_pc ---|
-  // Inlined deopt bundle: |--- method ---|--- bci ---|--- bci ---|--- locals ---|--- stack ---|--- monitor ---|--- orig_pc ---|
+  // Root    deopt bundle:                |--- should_reexecute ---|--- bci ---|--- bci ---|--- locals ---|--- stack ---|--- monitor ---|--- orig_pc ---|
+  // Inlined deopt bundle: |--- method ---|--- should_reexecute ---|--- bci ---|--- bci ---|--- locals ---|--- stack ---|--- monitor ---|--- orig_pc ---|
   // The duplicated BCI intentionally breaks the usual marker/value layout used
   // by other deopt values. After inlining, deopt bundles are appended scope by
   // scope: the root scope appears first, and the current method scope appears
@@ -255,15 +260,24 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
   /* TODO: scalar */
 
   if (parse_context.is_inlinee()) {
-    uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::MethodType, T_METADATA).encode();
+    uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::MethodType, llvm::jeandle::T_METADATA).encode();
 #ifdef ASSERT
     if (log_is_enabled(Trace, jeandle)) {
-      DeoptValueEncoding::decode(encode).print();
+      print_deopt_value(DeoptValueEncoding::decode(encode));
     }
 #endif
     args.push_back(builder.getInt64(encode));
     args.push_back(builder.getInt64(uint64_t(parse_context.method())));
   }
+
+  // should_reexecute is explicitly set by intrinsic lowering (e.g. addExact's
+  // overflow trap) to force reexecution of the current bci on deopt, matching
+  // C2's should_reexecute semantics for intrinsic-emitted uncommon traps.
+  //
+  // Pushed as i64 (not i32) so it can't be confused with the duplicated-BCI
+  // marker below: the marker is identified by two adjacent i32 values, and
+  // should_reexecute (0 or 1) can easily collide with a small bci value.
+  args.push_back(builder.getInt64(should_reexecute ? 1 : 0));
 
   // Duplicate the BCI as a BCI marker for the LLVM backend.
   // Keep TestScopeValues.java in sync with this duplicated-BCI convention.
@@ -277,10 +291,11 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
     // slots (one per word) so the two-slot layout of later locals stays aligned.
     bool dead = !_locals[i].is_null() && liveness.is_valid() && !liveness.at(i);
     if (!_locals[i].is_null() && !dead) {
-      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::LocalType, _locals[i].computational_type()).encode();
+      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::LocalType, 
+          static_cast<HotspotBasicType>(_locals[i].computational_type())).encode();
 #ifdef ASSERT
       if (log_is_enabled(Trace, jeandle)) {
-        DeoptValueEncoding::decode(encode).print();
+        print_deopt_value(DeoptValueEncoding::decode(encode));
       }
 #endif
       args.push_back(builder.getInt64(encode));
@@ -293,10 +308,11 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
       // A dead double-word local takes two illegal slots, indexed i and i+1.
       int slots = (!_locals[i].is_null() && is_double_word) ? 2 : 1;
       for (int s = 0; s < slots; s++) {
-        uint64_t encode = DeoptValueEncoding(i + s, DeoptValueEncoding::LocalType, T_ILLEGAL).encode();
+        uint64_t encode = DeoptValueEncoding(i + s, DeoptValueEncoding::LocalType, 
+            llvm::jeandle::T_ILLEGAL).encode();
 #ifdef ASSERT
         if (log_is_enabled(Trace, jeandle)) {
-          DeoptValueEncoding::decode(encode).print();
+          print_deopt_value(DeoptValueEncoding::decode(encode));
         }
 #endif
         args.push_back(builder.getInt64(encode));
@@ -309,10 +325,11 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
   }
   for (size_t i = 0; i < _stack.size(); i++) {
     if (!_stack[i].is_null()) {
-      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::StackType, stack_computational_type_at(i)).encode();
+      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::StackType,
+          static_cast<HotspotBasicType>(stack_computational_type_at(i))).encode();
 #ifdef ASSERT
       if (log_is_enabled(Trace, jeandle)) {
-        DeoptValueEncoding::decode(encode).print();
+        print_deopt_value(DeoptValueEncoding::decode(encode));
       }
 #endif
       args.push_back(builder.getInt64(encode));
@@ -322,10 +339,10 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
       }
     } else {
       // replace with {T_ILLEGAL, 0}
-      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::StackType, T_ILLEGAL).encode();
+      uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::StackType, llvm::jeandle::T_ILLEGAL).encode();
 #ifdef ASSERT
       if (log_is_enabled(Trace, jeandle)) {
-        DeoptValueEncoding::decode(encode).print();
+        print_deopt_value(DeoptValueEncoding::decode(encode));
       }
 #endif
       args.push_back(builder.getInt64(encode));
@@ -337,10 +354,11 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
     TypedValue obj = _locks[i].object();
     assert(obj.computational_type() == T_OBJECT, "should be object type");
     llvm::Value* lock = _locks[i].lock();
-    uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::MonitorType, obj.computational_type()).encode();
+    uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::MonitorType,
+                                        static_cast<HotspotBasicType>(obj.computational_type())).encode();
 #ifdef ASSERT
     if (log_is_enabled(Trace, jeandle)) {
-      DeoptValueEncoding::decode(encode).print();
+      print_deopt_value(DeoptValueEncoding::decode(encode));
     }
 #endif
     args.push_back(builder.getInt64(encode));
@@ -350,10 +368,10 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
   if (parse_context.is_root()) {
     llvm::Value* orig_pc_slot = JeandleCompilation::current()->compiled_code()->orig_pc_slot();
     assert(orig_pc_slot != nullptr, "sanity");
-    uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::OrigPcSlotType, T_ADDRESS).encode();
+    uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::OrigPcSlotType, llvm::jeandle::T_ADDRESS).encode();
 #ifdef ASSERT
     if (log_is_enabled(Trace, jeandle)) {
-      DeoptValueEncoding::decode(encode).print();
+      print_deopt_value(DeoptValueEncoding::decode(encode));
     }
 #endif
     args.push_back(builder.getInt64(encode));
@@ -1470,7 +1488,7 @@ void JeandleAbstractInterpreter::interpret_block(JeandleBasicBlock* block) {
   }
 }
 
-void JeandleAbstractInterpreter::uncommon_trap(Deoptimization::DeoptReason reason, Deoptimization::DeoptAction action, llvm::BasicBlock* insert_block) {
+void JeandleAbstractInterpreter::uncommon_trap(Deoptimization::DeoptReason reason, Deoptimization::DeoptAction action, llvm::BasicBlock* insert_block, bool should_reexecute) {
 #ifdef ASSERT
   // Structural guard against trap-throttle drift: any deopt reason an intrinsic emits
   // must be in its trap-throttle mask, or try_lower_intrinsic's pre-check would not
@@ -1507,7 +1525,7 @@ void JeandleAbstractInterpreter::uncommon_trap(Deoptimization::DeoptReason reaso
       &_module, llvm::Intrinsic::experimental_deoptimize, {ret_type});
   deopt_decl->setCallingConv(llvm::CallingConv::Hotspot_JIT);
   llvm::CallInst* call = _ir_builder.CreateCall(
-      deopt_decl, {request}, {create_current_deopt_bundle()});
+      deopt_decl, {request}, {create_current_deopt_bundle(should_reexecute)});
   call->setCallingConv(llvm::CallingConv::Hotspot_JIT);
 
   // LangRef: the block holding this intrinsic must terminate with a `ret`
@@ -2057,9 +2075,9 @@ void JeandleAbstractInterpreter::invoke() {
   llvm::Function* func = llvm::cast<llvm::Function>(callee.getCallee());
   func->setCallingConv(llvm::CallingConv::Hotspot_JIT);
   func->setGC(llvm::jeandle::JeandleGC);
-  func->addFnAttr(llvm::Attribute::get(func->getContext(),
-                                       llvm::jeandle::Attribute::JavaMethod,
-                                       std::to_string((uintptr_t)target)));
+  func->addFnAttr(llvm::Attribute::get(*_context,
+      llvm::jeandle::Attribute::JavaMethod,
+      std::to_string(reinterpret_cast<uintptr_t>(target))));
   // Accessor-only inlining may be decided before LLVM asks the VM to parse the
   // callee body, so declarations must carry the same marker as definitions.
   if (target->is_accessor()) {
@@ -2111,7 +2129,7 @@ void JeandleAbstractInterpreter::invoke() {
 
   // Record this call.
   uint32_t id = _compiled_code.next_statepoint_id();
-  _compiled_code.push_non_routine_call_site(new CallSiteInfo(call_type, dest, _bytecodes.cur_bci(), is_method_handle_invoke, id));
+  _compiled_code.push_non_routine_call_site(new CallSiteInfo(call_type, dest, is_method_handle_invoke, id));
 
   // Every invoke instruction may throw exceptions, handle them here.
   DispatchedDest dispatched = dispatch_exception_for_invoke();
@@ -2135,8 +2153,16 @@ void JeandleAbstractInterpreter::invoke() {
   llvm::Attribute patch_bytes_attr = llvm::Attribute::get(*_context,
                                                  llvm::jeandle::Attribute::StatepointNumPatchBytes,
                                                  std::to_string(JeandleCompiledCall::call_site_patch_size(call_type)));
+  llvm::Attribute bc_attr = llvm::Attribute::get(*_context,
+                                                 llvm::jeandle::Attribute::Bytecode,
+                                                 Bytecodes::name(bc));
+  llvm::Attribute declared_holder_attr = llvm::Attribute::get(*_context,
+                                                 llvm::jeandle::Attribute::DeclaredHolder,
+                                                 std::to_string(reinterpret_cast<uintptr_t>(ciEnv::get_instance_klass_for_declared_method_holder(holder))));
   invoke->addFnAttr(id_attr);
   invoke->addFnAttr(patch_bytes_attr);
+  invoke->addFnAttr(bc_attr);
+  invoke->addFnAttr(declared_holder_attr);
   if (target->can_be_statically_bound()) {
     invoke->addFnAttr(llvm::Attribute::get(*_context,
                                             llvm::jeandle::Attribute::MonomorphicTarget));
@@ -2482,7 +2508,7 @@ llvm::InvokeInst* JeandleAbstractInterpreter::call_java_op_ex(llvm::StringRef ja
   return invoke_inst;
 }
 
-llvm::OperandBundleDef JeandleAbstractInterpreter::create_current_deopt_bundle() {
+llvm::OperandBundleDef JeandleAbstractInterpreter::create_current_deopt_bundle(bool should_reexecute) {
   ensure_orig_pc_slot();
   int bci = _bytecodes.cur_bci();
   // Per-bci liveness lets deopt_args drop locals that are dead at this bci, so they
@@ -2490,7 +2516,7 @@ llvm::OperandBundleDef JeandleAbstractInterpreter::create_current_deopt_bundle()
   // liveness_at_bci caches the analysis in ciMethod after first use, so this is cheap;
   // in debug modes (retain locals / DeoptimizeALot) it returns all-live -> no pruning.
   MethodLivenessResult liveness = _method->liveness_at_bci(bci);
-  return llvm::OperandBundleDef("deopt", _jvm->deopt_args(_ir_builder, liveness, _parse_context, bci));
+  return llvm::OperandBundleDef("deopt", _jvm->deopt_args(_ir_builder, liveness, _parse_context, bci, should_reexecute));
 }
 
 TypedValue JeandleAbstractInterpreter::constant_to_value(ciConstant con) {
