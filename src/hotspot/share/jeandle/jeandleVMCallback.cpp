@@ -388,6 +388,29 @@ uintptr_t jeandle_get_oop_klass(int oop_id) {
   return (uintptr_t)(Klass*)(klass->constant_encoding());
 }
 
+int jeandle_get_java_mirror(uintptr_t klass_ptr) {
+  // Given a VM Klass pointer (the encoding PEA carries on a virtual object,
+  // matching jeandle_get_oop_klass/jeandle_is_subtype), return the oop id of its
+  // java.lang.Class mirror via the ci interface so PEA's foldGetClass can
+  // replace jeandle.get_class on a virtual receiver with a GC-safe constant
+  // mirror load. Returns -1 (=> PEA bails and materializes, sound) when the
+  // klass/mirror is unavailable.
+  if (klass_ptr == 0) {
+    return -1;
+  }
+  ciKlass* ci_k = ciEnv::current()->get_klass((Klass*)klass_ptr);
+  if (ci_k == nullptr || !ci_k->is_loaded()) {
+    return -1;
+  }
+  ciInstance* mirror = ci_k->java_mirror();
+  if (mirror == nullptr) {
+    return -1;
+  }
+  JeandleCompilation* compilation = JeandleCompilation::current();
+  assert(compilation != nullptr, "no active compilation");
+  return compilation->compiled_code()->find_or_insert_oop(mirror);
+}
+
 ciMethod* jeandle_callback_method(uintptr_t method) {
   assert(method != 0, "callback method pointer must not be null");
   return (ciMethod*)method;
@@ -649,6 +672,7 @@ void register_jeandle_vm_callbacks() {
   callbacks.GetConstantFieldInfo = &jeandle_get_constant_field_info;
   callbacks.GetOopHandleName = &jeandle_get_oop_handle_name;
   callbacks.GetOopKlass = &jeandle_get_oop_klass;
+  callbacks.GetJavaMirror = &jeandle_get_java_mirror;
   callbacks.GetInlineCalleeIR = &jeandle_get_inline_callee_ir;
   callbacks.GetNewStatepointID = &jeandle_get_new_statepoint_id;
   callbacks.IsOkToInline = &jeandle_is_ok_to_inline;
