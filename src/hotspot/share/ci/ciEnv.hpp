@@ -424,6 +424,10 @@ public:
 
   ciInstanceKlass* get_box_klass_for_primitive_type(BasicType type);
   ciInstanceKlass* get_instance_klass_for_klass(Klass* klass);
+  // Like get_instance_klass_for_klass but for any klass kind (instance, type
+  // array, object array). Used by Jeandle's deopt stackmap parser to resolve a
+  // scalar-replaced array klass's java mirror via the ci layer.
+  ciKlass* get_klass_for_klass(Klass* klass);
 
   ciKlass*  find_system_klass(ciSymbol* klass_name);
 

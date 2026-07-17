@@ -113,8 +113,8 @@ class CallSiteInfo : public JeandleCompilationResourceObj {
 
 class JeandleStackMap : public JeandleCompilationResourceObj {
 public:
-  JeandleStackMap(int bci, ciMethod* method, OopMap* oop_map, GrowableArray<ScopeValue*>* locals, GrowableArray<ScopeValue*>* stack, GrowableArray<MonitorValue*>* monitors, bool reexecute) :
-      _bci(bci), _method(method), _oop_map(oop_map), _locals(locals), _stack(stack), _monitors(monitors), _reexecute(reexecute) {
+  JeandleStackMap(int bci, ciMethod* method, OopMap* oop_map, GrowableArray<ScopeValue*>* locals, GrowableArray<ScopeValue*>* stack, GrowableArray<MonitorValue*>* monitors, bool reexecute, GrowableArray<ScopeValue*>* objects = nullptr) :
+      _bci(bci), _method(method), _oop_map(oop_map), _locals(locals), _stack(stack), _monitors(monitors), _reexecute(reexecute), _objects(objects) {
   }
 
   int bci() const { return _bci; }
@@ -124,6 +124,11 @@ public:
   GrowableArray<ScopeValue*>* stack() const { return _stack; }
   GrowableArray<MonitorValue*>* monitors() const { return _monitors; }
   bool reexecute() const { return _reexecute; }
+  // PEA scalar-replaced (virtual) objects described by ScalarValueType
+  // descriptors in this scope's "deopt" operand bundle. nullptr when the scope
+  // carries no VO descriptor. Fed to DebugInformationRecorder::dump_object_pool
+  // so Deoptimization::realloc_objects can reallocate each object at deopt.
+  GrowableArray<ScopeValue*>* objects() const { return _objects; }
 
 private:
   int _bci;
@@ -133,6 +138,7 @@ private:
   GrowableArray<ScopeValue*>* _stack;
   GrowableArray<MonitorValue*>* _monitors;
   bool _reexecute;
+  GrowableArray<ScopeValue*>* _objects;
 };
 
 using ObjectBuffer   = llvm::MemoryBuffer;

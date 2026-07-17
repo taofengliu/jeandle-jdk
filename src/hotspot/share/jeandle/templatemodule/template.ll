@@ -820,7 +820,13 @@ entry:
 }
 
 ; Register finalizer for an object only when its exact klass requires it.
-define hotspotcc void @jeandle.register_finalizer_if_needed(ptr addrspace(1) %obj) noinline "lower-phase"="0" {
+; lower-phase=1: survive JavaOperationLower(0) so the call reaches PEA, which
+; folds it via foldRegisterFinalizerIfNeeded (eliding it for non-finalizer
+; klasses). At lower-phase=0 the body is expanded before PEA, exposing a raw
+; load of the object's klass header; resolveAccess returns nullopt for header
+; offsets and processLoad markIneligible's the object — defeating virtualization
+; for EVERY allocation (every alloc has this finalizer check).
+define hotspotcc void @jeandle.register_finalizer_if_needed(ptr addrspace(1) %obj) noinline "lower-phase"="1" {
 entry:
   %obj_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) %obj)
   %access_flags_offset = load i32, ptr @Klass.access_flags_offset
@@ -925,13 +931,23 @@ release_path:
   ret void
 }
 
+; Monitor enter/exit JavaOps are lower-phase=1 so they survive
+; JavaOperationLower(0) (which runs before PEA) and reach PEA as a single
+; opaque call each. PEA then folds balanced monitorenter/monitorexit pairs on
+; virtual receivers (foldMonitorEnter/foldMonitorExit) and, on a deopt,
+; records the lock as eliminated (deopt descriptor MonitorType index=1 with a
+; VORef owner), which HotSpot re-acquires via relock_objects. At lower-phase=0
+; the body is inlined before PEA into raw mark-word cmpxchg memory ops that
+; PEA cannot recognize, so no lock would ever be elided. (Same lever already
+; used by register_finalizer_if_needed and the allocation intrinsics.)
+;
 ; Implementation of monitorenter when LockingMode == 0. A complete JavaOp:
 ; the fast path attempts the lock; every failure path falls through to the
 ; slow path, which delegates to the SharedRuntime slow routine. The fast path
 ; increments held_monitor_count on success; the slow path does NOT (the runtime
 ; routine manages its own counter), preserving the pre-refactor semantics.
 ; Fast path implementation of monitorenter when LockingMode == 0
-define hotspotcc void @jeandle.monitorenter_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorenter_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -956,7 +972,7 @@ slow_path:
 ; Implementation of monitorenter when LockingMode == 1. Complete JavaOp:
 ; thin-lock fast path (with recursive-owner check); all failures go to slow_path.
 ; Fast path implementation of monitorenter when LockingMode == 1
-define hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -1001,7 +1017,7 @@ slow_path:
 ; lightweight-lock fast path (CAS + lock-stack push); all failures (stack full,
 ; CAS lost, inflated-monitor acquire fail) go to slow_path.
 ; Fast path implementation of monitorenter when LockingMode == 2
-define hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -1056,7 +1072,7 @@ slow_path:
 ; decrement_lock_count (the pre-refactor user-IR slow path did not either);
 ; the runtime routine handles release on its own.
 ; Fast path implementation of monitorexit when LockingMode == 0
-define hotspotcc void @jeandle.monitorexit_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorexit_with_monitor_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset
@@ -1080,7 +1096,7 @@ slow_path:
 ; recursive-unlock fast path, else inflated release, else thin-unlock CAS;
 ; all failures fall through to slow_path.
 ; Fast path implementation of monitorexit when LockingMode == 1
-define hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %displaced_header_offset = load i32, ptr @BasicLock.displaced_header_offset_in_bytes
   %displaced_header_addr = getelementptr inbounds i8, ptr %lock, i32 %displaced_header_offset
@@ -1121,7 +1137,7 @@ slow_path:
 ; lightweight-unlock fast path (CAS + lock-stack pop); inflated release with an
 ; anonymous-owner guard. All failures fall through to slow_path.
 ; Fast path implementation of monitorexit when LockingMode == 2
-define hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="0" #0 {
+define hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) nocapture %obj, ptr addrspace(0) nocapture %lock) "lower-phase"="1" #0 {
 entry:
   %mark_offset = load i32, ptr @oopDesc.mark_offset_in_bytes
   %mark_word_addr = getelementptr inbounds i8, ptr addrspace(1) %obj, i32 %mark_offset

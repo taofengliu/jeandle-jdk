@@ -257,7 +257,7 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
   // scope first. Using bci+bci gives the backend a cheap postorder search key
   // for the current method scope. It also makes the IR easier to inspect by
   // eye: the BCI position and value are visible directly as a duplicated int32.
-  /* TODO: scalar */
+  // PEA scalar rewriting of these values is handled on the LLVM side.
 
   if (parse_context.is_inlinee()) {
     uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::MethodType, llvm::jeandle::T_METADATA).encode();
@@ -354,7 +354,13 @@ llvm::SmallVector<llvm::Value*> JeandleVMState::deopt_args(llvm::IRBuilder<>& bu
     TypedValue obj = _locks[i].object();
     assert(obj.computational_type() == T_OBJECT, "should be object type");
     llvm::Value* lock = _locks[i].lock();
-    uint64_t encode = DeoptValueEncoding(i, DeoptValueEncoding::MonitorType,
+    // The monitor encoding's Index field is a kind discriminant consumed by the
+    // HotSpot parser (see DeoptValueEncoding::MonitorType in Deoptimization.h):
+    // index=0 = REAL (non-eliminated) lock, owner = a live oop. The frontend
+    // always emits real locks (PEA lock elision + deopt reconstruction is the
+    // LLVM transform's job), so index is always 0 here. The lock's position in
+    // the monitors array (i) is its identity; it is NOT carried in the encoding.
+    uint64_t encode = DeoptValueEncoding(0, DeoptValueEncoding::MonitorType,
                                         static_cast<HotspotBasicType>(obj.computational_type())).encode();
 #ifdef ASSERT
     if (log_is_enabled(Trace, jeandle)) {
@@ -3569,8 +3575,10 @@ void JeandleAbstractInterpreter::shared_lock(LockValue lock) {
 
   // The monitor op is a single complete JavaOp whose body contains both the
   // fast path and the slow path (a call to SharedRuntime_complete_monitor_locking_C).
-  // PEA runs before JavaOperationLower(0), so it sees only this one opaque call
-  // and can fold it atomically — the slow-path runtime call is invisible to PEA.
+  // It is emitted lower-phase=1 (see templatemodule/template.ll), so
+  // JavaOperationLower(0) — which runs before PEA — leaves this one opaque call
+  // intact for PEA, which can then fold it atomically; the slow-path runtime
+  // call inside the unexpanded body is invisible to PEA.
   if (DiagnoseSyncOnValueBasedClasses != 0) {
     // Off-by-default diagnostic: keep the value-based check and its own slow
     // path in user IR. PEA already materializes on jeandle.check_if_value_based,

@@ -414,6 +414,18 @@ ciInstanceKlass* ciEnv::get_instance_klass_for_klass(Klass* klass) {
   return get_instance_klass(klass);
 }
 
+ciKlass* ciEnv::get_klass_for_klass(Klass* klass) {
+  // Any klass kind (instance / type array / object array). Used by Jeandle's
+  // deopt stackmap parser to resolve a scalar-replaced array klass's java
+  // mirror via the ci layer (mirrors get_instance_klass_for_klass but without
+  // the instance-klass restriction, since PEA now virtualizes arrays too).
+  if (klass == nullptr) {
+    return nullptr;
+  }
+  VM_ENTRY_MARK;
+  return get_klass(klass);
+}
+
 ciInstance* ciEnv::ArrayIndexOutOfBoundsException_instance() {
   if (_ArrayIndexOutOfBoundsException_instance == nullptr) {
     _ArrayIndexOutOfBoundsException_instance

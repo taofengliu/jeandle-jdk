@@ -169,16 +169,12 @@ bool jeandle_is_value_based(uintptr_t klass_ptr) {
 }
 
 // Returns the JBasicType integer of the boxed primitive if klass is one of
-// the eight java.lang autobox wrapper classes (Boolean, Byte, Character,
-// Short, Integer, Long, Float, Double); returns 9 (JBasicType::Count) for
-// any other klass (or null input). Used by PEA B10 to recognise virtual
-// Instance VOs that wrap a primitive so the icmp eq fold can perform a
-// structural value comparison without depending on object identity.
-//
-// We use the VM classes (vmClasses::Integer_klass(), etc.) directly. These
-// are guaranteed to be loaded at compiler-init time (boxing klasses are
-// preloaded as core JDK classes), so a pointer compare is sufficient — no
-// load barriers or null guards beyond the entry guard.
+// the eight java.lang autobox wrapper classes (Boolean..Double); returns 9
+// (JBasicType::Count) for any other klass (or null input). Used by PEA to
+// recognise virtual Instance VOs that wrap a primitive so the icmp eq fold
+// can structurally compare values without depending on object identity.
+// Boxing klasses are preloaded as core JDK classes, so the VM-klass pointer
+// compare below is sufficient.
 int jeandle_is_boxed(uintptr_t klass_ptr) {
   if (klass_ptr == 0) return 9; // JBasicType::Count sentinel
   Klass* k = (Klass*)klass_ptr;
@@ -208,12 +204,10 @@ bool jeandle_is_effectively_final(uintptr_t klass_ptr) {
 }
 
 // returns true iff the klass declares (or inherits) a non-trivial
-// finalize() override. PEA refuses to virtualize allocations of such
-// classes because HotSpot must register the finalizer at the original
-// allocation site; eliding the alloc would skip that registration and
-// break finalize() semantics. For null klass inputs we return
-// false defensively (PEA will already short-circuit on a missing klass,
-// but extra safety is cheap).
+// finalize() override. PEA refuses to virtualize such allocations because
+// HotSpot registers the finalizer at the original allocation site; eliding
+// the alloc would skip that registration and break finalize() semantics.
+// Returns false defensively for null input.
 bool jeandle_has_finalizer(uintptr_t klass_ptr) {
   if (klass_ptr == 0) return false;
   Klass* k = (Klass*)klass_ptr;
@@ -221,26 +215,20 @@ bool jeandle_has_finalizer(uintptr_t klass_ptr) {
   return InstanceKlass::cast(k)->has_finalizer();
 }
 
-// returns true iff the klass is safe to virtualize: identity-sensitive
-// classes (java.lang.ref.Reference subtypes, java.lang.Thread subtypes,
-// and any other class whose lifecycle is observable through global
-// runtime state) cannot have their allocations elided because the
-// runtime mechanism (reference-queue enqueue, thread-list registration,
-// etc.) keys off the actual object identity. Everything else returns
-// true. For null klass inputs we return false defensively.
+// returns true iff the klass is safe to virtualize. Identity-sensitive
+// classes (Reference and Thread subtypes) cannot be elided: the runtime
+// keys reference-queue enqueue and thread-list registration off actual
+// object identity. Returns false defensively for null input.
 bool jeandle_can_virtualize(uintptr_t klass_ptr) {
   if (klass_ptr == 0) return false;
   Klass* k = (Klass*)klass_ptr;
-  // Reference subtypes (SoftReference, WeakReference, PhantomReference,
-  // FinalReference, plus user subclasses): the GC tracks these via the
-  // pending-reference list; eliding an allocation would never produce
-  // an oop the discovery code can enqueue. Use is_subclass_of which
-  // walks the inheritance chain (Reference itself counts).
+  // Reference subtypes: the GC enqueues these via the pending-reference
+  // list, so eliding the allocation would never produce an enqueueable oop.
+  // is_subtype_of walks the chain (Reference itself counts).
   Klass* ref_klass = vmClasses::Reference_klass();
   if (ref_klass != nullptr && k->is_subtype_of(ref_klass)) return false;
-  // Thread (and any subtype): the runtime registers Thread instances on
-  // the global thread list at construction; the identity is observable
-  // through Thread.currentThread() and through the thread group.
+  // Thread (and any subtype): registered on the global thread list at
+  // construction, so identity is observable via currentThread() / thread group.
   Klass* thread_klass = vmClasses::Thread_klass();
   if (thread_klass != nullptr && k->is_subtype_of(thread_klass)) return false;
   return true;
@@ -398,7 +386,14 @@ int jeandle_get_java_mirror(uintptr_t klass_ptr) {
   if (klass_ptr == 0) {
     return -1;
   }
-  ciKlass* ci_k = ciEnv::current()->get_klass((Klass*)klass_ptr);
+  // ciEnv::get_klass(Klass*) is private; use the public get_instance_klass_for_klass
+  // accessor. PEA virtual receivers are instance klasses; for any other klass kind,
+  // bail (return -1 => PEA materializes, which is sound per the contract).
+  Klass* k = (Klass*)klass_ptr;
+  if (!k->is_instance_klass()) {
+    return -1;
+  }
+  ciKlass* ci_k = ciEnv::current()->get_instance_klass_for_klass(k);
   if (ci_k == nullptr || !ci_k->is_loaded()) {
     return -1;
   }
