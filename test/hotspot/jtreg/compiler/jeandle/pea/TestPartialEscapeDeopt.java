@@ -27,10 +27,10 @@
  * @library /test/lib /
  * @build jdk.test.lib.Asserts
  * @run main/othervm -XX:-UseJeandleCompiler
- *      compiler.jeandle.deoptimize.TestPartialEscapeDeopt
+ *      compiler.jeandle.pea.TestPartialEscapeDeopt
  */
 
-package compiler.jeandle.deoptimize;
+package compiler.jeandle.pea;
 
 import compiler.jeandle.fileCheck.FileCheck;
 import java.util.ArrayList;
@@ -43,9 +43,10 @@ import jdk.test.lib.process.ProcessTools;
 public class TestPartialEscapeDeopt {
     public static void main(String[] args) throws Exception {
         String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.deoptimize.TestPartialEscapeDeopt$TestWrapper";
+        String wrapper = "compiler.jeandle.pea.TestPartialEscapeDeopt$TestWrapper";
         ArrayList<String> command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
+                "-XX:+JeandleDoPEA",
                 "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory=" + dump_path,
                 "-XX:+PrintNMethods",

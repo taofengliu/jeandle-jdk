@@ -25,10 +25,10 @@
  * @library /test/lib /
  * @build jdk.test.lib.Asserts
  * @run main/othervm -XX:-UseJeandleCompiler
- *      compiler.jeandle.deoptimize.TestNeverEscapeDeopt
+ *      compiler.jeandle.pea.TestNeverEscapeDeopt
  */
 
-package compiler.jeandle.deoptimize;
+package compiler.jeandle.pea;
 
 import compiler.jeandle.fileCheck.FileCheck;
 import java.util.ArrayList;
@@ -41,9 +41,10 @@ import jdk.test.lib.process.ProcessTools;
 public class TestNeverEscapeDeopt {
     public static void main(String[] args) throws Exception {
         String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.deoptimize.TestNeverEscapeDeopt$TestWrapper";
+        String wrapper = "compiler.jeandle.pea.TestNeverEscapeDeopt$TestWrapper";
         ArrayList<String> command_args = new ArrayList<String>(List.of(
                 "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
+                "-XX:+JeandleDoPEA",
                 "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory=" + dump_path,
                 "-XX:+PrintNMethods",
