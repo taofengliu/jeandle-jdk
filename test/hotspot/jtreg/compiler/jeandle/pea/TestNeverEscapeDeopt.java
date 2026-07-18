@@ -48,6 +48,7 @@ public class TestNeverEscapeDeopt {
                 "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory=" + dump_path,
                 "-XX:+PrintNMethods",
+                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
                 "-XX:CompileCommand=compileonly," + wrapper + "::test",
                 wrapper));
 

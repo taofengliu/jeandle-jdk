@@ -77,11 +77,13 @@ public class TestPartialEscapeDeopt {
         // slow-path invoke inside the body, not the pre-define declaration.
         checker.check("new_instance");
         // ScalarValueType VO descriptor header (vo_id 0):
-        // (0<<32)|(4<<16)|T_OBJECT(12) = 262156
-        checker.check("262156");
-        // The OrigAlloc locals slot is replaced by a VORefLocalType reference
-        // (vo_id=0): (0<<32)|(8<<16)|12 = 524300, then i32 vo_id 0.
-        checker.check("524300");
+        // (0<<32)|(4<<16)|T_OBJECT(12) = 262156, and the OrigAlloc locals
+        // slot replaced by a VORefLocalType reference (vo_id=0):
+        // (0<<32)|(8<<16)|12 = 524300. Both encodings sit on the SAME
+        // null-check deopt-bundle line (descriptor first, VORef slot after),
+        // so match them with one pattern (FileCheck advances a whole line
+        // per successful check).
+        checker.checkPattern("262156.*524300");
 
         // test(some, false) returns 10 (p.x) + 20 (p.y) + 0 (some.x) = 30.
         // test(null, false) null-check deopts at other.x; the deopt
