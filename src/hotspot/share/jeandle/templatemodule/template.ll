@@ -169,7 +169,16 @@ declare hotspotcc ptr addrspace(1) @jeandle.decode_heap_oop(ptr addrspace(3))
 declare hotspotcc ptr addrspace(3) @jeandle.encode_heap_oop(ptr addrspace(1))
 
 ; Load klass pointer from oop
-define hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nocapture %oop) noinline "lower-phase"="0" #0 {
+; lower-phase=1: survive JavaOperationLower(0) so the call reaches PEA, which
+; folds it via foldLoadKlass (a virtual object's klass is a compile-time
+; constant). At lower-phase=0 the body is expanded before PEA, exposing a raw
+; load of the object's klass header; resolveAccess returns nullopt for header
+; offsets and processLoad marks the object ineligible — defeating
+; virtualization for any virtual receiver whose klass is inspected (e.g. the
+; load_klass inside instanceof's expansion on a virtual receiver). Non-virtual
+; receivers are unaffected: the call survives to JavaOperationLower(1) and the
+; same body is inlined there.
+define hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nocapture %oop) noinline "lower-phase"="1" #0 {
   %klass_offset = load i32, ptr @oopDesc.klass_offset_in_bytes
   %klass_addr = getelementptr inbounds i8, ptr addrspace(1) %oop, i32 %klass_offset
 
@@ -371,7 +380,15 @@ return_block:
 }
 
 ; Implementation of Java arraylength operation.
-define hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) nocapture readonly %array_oop) noinline "lower-phase"="0" #0 {
+; lower-phase=1: survive JavaOperationLower(0) so the call reaches PEA, which
+; folds it via foldArrayLength (a virtual array's length is a compile-time
+; constant). The frontend emits this op both for the arraylength bytecode and
+; for bounds checks, so every virtual array's element access benefits.
+; processLoad's length-offset fold remains as the fallback for any raw
+; length-header load (e.g. produced by hand-written IR). Non-virtual receivers
+; are unaffected: the call survives to JavaOperationLower(1) and the same body
+; is inlined there.
+define hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) nocapture readonly %array_oop) noinline "lower-phase"="1" #0 {
 entry:
   %length_offset = load i32, ptr @arrayOopDesc.length_offset_in_bytes
   %length_addr = getelementptr inbounds i8, ptr addrspace(1) %array_oop, i32 %length_offset
@@ -712,7 +729,14 @@ check_subtype:
 }
 
 ; Implementation of array store check operation
-define hotspotcc i1 @jeandle.array_store_check(ptr addrspace(1) nocapture %oop, ptr addrspace(1) nocapture %array_oop) noinline "lower-phase"="0" #0 {
+; lower-phase=1: survive JavaOperationLower(0) so the call reaches PEA, which
+; folds it via foldArrayStoreCheck (eliding it for provably-compatible values
+; and for primitive arrays). At lower-phase=0 the body is expanded before PEA,
+; exposing a raw load of the array's klass header; resolveAccess returns
+; nullopt for header offsets and processLoad marks the array ineligible —
+; defeating array virtualization for EVERY aastore into an Object[] (the
+; frontend emits this check for every reference array store).
+define hotspotcc i1 @jeandle.array_store_check(ptr addrspace(1) nocapture %oop, ptr addrspace(1) nocapture %array_oop) noinline "lower-phase"="1" #0 {
 entry:
   %is_null = icmp eq ptr addrspace(1) %oop, null
   br i1 %is_null, label %return_true, label %check_subtype
@@ -807,7 +831,13 @@ normal_lrem:
 }
 
 ; Check if the object is value based
-define hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1) nocapture %obj) "lower-phase"="0" #0 {
+; lower-phase=1: survive JavaOperationLower(0) so the call reaches PEA, which
+; folds it via foldCheckIfValueBased (collapsing it to a constant when the
+; receiver's exact klass is known — always the case for a virtual object).
+; At lower-phase=0 the body's raw klass-header load marks the receiver
+; ineligible, defeating monitor elision for every value-based-candidate
+; receiver.
+define hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1) nocapture %obj) "lower-phase"="1" #0 {
 entry:
   %obj_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) %obj)
   %access_flags_offset = load i32, ptr @Klass.access_flags_offset
