@@ -25,8 +25,8 @@
  *          the array and the stored value AT the store (Graal
  *          processNodeInputs), instead of the old bail-all that marked both
  *          objects ineligible function-wide. The value's tracked field
- *          store is replayed immediately before the array store
- *          (pea.matslot); the old bail-all kept it in place.
+ *          store is eliminated at its original site and replayed immediately
+ *          before the array store; the old bail-all kept it in place.
  * @library /test/lib /
  * @build jdk.test.lib.Asserts
  * @run main/othervm -XX:-UseJeandleCompiler
@@ -70,11 +70,15 @@ public class TestSymbolicIndexStorePEA {
         checker.check("new_array");
         checker.check("new_instance");
         // p's tracked field store (p.x = 10) is eliminated at its original
-        // site and replayed onto OrigAlloc immediately before the array
-        // store; the replay slot GEP is named pea.matslot. The old bail-all
-        // (markIneligible on both objects) kept the store in place and
-        // produced NO replay, so this check fails pre-fix.
-        checker.check("pea.matslot");
+        // site and replayed immediately before the array store. The replay
+        // slot's SSA name (pea.matslot at the PEA pass) does not survive the
+        // full Jeandle pipeline, so anchor on POSITION instead: the store of
+        // 10 must appear AFTER the array store's element address is computed.
+        // Under the old bail-all the store stayed at the instance-allocation
+        // site, far EARLIER than array_element_address, so this ordering
+        // fails pre-fix.
+        checker.check("array_element_address");
+        checker.check("store atomic i32 10");
 
         output.shouldContain("TestSymbolicIndexStorePEA result: 20");
     }
