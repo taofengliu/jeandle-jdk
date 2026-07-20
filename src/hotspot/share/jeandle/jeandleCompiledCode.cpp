@@ -400,10 +400,21 @@ void JeandleCompiledCode::resolve_reloc_info(JeandleAssembler& assembler) {
         // it stops at that marker, returns the caller scope, and passes the marked
         // method back as next_inlinee so the next iteration can parse the inlinee
         // frame with the right ciMethod for BCI and scope-value decoding.
+        // Record-level (whole-deopt-point) VO id -> ObjectValue map, shared by
+        // every scope parsed from this stackmap record. PEA emits ALL VO
+        // descriptors into the ROOT scope's VO section (the deopt-point-level
+        // object pool — C2 dump_object_pool-before-scope-values analog), so a
+        // VORef slot / eliminated-monitor owner in ANY scope resolves against
+        // an ObjectValue created while parsing the root scope (scopes are
+        // parsed outermost-first). Per-scope maps would reject exactly those
+        // outer-scope references — this record-level sharing is that fix.
+        llvm::DenseMap<int, ObjectValue*> vo_map;
+        GrowableArray<JeandleDeferredVORefField> deferred_voref_fields;
         do {
           ciMethod* next_inlinee = nullptr;
           reloc->add_stack_map(parse_stackmap(stackmaps, record, location, num_deopts,
-                                              parse_context, next_inlinee));
+                                              parse_context, next_inlinee,
+                                              vo_map, deferred_voref_fields));
           if (next_inlinee != nullptr) {
             parse_context = JeandleParseContext::inlinee(next_inlinee);
           }
@@ -627,7 +638,7 @@ static int jeandle_compare_reassigned_field(JeandleReassignedField* a,
 
 // One emitted VO descriptor field, classified as either a plain scalar value
 // (resolved immediately via fill_one_scope_value) or a VORef to another VO in
-// the same scope (resolved by vo-id through vo_map, possibly deferred for
+// the same deopt point (resolved by vo-id through vo_map, possibly deferred for
 // forward references / cycles — see JeandleDeferredVORefField). A scalar
 // long/double field occupies TWO field_values slots: sv1 is the hi placeholder
 // (ConstantIntValue(0)) and sv2 is the lo full value
@@ -639,18 +650,6 @@ struct JeandleEmitField {
   ScopeValue* sv2 = nullptr;  // second scope value (long/double only); null
                               // for single-slot (int/float/ref) fields
   int voref_id = -1;          // valid when is_voref (vo-id of the referenced VO)
-};
-
-// A VORef descriptor field whose target VO has not yet been parsed (forward
-// reference, or a mutual cycle a.f=b, b.g=a). Resolved after the whole VO
-// section has been parsed: every descriptor's ObjectValue is created and
-// registered in vo_map first (C2 debugInfo.cpp:68-94 model), then deferred
-// fields are filled. Captures the owning ObjectValue + the index in its
-// field_values() of the placeholder slot to overwrite.
-struct JeandleDeferredVORefField {
-  ObjectValue* owning_ov;
-  int field_values_index;
-  int voref_id;
 };
 
 int JeandleCompiledCode::parse_stackmap_prologue(StackMapParser::record_iterator& record,
@@ -682,7 +681,9 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
                                                      StackMapParser::RecordAccessor::location_iterator& location,
                                                      int& num_deopts,
                                                      const JeandleParseContext& parse_context,
-                                                     ciMethod*& next_inlinee) {
+                                                     ciMethod*& next_inlinee,
+                                                     llvm::DenseMap<int, ObjectValue*>& vo_map,
+                                                     GrowableArray<JeandleDeferredVORefField>& deferred_voref_fields) {
   bool reexecute = false;
   int bci = -1;
   ciMethod* current_method = parse_context.method();
@@ -719,18 +720,17 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
   GrowableArray<ScopeValue*>* stack  = num_deopts > 0 ? new GrowableArray<ScopeValue*>(current_method->max_stack()) : nullptr;
   GrowableArray<MonitorValue*>* monitors = num_deopts > 0 ? new GrowableArray<MonitorValue*>() : nullptr;
   llvm::DenseSet<int> narrow_oop_locations;
-  // Per-scope VO id -> ObjectValue map for PEA virtual-object (VO) descriptors.
-  // A ScalarValueType descriptor is always emitted before any VORefType slot
-  // that references it, so the map is populated before a SLOT lookup. A VORef
-  // FIELD may forward-reference a VO described later (or form a cycle
-  // a.f=b, b.g=a); those are deferred into deferred_voref_fields and resolved
-  // once the whole VO section is parsed (every descriptor's ObjectValue is
-  // created and registered before any field value is resolved — C2
-  // debugInfo.cpp:68-94 model).
-  // The objects array accumulates every ObjectValue built this scope and is
-  // handed to DebugInformationRecorder::dump_object_pool for realloc_objects.
-  llvm::DenseMap<int, ObjectValue*> vo_map;
-  GrowableArray<JeandleDeferredVORefField> deferred_voref_fields;
+  // Record-level VO id -> ObjectValue map for PEA virtual-object (VO)
+  // descriptors, shared by the caller (resolve_reloc_info) across every scope
+  // parsed from this stackmap record. PEA emits ALL VO descriptors into the
+  // ROOT scope's VO section — the deopt-point-level object pool — and scopes
+  // are parsed outermost-first, so a ScalarValueType descriptor is always
+  // registered before any VORefType slot (in any scope) that references it.
+  // A VORef FIELD may forward-reference a VO described later (or form a cycle
+  // a.f=b, b.g=a); those are deferred into deferred_voref_fields (also
+  // record-level) and resolved once the whole VO section is parsed (every
+  // descriptor's ObjectValue is created and registered before any field value
+  // is resolved — C2 debugInfo.cpp:68-94 model).
   // Resolve every deferred VORef field now that all descriptors are parsed.
   // Called before each scope return (end-of-scope and the MethodType marker).
   auto flush_deferred_voref_fields = [&]() {
@@ -742,7 +742,12 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
              D.voref_id);
       D.owning_ov->field_values()->at(D.field_values_index) = target;
     }
+    // The list is record-level (survives across scopes of this record); clear
+    // it after each flush so entries are not flushed again at a later scope.
+    deferred_voref_fields.clear();
   };
+  // The objects array accumulates every ObjectValue built this scope and is
+  // handed to DebugInformationRecorder::dump_object_pool for realloc_objects.
   GrowableArray<ScopeValue*>* objects = nullptr;
   while (num_deopts > 0) {
     // local and stack deopt arguments are passed as a pair: <encode, value>
@@ -784,16 +789,18 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
           // the owner VO's vo-id as an i32 CONSTANT (NOT a live oop); resolve
           // it through vo_map to the owner's ObjectValue*, which was already
           // parsed from the ScalarValueType descriptor section earlier in this
-          // scope. Build a MonitorValue with eliminated=true so HotSpot
-          // relock_objects re-acquires the monitor on the realloc'd owner at
-          // deopt (C2/Graal MonitorValue{owner=ObjectValue, eliminated=true}
-          // analog; docs/c2-ea-deopt-survey.md §4.6). The basic_lock slot is
-          // preserved verbatim; ObjectSynchronizer::enter initializes it.
+          // deopt point (descriptors live in the root scope's VO section;
+          // vo_map is record-level). Build a MonitorValue with eliminated=true
+          // so HotSpot relock_objects re-acquires the monitor on the realloc'd
+          // owner at deopt (C2/Graal MonitorValue{owner=ObjectValue,
+          // eliminated=true} analog; docs/c2-ea-deopt-survey.md §4.6). The
+          // basic_lock slot is preserved verbatim; ObjectSynchronizer::enter
+          // initializes it.
           int vo_id = (int)StackMapUtil::getConstantUint(stackmaps, obj_location);
           ObjectValue* owner_ov = vo_map.lookup(vo_id);
           assert(owner_ov != nullptr,
                  "PEA eliminated-lock owner vo_id %d not described by a VO "
-                 "descriptor in this scope",
+                 "descriptor in this deopt point",
                  vo_id);
           Location basic_lock = Location::new_stk_loc(Location::normal,
                                  StackMapUtil::stack_offset(lock_location));
@@ -893,7 +900,7 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
         // offset rides in the field encoding's Index field (see
         // appendVirtualObjectDescriptor). A field whose encoding ValueTy is
         // VORefLocalType is a VORef FIELD: its value slot is an i32 vo-id
-        // referencing another VO in this scope, and its ScopeValue is that VO's
+        // referencing another VO in this deopt point, and its ScopeValue is that VO's
         // ObjectValue (resolved via vo_map, possibly deferred for forward refs
         // / cycles). A scalar field is resolved here via fill_one_scope_value.
         // We do NOT append to field_values yet: reassign_fields_by_klass walks
@@ -1033,7 +1040,9 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
       case DeoptValueEncoding::VORefLocalType: // fall through
       case DeoptValueEncoding::VORefStackType: {
         // A locals / stack slot that references a VO described by a
-        // ScalarValueType descriptor earlier in this scope. The trailing location
+        // ScalarValueType descriptor earlier in this deopt point (all
+        // descriptors live in the root scope's VO section; vo_map is
+        // record-level). The trailing location
         // is the i32 vo_id; the slot's ScopeValue is the ObjectValue for that id.
         // Two distinct types (not one VORefType) so the parser routes the slot to
         // the correct interpreter array (locals vs expression stack).

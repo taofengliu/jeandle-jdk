@@ -111,9 +111,11 @@ void JeandleCallReloc::process_stack_map() {
   }
 
   // Collect the per-scope PEA virtual-object pools into one safepoint-wide
-  // pool. Each scope's ScalarValueType descriptors live in its JeandleStackMap;
-  // realloc_objects reads a single pool via the PcDesc obj_decode_offset, so
-  // merge across all (post-LLVM-inlining) scopes here.
+  // pool. PEA emits all ScalarValueType descriptors into the ROOT scope's VO
+  // section (the deopt-point-level object pool), so they all land in the root
+  // scope's JeandleStackMap — but merge across all (post-LLVM-inlining)
+  // scopes here anyway, keeping this side placement-agnostic. realloc_objects
+  // reads a single pool via the PcDesc obj_decode_offset.
   GrowableArray<ScopeValue*>* object_pool = nullptr;
   for (JeandleStackMap* stack_map : _stack_maps) {
     if (stack_map->objects() != nullptr && stack_map->objects()->length() > 0) {
