@@ -20,7 +20,7 @@
 
 /*
  * @test
- * @summary PEA lock re-emit balance (review §3 #3/#4/#5): a locked VO that
+ * @summary PEA lock re-emit balance: a locked VO that
  *          escapes on a subset of paths (a conditional escape inside
  *          synchronized, plus an exceptional path) must have its elided
  *          monitorenter re-emitted EXACTLY ONCE per dynamic path, with the

@@ -20,7 +20,7 @@
 
 /*
  * @test
- * @summary PEA allocation-bundle scanning (review §3 #10): a VO referenced
+ * @summary PEA allocation-bundle scanning: a VO referenced
  *          only by ANOTHER allocation invoke's deopt bundle must be
  *          described there (Graal describes VOs in allocation frame states),
  *          not left for Pass-2 poison-RAUW. `a = new A(); b = new B();

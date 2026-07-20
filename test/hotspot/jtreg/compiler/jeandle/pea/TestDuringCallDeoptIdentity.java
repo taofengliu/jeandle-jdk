@@ -20,7 +20,7 @@
 
 /*
  * @test
- * @summary PEA record-before-materialize fix (review §3 #6): a VO that is a
+ * @summary PEA record-before-materialize fix: a VO that is a
  *          real call argument must be MATERIALIZED at the call (Graal
  *          processNodeInputs before processNodeWithState), never described
  *          as virtual in the same call's deopt bundle. Deopt DURING the call

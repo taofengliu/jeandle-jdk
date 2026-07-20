@@ -20,7 +20,7 @@
 
 /*
  * @test
- * @summary PEA compressed-oops graceful bail (review §3 #12): with the
+ * @summary PEA compressed-oops graceful bail: with the
  *          DEFAULT VM configuration (UseCompressedOops +
  *          UseCompressedClassPointers ON), PEA must skip cleanly instead of
  *          crashing in getOrCreateFieldIndex (fastdebug assert / release
