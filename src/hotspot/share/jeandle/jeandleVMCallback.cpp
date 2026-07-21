@@ -6,11 +6,11 @@
  * under the terms of the GNU General Public License version 2 only, as
  * published by the Free Software Foundation.
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * This code is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * version 2 for more details (a copy of the LICENSE file included with
+ * this code).
  *
  * You should have received a copy of the GNU General Public License version
  * 2 along with this work; if not, write to the Free Software Foundation,
@@ -28,7 +28,6 @@
 #include "jeandle/jeandleCompilation.hpp"
 #include "jeandle/jeandleUtils.hpp"
 #include "jeandle/jeandleVMCallback.hpp"
-#include "jeandle/jeandleCompilation.hpp"
 #include "jeandle/jeandleCompiledCall.hpp"
 #include "jeandle/jeandleCompiledCode.hpp"
 
@@ -42,15 +41,16 @@
 #include "classfile/vmClasses.hpp"
 #include "ci/ciField.hpp"
 #include "ci/ciInstance.hpp"
-#include "ci/ciInstanceKlass.hpp"
+#include "ci/ciMetadata.hpp"
 #include "ci/ciObject.hpp"
+#include "ci/ciType.hpp"
+#include "ci/ciUtilities.inline.hpp"
 #include "logging/log.hpp"
 #include "oops/fieldInfo.inline.hpp"
 #include "oops/fieldStreams.inline.hpp"
 #include "oops/instanceMirrorKlass.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/klass.inline.hpp"
-#include "runtime/handles.inline.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -60,69 +60,18 @@
 
 namespace {
 
-bool jeandle_is_subtype(uintptr_t sub_klass, uintptr_t super_klass) {
-  return ((Klass*)sub_klass)->is_subtype_of((Klass*)super_klass);
-}
+// File-local helpers shared by the JeandleVMCallback callbacks below.
 
-uintptr_t jeandle_get_common_super_klass(uintptr_t k1, uintptr_t k2) {
-  Klass* lca = ((Klass*)k1)->LCA((Klass*)k2);
-  return (uintptr_t)lca;
-}
-
-uintptr_t jeandle_get_field_type(uintptr_t klass_ptr, int offset) {
-  Klass* klass = (Klass*)klass_ptr;
-  if (!klass->is_instance_klass()) return 0;
-
-  InstanceKlass* ik = InstanceKlass::cast(klass);
-  for (JavaFieldStream fs(ik); !fs.done(); fs.next()) {
-    if (fs.offset() == offset) {
-      Symbol* sig = fs.signature();
-      if (sig->char_at(0) == JVM_SIGNATURE_CLASS ||
-          sig->char_at(0) == JVM_SIGNATURE_ARRAY) {
-        Thread* current = Thread::current();
-        HandleMark hm(current);
-        Klass* field_klass = SystemDictionary::find_instance_or_array_klass(
-            current, sig, Handle(current, ik->class_loader()),
-            Handle(current, ik->protection_domain()));
-        return (uintptr_t)field_klass; // 0 if not loaded
-      }
-      return 0; // primitive field
-    }
-  }
-  return 0; // field not found at offset
-}
-
-bool jeandle_is_interface(uintptr_t klass_ptr) {
-  return ((Klass*)klass_ptr)->is_interface();
-}
-
-bool jeandle_is_object_klass(uintptr_t klass_ptr) {
-  return (Klass*)klass_ptr == vmClasses::Object_klass();
-}
-
-bool jeandle_is_effectively_final(uintptr_t klass_ptr) {
-  Klass* klass = (Klass*)klass_ptr;
-  if (klass->is_instance_klass())
-    return InstanceKlass::cast(klass)->is_final();
-  if (klass->is_typeArray_klass())
-    return true;
-  if (klass->is_objArray_klass())
-    return jeandle_is_effectively_final(
-        (uintptr_t)ObjArrayKlass::cast(klass)->bottom_klass());
-  return false;
-}
-
-ciObject* jeandle_oop_by_id(int oop_id) {
+ciObject* oop_by_id(int oop_id) {
   JeandleCompilation* compilation = JeandleCompilation::current();
   if (compilation == nullptr) {
     return nullptr;
   }
-
   return compilation->compiled_code()->oop_at(oop_id);
 }
 
-bool jeandle_constant_field(int oop_id, int offset, ciField** field, ciConstant* con) {
-  ciObject* base_oop = jeandle_oop_by_id(oop_id);
+bool constant_field(int oop_id, int offset, ciField** field, ciConstant* con) {
+  ciObject* base_oop = oop_by_id(oop_id);
   if (base_oop == nullptr || base_oop->is_null_object()) {
     return false;
   }
@@ -169,19 +118,125 @@ bool jeandle_constant_field(int oop_id, int offset, ciField** field, ciConstant*
   return true;
 }
 
-int64_t jeandle_get_constant_field_value(int oop_id, int offset) {
+ciMethod* callback_method(uintptr_t method) {
+  assert(method != 0, "callback method pointer must not be null");
+  return (ciMethod*)method;
+}
+
+JeandleInlineReason inline_reason_from_llvm(int reason) {
+  switch (static_cast<llvm::jeandle::JeandleInlineReason>(reason)) {
+    case llvm::jeandle::JeandleInlineReason::RootCalleeUnsupported:
+      return JeandleInlineReason::LLVMRootCalleeUnsupported;
+    case llvm::jeandle::JeandleInlineReason::GetInlineCalleeIRFailed:
+      return JeandleInlineReason::LLVMGetInlineCalleeIRFailed;
+    case llvm::jeandle::JeandleInlineReason::MissingInlineCalleeDefinition:
+      return JeandleInlineReason::LLVMMissingInlineCalleeDefinition;
+    case llvm::jeandle::JeandleInlineReason::NotInlineViable:
+      return JeandleInlineReason::LLVMNotInlineViable;
+    case llvm::jeandle::JeandleInlineReason::LLVMInlineFailed:
+      return JeandleInlineReason::LLVMInlineFailed;
+    case llvm::jeandle::JeandleInlineReason::InlineSuccess:
+      ShouldNotReachHere();
+  }
+  ShouldNotReachHere();
+  return JeandleInlineReason::LLVMInlineFailed;
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Type hierarchy / declared-field queries
+// ---------------------------------------------------------------------------
+
+bool JeandleVMCallback::is_subtype(uintptr_t sub_klass, uintptr_t super_klass) {
+  return ((Klass*)sub_klass)->is_subtype_of((Klass*)super_klass);
+}
+
+uintptr_t JeandleVMCallback::get_common_super_klass(uintptr_t k1, uintptr_t k2) {
+  Klass* lca = ((Klass*)k1)->LCA((Klass*)k2);
+  return (uintptr_t)lca;
+}
+
+uintptr_t JeandleVMCallback::get_field_type(uintptr_t klass_ptr, int offset) {
+  // RecoverTypeInfo invokes this from the LLVM optimizer with the compile thread
+  // in _thread_in_native. VM_ENTRY_MARK is the canonical native->VM transition
+  // (the same one CI uses for its callbacks); in _thread_in_vm the field's
+  // declared type is resolved through the CI layer (ciInstanceKlass::
+  // get_field_by_offset -> ciField::type), exactly like ciField::compute_type_impl
+  // and the frontend — not via raw InstanceKlass/SystemDictionary/Handle, which
+  // is what made the old implementation unsound. JeandleVMCallback is a friend
+  // of ciEnv so ciEnv::get_metadata() is reachable.
+  VM_ENTRY_MARK;
+  Klass* holder = (Klass*)klass_ptr;
+  if (holder == nullptr || !holder->is_instance_klass()) {
+    return 0; // arrays/primitives have no Java instance fields
+  }
+  ciMetadata* meta = ciEnv::current()->get_metadata((Metadata*)holder);
+  if (meta == nullptr || !meta->is_instance_klass()) {
+    return 0;
+  }
+  // get_field_by_offset searches _nonstatic_fields (own + inherited), so an
+  // inherited field is still found by offset.
+  ciField* field = meta->as_instance_klass()->get_field_by_offset(offset, /*is_static=*/false);
+  if (field == nullptr) {
+    return 0;
+  }
+  ciType* type = field->type(); // lazily resolved by the CI
+  if (!type->is_klass()) {
+    return 0; // primitive field
+  }
+  ciKlass* field_klass = type->as_klass();
+  if (!field_klass->is_loaded()) {
+    return 0;
+  }
+  return (uintptr_t)(Klass*)(field_klass->constant_encoding());
+}
+
+bool JeandleVMCallback::is_interface(uintptr_t klass_ptr) {
+  return ((Klass*)klass_ptr)->is_interface();
+}
+
+bool JeandleVMCallback::is_object_klass(uintptr_t klass_ptr) {
+  return (Klass*)klass_ptr == vmClasses::Object_klass();
+}
+
+bool JeandleVMCallback::is_effectively_final(uintptr_t klass_ptr) {
+  Klass* klass = (Klass*)klass_ptr;
+  if (klass->is_instance_klass())
+    return InstanceKlass::cast(klass)->is_final();
+  if (klass->is_typeArray_klass())
+    return true;
+  if (klass->is_objArray_klass())
+    return is_effectively_final(
+        (uintptr_t)ObjArrayKlass::cast(klass)->bottom_klass());
+  return false;
+}
+
+bool JeandleVMCallback::is_unverified_interface(uintptr_t klass_ptr) {
+  // Reuses the shared helper that recurses through objArray bottom klasses,
+  // matching the frontend's rule for which declared field types are unsafe to
+  // attach (interface instance klasses and arrays whose element is such).
+  // Qualified (:: ) to call the global helper, not this method itself.
+  return ::is_unverified_interface((Klass*)klass_ptr);
+}
+
+// ---------------------------------------------------------------------------
+// Constant field folding
+// ---------------------------------------------------------------------------
+
+int64_t JeandleVMCallback::get_constant_field_value(int oop_id, int offset) {
   ciField* field = nullptr;
   ciConstant con;
-  // Callers must confirm foldability via jeandle_get_constant_field_info first
+  // Callers must confirm foldability via get_constant_field_info first
   // (it returns the HotSpot BasicType >= 0, or -1 when not foldable). This
   // function is only reached on that path; constancy is decided solely by
-  // _info, never by the value returned here.
-  bool foldable = jeandle_constant_field(oop_id, offset, &field, &con);
-  assert(foldable, "jeandle_get_constant_field_value called on a non-foldable "
-                   "field; caller must verify via jeandle_get_constant_field_info");
+  // get_constant_field_info, never by the value returned here.
+  bool foldable = constant_field(oop_id, offset, &field, &con);
+  assert(foldable, "get_constant_field_value called on a non-foldable "
+                   "field; caller must verify via get_constant_field_info");
 
   if (field->is_call_site_target()) {
-    ciObject* base_oop = jeandle_oop_by_id(oop_id);
+    ciObject* base_oop = oop_by_id(oop_id);
     assert(base_oop != nullptr && base_oop->is_call_site(), "bad CallSite holder");
     ciCallSite* call_site = base_oop->as_call_site();
     if (!call_site->is_fully_initialized_constant_call_site()) {
@@ -218,15 +273,19 @@ int64_t jeandle_get_constant_field_value(int oop_id, int offset) {
   }
 }
 
-int jeandle_get_constant_field_info(int oop_id, int offset) {
+int JeandleVMCallback::get_constant_field_info(int oop_id, int offset) {
   ciField* field = nullptr;
   ciConstant con;
-  if (!jeandle_constant_field(oop_id, offset, &field, &con))
+  if (!constant_field(oop_id, offset, &field, &con))
     return -1;
   return field->layout_type();
 }
 
-std::string jeandle_get_oop_handle_name(int oop_id) {
+// ---------------------------------------------------------------------------
+// Oop handles
+// ---------------------------------------------------------------------------
+
+std::string JeandleVMCallback::get_oop_handle_name(int oop_id) {
   JeandleCompilation* compilation = JeandleCompilation::current();
   assert(compilation != nullptr, "no active compilation");
   JeandleCompiledCode* cc = compilation->compiled_code();
@@ -239,8 +298,8 @@ std::string jeandle_get_oop_handle_name(int oop_id) {
   return it->getKey().str();
 }
 
-uintptr_t jeandle_get_oop_klass(int oop_id) {
-  ciObject* oop = jeandle_oop_by_id(oop_id);
+uintptr_t JeandleVMCallback::get_oop_klass(int oop_id) {
+  ciObject* oop = oop_by_id(oop_id);
   if (oop == nullptr || oop->is_null_object()) {
     return 0;
   }
@@ -254,36 +313,16 @@ uintptr_t jeandle_get_oop_klass(int oop_id) {
   return (uintptr_t)(Klass*)(klass->constant_encoding());
 }
 
-ciMethod* jeandle_callback_method(uintptr_t method) {
-  assert(method != 0, "callback method pointer must not be null");
-  return (ciMethod*)method;
-}
+// ---------------------------------------------------------------------------
+// Inlining
+// ---------------------------------------------------------------------------
 
-JeandleInlineReason jeandle_inline_reason_from_llvm(int reason) {
-  switch (static_cast<llvm::jeandle::JeandleInlineReason>(reason)) {
-    case llvm::jeandle::JeandleInlineReason::RootCalleeUnsupported:
-      return JeandleInlineReason::LLVMRootCalleeUnsupported;
-    case llvm::jeandle::JeandleInlineReason::GetInlineCalleeIRFailed:
-      return JeandleInlineReason::LLVMGetInlineCalleeIRFailed;
-    case llvm::jeandle::JeandleInlineReason::MissingInlineCalleeDefinition:
-      return JeandleInlineReason::LLVMMissingInlineCalleeDefinition;
-    case llvm::jeandle::JeandleInlineReason::NotInlineViable:
-      return JeandleInlineReason::LLVMNotInlineViable;
-    case llvm::jeandle::JeandleInlineReason::LLVMInlineFailed:
-      return JeandleInlineReason::LLVMInlineFailed;
-    case llvm::jeandle::JeandleInlineReason::InlineSuccess:
-      ShouldNotReachHere();
-  }
-  ShouldNotReachHere();
-  return JeandleInlineReason::LLVMInlineFailed;
-}
-
-bool jeandle_is_ok_to_inline(int scope_id, int bci, uintptr_t callee_method) {
+bool JeandleVMCallback::is_ok_to_inline(int scope_id, int bci, uintptr_t callee_method) {
   JeandleCompilation* comp = JeandleCompilation::current();
   assert(comp != nullptr, "Must be called in compile thread");
   JeandleInlineTree* caller_tree = comp->inline_tree_for_scope(scope_id);
   assert(caller_tree != nullptr, "caller inline tree must exist");
-  ciMethod* callee = jeandle_callback_method(callee_method);
+  ciMethod* callee = callback_method(callee_method);
   if (caller_tree->callee_at(bci, callee) != nullptr) {
     return true;
   }
@@ -299,10 +338,10 @@ bool jeandle_is_ok_to_inline(int scope_id, int bci, uintptr_t callee_method) {
   return true;
 }
 
-bool jeandle_record_inline_result(int scope_id, int bci, uintptr_t callee_method, int result) {
+bool JeandleVMCallback::record_inline_result(int scope_id, int bci, uintptr_t callee_method, int result) {
   JeandleCompilation* comp = JeandleCompilation::current();
   assert(comp != nullptr, "Must be called in compile thread");
-  ciMethod* callee = jeandle_callback_method(callee_method);
+  ciMethod* callee = callback_method(callee_method);
 
   llvm::jeandle::JeandleInlineReason llvm_reason =
       static_cast<llvm::jeandle::JeandleInlineReason>(result);
@@ -314,16 +353,16 @@ bool jeandle_record_inline_result(int scope_id, int bci, uintptr_t callee_method
     comp->record_inline_failure(scope_id,
                                 bci,
                                 callee,
-                                jeandle_inline_reason_from_llvm(result));
+                                inline_reason_from_llvm(result));
   }
   return true;
 }
 
-bool jeandle_get_inline_callee_ir(uintptr_t callee_method) {
+bool JeandleVMCallback::get_inline_callee_ir(uintptr_t callee_method) {
   JeandleCompilation* comp = JeandleCompilation::current();
   assert(comp != nullptr, "Must be called in compile thread");
   llvm::Module* M = comp->llvm_module();
-  ciMethod* callee = jeandle_callback_method(callee_method);
+  ciMethod* callee = callback_method(callee_method);
   std::string callee_name = JeandleFuncSig::method_name_with_signature(callee);
   llvm::Function* callee_func = M->getFunction(callee_name);
   if (callee_func != nullptr && !callee_func->isDeclaration()) {
@@ -345,7 +384,7 @@ bool jeandle_get_inline_callee_ir(uintptr_t callee_method) {
   return true;
 }
 
-int64_t jeandle_get_new_statepoint_id(int64_t old_statepoint_id) {
+int64_t JeandleVMCallback::get_new_statepoint_id(int64_t old_statepoint_id) {
   JeandleCompilation* comp = JeandleCompilation::current();
   assert(comp != nullptr, "Must be called in compile thread");
   assert(old_statepoint_id >= 0, "old statepoint id must be non-negative");
@@ -354,7 +393,7 @@ int64_t jeandle_get_new_statepoint_id(int64_t old_statepoint_id) {
       static_cast<uint64_t>(old_statepoint_id));
 }
 
-bool jeandle_record_inlining_complete() {
+bool JeandleVMCallback::record_inlining_complete() {
   if (JeandleRecordVMCallbacks) {
     JeandleCompilation* comp = JeandleCompilation::current();
     assert(comp != nullptr, "Must be called in compile thread");
@@ -363,19 +402,16 @@ bool jeandle_record_inlining_complete() {
   return true;
 }
 
-// Change a virtual callsite to opt virtual call site.
-bool update_to_static_opt_virtual_call(int64_t id) {
-  JeandleCompilation* compilation = JeandleCompilation::current();
-  assert(compilation != nullptr, "no active compilation");
-  JeandleCompiledCode* cc = compilation->compiled_code();
-  if (static_cast<size_t>(id) >= cc->non_routine_call_sites().size()) {
-    return false;
-  }
-  CallSiteInfo* call_site = cc->non_routine_call_sites()[id];
-  call_site->set_type(JeandleCompiledCall::STATIC_CALL);
-  call_site->set_target(SharedRuntime::get_resolve_opt_virtual_call_stub());
-  return true;
-}
+// ---------------------------------------------------------------------------
+// CHA devirtualization
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// File-local CHA helpers. They return llvm::jeandle::CHAOptInfo, an LLVM-side
+// type that cannot appear in the pure-HotSpot jeandleVMCallback.hpp, so they
+// stay free functions here (internal linkage) and are only called by
+// JeandleVMCallback::get_cha_opt_info below.
 
 llvm::jeandle::CHAOptInfo optimize_invokeinterface(ciMethod* caller,
                               ciMethod* callee, ciInstanceKlass* holder) {
@@ -424,7 +460,11 @@ llvm::jeandle::CHAOptInfo optimize_virtual_call(ciMethod* caller,
     return {};
   }
 
-  ciInstanceKlass* receiver_inst_klass = ciEnv::current()->get_instance_klass_for_klass(receiver_klass);
+  // Bridge back into the friend class so the receiver Klass* is resolved through
+  // the CI layer (ciEnv::get_instance_klass is private; reachable because
+  // JeandleVMCallback is a friend of ciEnv).
+  ciInstanceKlass* receiver_inst_klass =
+      JeandleVMCallback::get_receiver_instance_klass(receiver_klass);
   ciInstanceKlass* actual_receiver = holder;
   bool actual_receiver_is_exact = false;
   if (receiver_inst_klass->is_loaded() && receiver_inst_klass->is_initialized() &&
@@ -463,9 +503,20 @@ llvm::jeandle::CHAOptInfo optimize_virtual_call(ciMethod* caller,
   return {};
 }
 
-std::string jeandle_get_cha_opt_info(uintptr_t caller_ptr, uintptr_t callee_ptr,
-                                     uintptr_t holder_ptr, uintptr_t receiver_klass_ptr,
-                                     bool is_exact, int bytecode) {
+} // anonymous namespace
+
+ciInstanceKlass* JeandleVMCallback::get_receiver_instance_klass(Klass* receiver_klass) {
+  if (receiver_klass == nullptr) {
+    return nullptr;
+  }
+  assert(receiver_klass->is_instance_klass(), "must be instance klass");
+  VM_ENTRY_MARK;
+  return ciEnv::current()->get_instance_klass(receiver_klass);
+}
+
+std::string JeandleVMCallback::get_cha_opt_info(uintptr_t caller_ptr, uintptr_t callee_ptr,
+                                                uintptr_t holder_ptr, uintptr_t receiver_klass_ptr,
+                                                bool is_exact, int bytecode) {
   if (caller_ptr == 0 || callee_ptr == 0 || holder_ptr == 0) {
     return "";
   }
@@ -494,27 +545,40 @@ std::string jeandle_get_cha_opt_info(uintptr_t caller_ptr, uintptr_t callee_ptr,
   return "";
 }
 
-} // anonymous namespace
+// Change a virtual callsite to opt virtual call site.
+bool JeandleVMCallback::update_to_static_opt_virtual_call(int64_t id) {
+  JeandleCompilation* compilation = JeandleCompilation::current();
+  assert(compilation != nullptr, "no active compilation");
+  JeandleCompiledCode* cc = compilation->compiled_code();
+  if (static_cast<size_t>(id) >= cc->non_routine_call_sites().size()) {
+    return false;
+  }
+  CallSiteInfo* call_site = cc->non_routine_call_sites()[id];
+  call_site->set_type(JeandleCompiledCall::STATIC_CALL);
+  call_site->set_target(SharedRuntime::get_resolve_opt_virtual_call_stub());
+  return true;
+}
 
-void register_jeandle_vm_callbacks() {
+void JeandleVMCallback::register_callbacks() {
   llvm::jeandle::VMCallbacks callbacks;
-  callbacks.IsSubtype = &jeandle_is_subtype;
-  callbacks.GetCommonSuperKlass = &jeandle_get_common_super_klass;
-  callbacks.GetFieldType = &jeandle_get_field_type;
-  callbacks.IsInterface = &jeandle_is_interface;
-  callbacks.IsObjectKlass = &jeandle_is_object_klass;
-  callbacks.IsEffectivelyFinal = &jeandle_is_effectively_final;
-  callbacks.GetConstantFieldValue = &jeandle_get_constant_field_value;
-  callbacks.GetConstantFieldInfo = &jeandle_get_constant_field_info;
-  callbacks.GetOopHandleName = &jeandle_get_oop_handle_name;
-  callbacks.GetOopKlass = &jeandle_get_oop_klass;
-  callbacks.GetInlineCalleeIR = &jeandle_get_inline_callee_ir;
-  callbacks.GetNewStatepointID = &jeandle_get_new_statepoint_id;
-  callbacks.IsOkToInline = &jeandle_is_ok_to_inline;
-  callbacks.RecordInlineResult = &jeandle_record_inline_result;
-  callbacks.RecordInliningComplete = &jeandle_record_inlining_complete;
-  callbacks.GetCHAOptInfo = &jeandle_get_cha_opt_info;
-  callbacks.UpdateToStaticOptVirtualCall = &update_to_static_opt_virtual_call;
+  callbacks.IsSubtype = &JeandleVMCallback::is_subtype;
+  callbacks.GetCommonSuperKlass = &JeandleVMCallback::get_common_super_klass;
+  callbacks.GetFieldType = &JeandleVMCallback::get_field_type;
+  callbacks.IsInterface = &JeandleVMCallback::is_interface;
+  callbacks.IsObjectKlass = &JeandleVMCallback::is_object_klass;
+  callbacks.IsUnverifiedInterface = &JeandleVMCallback::is_unverified_interface;
+  callbacks.IsEffectivelyFinal = &JeandleVMCallback::is_effectively_final;
+  callbacks.GetConstantFieldValue = &JeandleVMCallback::get_constant_field_value;
+  callbacks.GetConstantFieldInfo = &JeandleVMCallback::get_constant_field_info;
+  callbacks.GetOopHandleName = &JeandleVMCallback::get_oop_handle_name;
+  callbacks.GetOopKlass = &JeandleVMCallback::get_oop_klass;
+  callbacks.GetInlineCalleeIR = &JeandleVMCallback::get_inline_callee_ir;
+  callbacks.GetNewStatepointID = &JeandleVMCallback::get_new_statepoint_id;
+  callbacks.IsOkToInline = &JeandleVMCallback::is_ok_to_inline;
+  callbacks.RecordInlineResult = &JeandleVMCallback::record_inline_result;
+  callbacks.RecordInliningComplete = &JeandleVMCallback::record_inlining_complete;
+  callbacks.GetCHAOptInfo = &JeandleVMCallback::get_cha_opt_info;
+  callbacks.UpdateToStaticOptVirtualCall = &JeandleVMCallback::update_to_static_opt_virtual_call;
   llvm::jeandle::registerVMCallbacks(callbacks);
 
   if (JeandleRecordVMCallbacks) {
