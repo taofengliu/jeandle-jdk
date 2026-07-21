@@ -148,10 +148,10 @@ public class TestPEAMaterializeAtCall {
                 target + ": only post-call field loads remain real");
         callBlock.assertAbsent("jeandle.new_instance");
         if (intStores != 0) {
-            callBlock.assertBefore(INT_STORE, 0, calleeName, 0);
+            callBlock.assertBefore(INT_STORE, intStores - 1, calleeName, 0);
         }
         if (referenceStores != 0) {
-            callBlock.assertBefore(REF_STORE, 0, calleeName, 0);
+            callBlock.assertBefore(REF_STORE, referenceStores - 1, calleeName, 0);
         }
 
         // A materialized real argument stays as a live oop in the call's
