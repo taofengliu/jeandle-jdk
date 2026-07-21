@@ -55,6 +55,7 @@ public class TestPEAHarnessSmoke {
         testManagedOptionRejection(noArgs);
         testDumpPairing(noArgs, complex);
         testRealShapeRun(noArgs, complex, decoy);
+        testIterationsAndExactEffects(noArgs, decoy);
         PEATestUtils.assertPEAOnOffEquivalent(WRAPPER, noArgs, complex);
 
         System.out.println("TestPEAHarnessSmoke: harness OK");
@@ -154,6 +155,9 @@ public class TestPEAHarnessSmoke {
         expectFailure("duplicate after marker", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat, after(id, 0), body,
                         after(id, 0), body), id));
+        expectFailure("missing transform-idle flag", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, stat,
+                        ";; PEA-DUMP after iter=0 function " + id.llvmFunctionName(), body), id));
         expectFailure("gapped rounds", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat, after(id, 0), body,
                         before(id, 2), body, stat, after(id, 2), body), id));
@@ -298,6 +302,45 @@ public class TestPEAHarnessSmoke {
             Asserts.assertFalse(run.output().getStderr().contains(
                     PEATestUtils.MethodId.of(decoy).llvmFunctionName()));
         }
+    }
+
+    private static void testIterationsAndExactEffects(Method target, Method helper)
+            throws Exception {
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, target)
+                .peaIterations(4)
+                .run()) {
+            List<String> command = run.command();
+            String llvm = command.stream()
+                    .filter(s -> s.startsWith("-XX:JeandleLLVMOptions="))
+                    .findFirst().orElseThrow();
+            Asserts.assertEquals(List.of(llvm.substring(
+                    "-XX:JeandleLLVMOptions=".length()).split(" ")).stream()
+                    .filter("-jeandle-pea-iterations=4"::equals).count(), 1L);
+            PEATestUtils.PEAReport report = run.report(target);
+            Asserts.assertTrue(report.roundCount() >= 2, "configured outer rounds");
+            Asserts.assertTrue(report.round(report.roundCount() - 1).transformIdle(),
+                    "last observed round must be transform-idle");
+            report.round(0).uniqueEffect("EliminateAllocation", "jeandle.new_instance");
+            Asserts.assertEquals(report.round(0).effectCount(
+                    "EliminateAllocation", "jeandle.new_instance"), 1L);
+            Asserts.assertEquals(report.round0Before().allocationBCIs().size(), 1);
+            PEATestUtils.IRBlock allocationBlock = report.round0Before()
+                    .blockContaining("@jeandle.new_instance", 0);
+            Asserts.assertEquals(allocationBlock.occurrenceCount(
+                    "@jeandle.new_instance"), 1);
+            allocationBlock.assertAbsent("@jeandle.new_array");
+            allocationBlock.assertBefore("@jeandle.new_instance", 0, "to label", 0);
+        }
+
+        Asserts.assertThrows(IllegalArgumentException.class,
+                () -> PEATestUtils.shapeRun(WRAPPER, target).peaIterations(0));
+        Asserts.assertThrows(IllegalArgumentException.class,
+                () -> PEATestUtils.shapeRun(WRAPPER, target).peaIterations(17));
+
+        PEATestUtils.behaviorRun(WRAPPER, target)
+                .peaIterations(4)
+                .dontinline(helper)
+                .runPEAOnOffEquivalent();
     }
 
     private static String before(PEATestUtils.MethodId id, int round) {

@@ -90,7 +90,7 @@ public final class PEATestUtils {
             "-Xbootclasspath/a:.", "-XX:+UnlockDiagnosticVMOptions", "-XX:+WhiteBoxAPI"};
     private static final Pattern MARKER = Pattern.compile(
             "^;; PEA-DUMP (before|after) iter=(\\d+) function (.*?)"
-                    + "(?: transform_idle=(?:true|false|0|1))?$"
+                    + "(?: transform_idle=(true|false|0|1))?$"
     );
     private static final Pattern STATS = Pattern.compile(
             "^;; PEA stats @(.*): NeverEscapes=(\\d+) PartiallyEscapes=(\\d+)"
@@ -188,14 +188,16 @@ public final class PEATestUtils {
 
     /** Builder for one child VM. Every target is explicit and descriptor-qualified. */
     public static final class RunBuilder {
+        private static final int MAX_PEA_ITERATIONS = 16;
         private final String wrapperFQN;
         private final boolean shape;
         private final List<MethodId> targets;
         private final List<MethodId> compileOnly;
-        private final List<MethodId> dontInline = new ArrayList<>();
-        private final List<String> extraFlags = new ArrayList<>();
-        private final List<String> extraLLVMOptions = new ArrayList<>();
+        private final List<MethodId> dontInline;
+        private final List<String> extraFlags;
+        private final List<String> extraLLVMOptions;
         private boolean peaOn = true;
+        private Integer peaIterations;
         private boolean keepDumps;
 
         private RunBuilder(String wrapperFQN, boolean shape, Method... methods) {
@@ -217,6 +219,22 @@ public final class PEATestUtils {
             }
             this.targets = List.copyOf(unique.values());
             this.compileOnly = new ArrayList<>(targets);
+            this.dontInline = new ArrayList<>();
+            this.extraFlags = new ArrayList<>();
+            this.extraLLVMOptions = new ArrayList<>();
+        }
+
+        private RunBuilder(RunBuilder other) {
+            this.wrapperFQN = other.wrapperFQN;
+            this.shape = other.shape;
+            this.targets = other.targets;
+            this.compileOnly = new ArrayList<>(other.compileOnly);
+            this.dontInline = new ArrayList<>(other.dontInline);
+            this.extraFlags = new ArrayList<>(other.extraFlags);
+            this.extraLLVMOptions = new ArrayList<>(other.extraLLVMOptions);
+            this.peaOn = other.peaOn;
+            this.peaIterations = other.peaIterations;
+            this.keepDumps = other.keepDumps;
         }
 
         public RunBuilder compileOnly(Method method) {
@@ -254,6 +272,18 @@ public final class PEATestUtils {
             return this;
         }
 
+        public RunBuilder peaIterations(int iterations) {
+            if (iterations < 1 || iterations > MAX_PEA_ITERATIONS) {
+                throw new IllegalArgumentException(
+                        "PEA iterations must be in [1, " + MAX_PEA_ITERATIONS + "]");
+            }
+            if (!peaOn) {
+                throw new IllegalStateException("PEA-off runs force zero iterations");
+            }
+            peaIterations = iterations;
+            return this;
+        }
+
         public RunBuilder peaOff() {
             if (shape) {
                 throw new IllegalStateException("A shape run requires PEA diagnostics");
@@ -262,6 +292,7 @@ public final class PEATestUtils {
                 throw new IllegalStateException(PEA_OFF_EXTRA_LLVM_ERROR);
             }
             peaOn = false;
+            peaIterations = null;
             return this;
         }
 
@@ -294,6 +325,18 @@ public final class PEATestUtils {
             }
         }
 
+        public void runPEAOnOffEquivalent() throws Exception {
+            RunBuilder onBuilder = new RunBuilder(this);
+            onBuilder.peaOn = true;
+            RunBuilder offBuilder = new RunBuilder(onBuilder).peaOff();
+            try (RunResult on = onBuilder.run(); RunResult off = offBuilder.run()) {
+                String onPayload = exactResultPayload(on.output().getStdout());
+                String offPayload = exactResultPayload(off.output().getStdout());
+                Asserts.assertEquals(onPayload, offPayload,
+                        "PEA-on/off result payload mismatch");
+            }
+        }
+
         private List<String> command(Path dumpDir) {
             ArrayList<String> command = new ArrayList<>();
             command.addAll(Arrays.asList(WHITEBOX_FLAGS));
@@ -321,15 +364,19 @@ public final class PEATestUtils {
             List<String> llvmOptions = new ArrayList<>();
             if (!peaOn) {
                 llvmOptions.add("-jeandle-pea-iterations=0");
-            } else if (shape) {
-                llvmOptions.add("-jeandle-trace-pea");
-                llvmOptions.add("-jeandle-dump-pea-stats");
-                for (MethodId id : targets) {
-                    llvmOptions.add("-jeandle-pea-analyze-function=" + id.llvmFunctionName());
-                    llvmOptions.add("-jeandle-dump-pea-ir-function=" + id.llvmFunctionName());
-                }
-                llvmOptions.addAll(extraLLVMOptions);
             } else {
+                if (peaIterations != null) {
+                    llvmOptions.add("-jeandle-pea-iterations=" + peaIterations);
+                }
+                if (shape) {
+                    llvmOptions.add("-jeandle-trace-pea");
+                    llvmOptions.add("-jeandle-dump-pea-stats");
+                    for (MethodId id : targets) {
+                        llvmOptions.add("-jeandle-pea-analyze-function=" + id.llvmFunctionName());
+                        llvmOptions.add("-jeandle-dump-pea-ir-function="
+                                + id.llvmFunctionName());
+                    }
+                }
                 llvmOptions.addAll(extraLLVMOptions);
             }
             if (!llvmOptions.isEmpty()) {
@@ -537,10 +584,11 @@ public final class PEATestUtils {
         private final int alwaysEscapes;
         private final List<PEAEffect> effects;
         private final boolean hasStats;
+        private final boolean transformIdle;
 
         private PEARound(int iteration, IRBody before, IRBody after,
                          int neverEscapes, int partiallyEscapes, int alwaysEscapes,
-                         List<PEAEffect> effects, boolean hasStats) {
+                         List<PEAEffect> effects, boolean hasStats, boolean transformIdle) {
             this.iteration = iteration;
             this.before = before;
             this.after = after;
@@ -549,6 +597,7 @@ public final class PEATestUtils {
             this.alwaysEscapes = alwaysEscapes;
             this.effects = List.copyOf(effects);
             this.hasStats = hasStats;
+            this.transformIdle = transformIdle;
         }
 
         public int iteration() {
@@ -584,6 +633,37 @@ public final class PEATestUtils {
 
         public List<PEAEffect> effects() {
             return effects;
+        }
+
+        public boolean transformIdle() {
+            return transformIdle;
+        }
+
+        public long effectCount(String kind, String... detailParts) {
+            return matchingEffects(kind, detailParts).size();
+        }
+
+        public PEAEffect uniqueEffect(String kind, String... detailParts) {
+            List<PEAEffect> matches = matchingEffects(kind, detailParts);
+            if (matches.size() != 1) {
+                throw new IllegalStateException("Expected exactly one " + kind
+                        + " effect matching " + Arrays.toString(detailParts)
+                        + " in round " + iteration + ", got " + matches.size());
+            }
+            return matches.get(0);
+        }
+
+        private List<PEAEffect> matchingEffects(String kind, String... detailParts) {
+            Objects.requireNonNull(kind);
+            Objects.requireNonNull(detailParts);
+            for (String detailPart : detailParts) {
+                Objects.requireNonNull(detailPart);
+            }
+            return effects.stream()
+                    .filter(effect -> effect.kind().equals(kind))
+                    .filter(effect -> Arrays.stream(detailParts)
+                            .allMatch(effect.detail()::contains))
+                    .collect(Collectors.toUnmodifiableList());
         }
 
         private void requireStats() {
@@ -717,6 +797,10 @@ public final class PEATestUtils {
                         current = new RoundBuilder(iteration);
                         capture = Capture.BEFORE;
                     } else {
+                        if (marker.group(4) == null) {
+                            throw malformed(method,
+                                    "after marker lacks transform-idle flag for round " + iteration);
+                        }
                         if (current == null || current.iteration != iteration) {
                             throw malformed(method, "after marker without matching before for round "
                                     + iteration);
@@ -725,6 +809,8 @@ public final class PEATestUtils {
                             throw malformed(method, "duplicate after marker for round " + iteration);
                         }
                         current.afterSeen = true;
+                        current.transformIdle = marker.group(4).equals("true")
+                                || marker.group(4).equals("1");
                         capture = Capture.AFTER;
                     }
                     continue;
@@ -800,6 +886,7 @@ public final class PEATestUtils {
         private final List<PEAEffect> effects = new ArrayList<>();
         private boolean statsSeen;
         private boolean afterSeen;
+        private boolean transformIdle;
         private int never;
         private int partial;
         private int always;
@@ -815,16 +902,22 @@ public final class PEATestUtils {
             return new PEARound(iteration,
                     IRBody.fromModuleLines(beforeLines, method),
                     IRBody.fromModuleLines(afterLines, method),
-                    never, partial, always, effects, statsSeen);
+                    never, partial, always, effects, statsSeen, transformIdle);
         }
     }
 
     /** One exact LLVM function definition with line- and occurrence-aware assertions. */
     public static final class IRBody {
+        private static final String LLVM_LABEL_NAME =
+                "(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
         private static final Pattern PEA_ALLOCATION = Pattern.compile(
                 "@jeandle\\.new_(?:instance|array)(?=\\s*\\()");
         private static final Pattern LOWERED_ALLOCATION = Pattern.compile(
                 "@new_(?:instance|array)(?=\\s*\\()");
+        private static final Pattern DEOPT_BCI = Pattern.compile(
+                "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1,");
+        private static final Pattern BLOCK_LABEL = Pattern.compile(
+                "^(" + LLVM_LABEL_NAME + "):(?: ;.*)?$");
         private final MethodId method;
         private final List<String> lines;
         private final String text;
@@ -889,6 +982,55 @@ public final class PEATestUtils {
 
         public int loweredAllocCount() {
             return (int) lines.stream().filter(l -> LOWERED_ALLOCATION.matcher(l).find()).count();
+        }
+
+        public List<Integer> allocationBCIs() {
+            ArrayList<Integer> result = new ArrayList<>();
+            for (String line : lines) {
+                if (!PEA_ALLOCATION.matcher(line).find()) {
+                    continue;
+                }
+                Matcher matcher = DEOPT_BCI.matcher(line);
+                if (!matcher.find()) {
+                    throw new AssertionError(method + ": allocation lacks a source BCI: " + line);
+                }
+                result.add(Integer.parseInt(matcher.group(1)));
+            }
+            return List.copyOf(result);
+        }
+
+        public IRBlock blockContaining(String substring, int occurrence) {
+            int position = occurrencePosition(substring, occurrence);
+            int containingLine = -1;
+            int lineStart = 0;
+            for (int i = 0; i < lines.size(); i++) {
+                int lineEnd = lineStart + lines.get(i).length();
+                if (position < lineEnd) {
+                    containingLine = i;
+                    break;
+                }
+                lineStart = lineEnd + 1;
+            }
+            if (containingLine < 0) {
+                throw new IllegalStateException(method + ": occurrence is outside the function");
+            }
+
+            int blockStart = containingLine;
+            while (blockStart >= 0 && !BLOCK_LABEL.matcher(lines.get(blockStart)).matches()) {
+                blockStart--;
+            }
+            if (blockStart < 0) {
+                throw new IllegalStateException(method + ": occurrence " + occurrence + " of '"
+                        + fold(substring) + "' is outside a labeled LLVM block");
+            }
+
+            int blockEnd = blockStart + 1;
+            while (blockEnd < lines.size()
+                    && !BLOCK_LABEL.matcher(lines.get(blockEnd)).matches()
+                    && !lines.get(blockEnd).equals("}")) {
+                blockEnd++;
+            }
+            return new IRBlock(method, lines.subList(blockStart, blockEnd));
         }
 
         public int lineCount(String substring) {
@@ -973,6 +1115,64 @@ public final class PEATestUtils {
                 if (at < 0) {
                     throw new IllegalStateException(method + ": no occurrence " + occurrence
                             + " of '" + needle + "'");
+                }
+            }
+            return at;
+        }
+    }
+
+    /** One labeled LLVM basic block with occurrence-aware assertions. */
+    public static final class IRBlock {
+        private final MethodId method;
+        private final String text;
+
+        private IRBlock(MethodId method, List<String> lines) {
+            this.method = method;
+            this.text = String.join("\n", List.copyOf(lines));
+        }
+
+        public int occurrenceCount(String substring) {
+            String needle = fold(substring);
+            if (needle.isEmpty()) {
+                throw new IllegalArgumentException("Occurrence needle must not be empty");
+            }
+            int count = 0;
+            int from = 0;
+            while ((from = text.indexOf(needle, from)) >= 0) {
+                count++;
+                from += needle.length();
+            }
+            return count;
+        }
+
+        public void assertAbsent(String substring) {
+            Asserts.assertEquals(occurrenceCount(substring), 0,
+                    method + ": unexpected '" + fold(substring) + "' in block");
+        }
+
+        public void assertBefore(String first, int firstOccurrence,
+                                 String second, int secondOccurrence) {
+            int firstAt = occurrencePosition(first, firstOccurrence);
+            int secondAt = occurrencePosition(second, secondOccurrence);
+            Asserts.assertTrue(firstAt < secondAt, method + ": expected occurrence "
+                    + firstOccurrence + " of '" + fold(first) + "' before occurrence "
+                    + secondOccurrence + " of '" + fold(second) + "' in block");
+        }
+
+        private int occurrencePosition(String substring, int occurrence) {
+            if (occurrence < 0) {
+                throw new IllegalArgumentException("Occurrence index must be non-negative");
+            }
+            String needle = fold(substring);
+            if (needle.isEmpty()) {
+                throw new IllegalArgumentException("Occurrence needle must not be empty");
+            }
+            int at = -needle.length();
+            for (int i = 0; i <= occurrence; i++) {
+                at = text.indexOf(needle, at + needle.length());
+                if (at < 0) {
+                    throw new IllegalStateException(method + ": no occurrence " + occurrence
+                            + " of '" + needle + "' in block");
                 }
             }
             return at;
