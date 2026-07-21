@@ -53,10 +53,14 @@ public class TestPEAComplexPredecessorMerge {
             "^(" + LLVM_NAME + "):\\s*; preds = (.+)$");
     private static final Pattern CONDITIONAL_BRANCH = Pattern.compile(
             "^br i1 .* label %(" + LLVM_NAME + "), label %(" + LLVM_NAME + ").*$");
-    private static final Pattern PHI_INCOMING = Pattern.compile(
-            "\\[[^\\[\\]]*,\\s*%(" + LLVM_NAME + ")\\s*\\]");
+    private static final Pattern LLVM_BLOCK_REFERENCE = Pattern.compile(
+            "%(" + LLVM_NAME + ")");
+    private static final Pattern PHI_INCOMING_BLOCK = Pattern.compile(
+            ",\\s*%(" + LLVM_NAME + ")\\s*\\]");
 
     public static void main(String[] args) throws Exception {
+        assertPhiParserContracts();
+
         Method mixed = TestWrapper.class.getMethod("virtualMaterializedMix",
                 boolean.class, int.class);
         Method critical = TestWrapper.class.getMethod("criticalEdgeMerge",
@@ -254,26 +258,89 @@ public class TestPEAComplexPredecessorMerge {
     }
 
     private static void assertCompletePhis(PEATestUtils.IRBody body, Method target) {
-        int predecessorCount = -1;
-        for (String line : body.lines()) {
+        validateCompletePhis(body.lines(), target.toString());
+    }
+
+    private static void validateCompletePhis(List<String> lines, String context) {
+        Map<String, Integer> currentPredecessors = null;
+        String currentBlock = null;
+        for (String line : lines) {
+            Matcher anyBlock = BLOCK_LABEL.matcher(line);
+            if (anyBlock.matches()) {
+                currentBlock = anyBlock.group(1);
+                currentPredecessors = null;
+            }
             Matcher block = BLOCK_WITH_PREDECESSORS.matcher(line);
             if (block.matches()) {
-                predecessorCount = block.group(2).split(",\\s*").length;
+                currentPredecessors = blockReferences(block.group(2));
                 continue;
             }
             if (!line.contains(" = phi ")) {
                 continue;
             }
-            Asserts.assertTrue(predecessorCount >= 0,
-                    target + ": PHI outside a block with printed predecessors: " + line);
-            Matcher incoming = PHI_INCOMING.matcher(line);
-            int incomingCount = 0;
-            while (incoming.find()) {
-                incomingCount++;
+            if (currentPredecessors == null) {
+                throw new IllegalStateException(context
+                        + ": PHI outside a block with printed predecessors: " + line);
             }
-            Asserts.assertEquals(incomingCount, predecessorCount,
-                    target + ": incomplete PHI incoming set: " + line);
+            Map<String, Integer> incomingBlocks = new HashMap<>();
+            Matcher incoming = PHI_INCOMING_BLOCK.matcher(line);
+            while (incoming.find()) {
+                incomingBlocks.merge(incoming.group(1), 1, Integer::sum);
+            }
+            if (!incomingBlocks.equals(currentPredecessors)) {
+                throw new IllegalStateException(context + ": PHI in block " + currentBlock
+                        + " has incoming predecessors " + incomingBlocks
+                        + ", expected " + currentPredecessors + ": " + line);
+            }
         }
+    }
+
+    private static Map<String, Integer> blockReferences(String text) {
+        Map<String, Integer> result = new HashMap<>();
+        Matcher reference = LLVM_BLOCK_REFERENCE.matcher(text);
+        while (reference.find()) {
+            result.merge(reference.group(1), 1, Integer::sum);
+        }
+        if (result.isEmpty()) {
+            throw new IllegalStateException("Printed predecessor list has no block reference: "
+                    + text);
+        }
+        return result;
+    }
+
+    private static void assertPhiParserContracts() {
+        List<String> complete = List.of(
+                "merge: ; preds = %left, %left, %\"right path\"",
+                "%value = phi i32 [ 1, %left ], [ 2, %\"right path\" ], [ 3, %left ]");
+        validateCompletePhis(complete, "complete synthetic PHI");
+
+        List<String> duplicateOneMissingOne = List.of(
+                "merge: ; preds = %left, %left, %\"right path\"",
+                "%value = phi i32 [ 1, %left ], [ 2, %left ], [ 3, %left ]");
+        boolean rejected = false;
+        try {
+            validateCompletePhis(duplicateOneMissingOne,
+                    "duplicate-one-missing-one synthetic PHI");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "PHI parser must reject equal-size predecessor multisets with a missing block");
+
+        List<String> missingPrintedPredecessors = List.of(
+                "with_preds: ; preds = %left, %right",
+                "%good = phi i32 [ 1, %left ], [ 2, %right ]",
+                "plain:",
+                "%stale = phi i32 [ 1, %left ], [ 2, %right ]");
+        rejected = false;
+        try {
+            validateCompletePhis(missingPrintedPredecessors,
+                    "new-block predecessor reset synthetic PHI");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "PHI parser must reset predecessor information at every block label");
     }
 
     private static void assertDistinctAllocations(PEATestUtils.IRBody body,
