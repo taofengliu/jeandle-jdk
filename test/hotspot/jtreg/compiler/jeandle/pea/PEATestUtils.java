@@ -20,585 +20,1252 @@
 
 package compiler.jeandle.pea;
 
-import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
-
-import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-/**
- * Shared harness for Jeandle Partial Escape Analysis (PEA) jtreg tests.
- *
- * Centralizes the driver/child-VM boilerplate every PEA test duplicates, and
- * exposes the three oracles the catalog requires (Java behavior, PEA phase,
- * final IR) through reusable helpers:
- *
- *  - {@link #run(String)} builds and launches a child VM (Jeandle+PEA on by
- *    default), giving each run a unique dump directory so dump-file selection
- *    never depends on alphabetical ordering.
- *  - {@link #peaLLVMOptions(Method, String...)} produces the single
- *    {@code -XX:JeandleLLVMOptions=...} argument that turns on the LLVM-side
- *    PEA trace/stats/dump channels. All three write to the child VM's stderr,
- *    so {@link OutputAnalyzer#getStderr()} carries them back to the driver.
- *  - {@link PEABody} scopes structural assertions to one function body in the
- *    optimized dump (count / present / absent / before / between), replacing
- *    brittle whole-file {@code CHECK-NOT}.
- *  - {@link #assertStats}, {@link #assertEffect}, {@link #assertEffectCount},
- *    {@link #assertNoEffect} parse the {@code ;; PEA stats} and {@code PEA:}
- *    lines on stderr.
- *
- * This is a helper, not a test: it carries no {@code @test} tag.
- */
+import jdk.test.lib.Asserts;
+import jdk.test.lib.process.OutputAnalyzer;
+import jdk.test.lib.process.ProcessTools;
+import jdk.test.whitebox.WhiteBox;
+
+/** Shared exact runner and parser support for Jeandle PEA jtreg tests. */
 public final class PEATestUtils {
+    private static final int FULL_OPTIMIZATION_LEVEL = 4;
+    private static final long COMPILE_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(5);
+    private static final String COMPILED_SENTINEL = "PEA-COMPILED:";
+    private static final String RESULT_SENTINEL = "PEA-RESULT:";
+    private static final String CONFIGURED_TARGETS_PROPERTY =
+            "compiler.jeandle.pea.configuredTargets";
+    private static final String LLVM_OPTIONS_PREFIX = "-XX:JeandleLLVMOptions=";
+    private static final String PEA_OFF_EXTRA_LLVM_ERROR =
+            "PEA-off runs do not accept extra LLVM options";
+    private static final Set<String> MANAGED_VM_OPTIONS = Set.of(
+            "UnlockDiagnosticVMOptions",
+            "WhiteBoxAPI",
+            "TieredCompilation",
+            "UseJeandleCompiler",
+            "JeandleDoPEA",
+            "JeandleDumpIR",
+            "JeandleDumpDirectory",
+            "UseCompressedOops",
+            "UseCompressedClassPointers",
+            "CICompilerCount",
+            "CompileCommand",
+            "CompileCommandFile",
+            "CompileOnly",
+            "Flags",
+            "VMOptionsFile",
+            "JeandleLLVMOptions");
+    private static final Set<String> MANAGED_LLVM_OPTIONS = Set.of(
+            "jeandle-pea-iterations",
+            "jeandle-pea-analyze-function",
+            "jeandle-pea-analyze-only",
+            "jeandle-dump-pea-ir-function",
+            "jeandle-dump-pea-ir",
+            "jeandle-dump-pea-stats",
+            "jeandle-trace-pea");
+
+    private static final String[] NO_COMPRESSED_OOPS = {
+            "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers"};
+    private static final String[] WHITEBOX_FLAGS = {
+            "-Xbootclasspath/a:.", "-XX:+UnlockDiagnosticVMOptions", "-XX:+WhiteBoxAPI"};
+    private static final Pattern MARKER = Pattern.compile(
+            "^;; PEA-DUMP (before|after) iter=(\\d+) function (.*?)"
+                    + "(?: transform_idle=(?:true|false|0|1))?$"
+    );
+    private static final Pattern STATS = Pattern.compile(
+            "^;; PEA stats @(.*): NeverEscapes=(\\d+) PartiallyEscapes=(\\d+)"
+                    + " AlwaysEscapes=(\\d+)$"
+    );
+    private static final Pattern EFFECT = Pattern.compile(
+            "^PEA: (\\S+) function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
+                    + "|[-A-Za-z$._0-9]+))(?:\\s+(.*))?$"
+    );
 
     private PEATestUtils() {}
 
-    // ---- Standard child-VM flags ---------------------------------------
+    /** Exact identity for one Java method in HotSpot commands and Jeandle IR. */
+    public static final class MethodId {
+        private final Method method;
+        private final String jvmDescriptor;
+        private final String dumpStem;
+        private final String llvmFunctionName;
+        private final String compileCommandPattern;
+        private final boolean osr;
 
-    /** Jeandle PEA tests must run with both compressed-oop modes off. */
-    public static final String[] NO_COMPRESSED_OOPS = {
-            "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers"};
-
-    /** Base compilation flags used by every PEA child VM. */
-    public static final String[] BASE_FLAGS = {
-            "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-            "-XX:+JeandleDoPEA", "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR"};
-
-    public static final String[] WHITEBOX_FLAGS = {
-            "-Xbootclasspath/a:.", "-XX:+UnlockDiagnosticVMOptions", "-XX:+WhiteBoxAPI"};
-
-    /** PEA-off control: disable the HotSpot flag AND zero the LLVM iteration cap. */
-    public static final String PEA_OFF_HOTSPOT = "-XX:-JeandleDoPEA";
-    public static final String PEA_OFF_LLVM = "-XX:JeandleLLVMOptions=-jeandle-pea-iterations=0";
-
-    private static final AtomicInteger DUMP_DIR_COUNTER = new AtomicInteger();
-
-    /**
-     * The mangled name matching both the LLVM function name and the
-     * {@code FileCheck} dump-file prefix for {@code method}.
-     */
-    public static String mangledFor(Method method) {
-        return method.getDeclaringClass().getName().replace('.', '_') + "_" + method.getName();
-    }
-
-    /** Fresh unique dump directory under {@code user.dir}, so dump-file selection is unambiguous. */
-    public static Path newDumpDir(String label) {
-        File base = new File(System.getProperty("user.dir"));
-        File dir = new File(base, "pea-dump-" + label + "-" + DUMP_DIR_COUNTER.incrementAndGet());
-        if (!dir.mkdirs()) {
-            throw new RuntimeException("Could not create dump dir " + dir);
+        private MethodId(Method method, boolean osr) {
+            this.method = Objects.requireNonNull(method);
+            this.osr = osr;
+            this.jvmDescriptor = MethodType.methodType(
+                    method.getReturnType(), method.getParameterTypes()).descriptorString();
+            this.dumpStem = method.getDeclaringClass().getName().replace('.', '_')
+                    + "_" + method.getName();
+            this.llvmFunctionName = (osr ? "__jeandle_osr." : "")
+                    + dumpStem + jvmDescriptor;
+            this.compileCommandPattern = method.getDeclaringClass().getName() + "::"
+                    + method.getName() + jvmDescriptor;
         }
-        return dir.toPath();
-    }
 
-    /**
-     * Build the single {@code -XX:JeandleLLVMOptions=...} value that focuses the
-     * LLVM PEA trace/stats/dump on {@code target}. The same mangled filter is
-     * used for {@code -jeandle-pea-analyze-only} and {@code -jeandle-dump-pea-ir}
-     * so per-effect trace comes only from the target method.
-     *
-     * @param target   the method under test (drives the mangled filter)
-     * @param extraOpt extra LLVM options appended verbatim
-     *                 (e.g. {@code -jeandle-pea-iterations=1})
-     */
-    public static String peaLLVMOptions(Method target, String... extraOpt) {
-        String mangled = mangledFor(target);
-        StringBuilder sb = new StringBuilder("-XX:JeandleLLVMOptions=");
-        sb.append("-jeandle-pea-analyze-only=").append(mangled);
-        sb.append(" -jeandle-trace-pea");
-        sb.append(" -jeandle-dump-pea-ir=").append(mangled);
-        sb.append(" -jeandle-dump-pea-stats");
-        for (String e : extraOpt) {
-            sb.append(' ').append(e);
+        public static MethodId of(Method method) {
+            return new MethodId(method, false);
         }
-        return sb.toString();
-    }
 
-    /**
-     * Like {@link #peaLLVMOptions(Method, String...)} but filters PEA to every
-     * method declared in {@code wrapperClass} (substring match on the mangled
-     * class name). Use for one child-VM run that compiles and analyzes several
-     * test methods; per-method attribution then comes from the function-named
-     * {@code ;; PEA stats} lines and the per-method dump files.
-     */
-    public static String peaLLVMOptionsClass(Class<?> wrapperClass, String... extraOpt) {
-        String filter = wrapperClass.getName().replace('.', '_');
-        StringBuilder sb = new StringBuilder("-XX:JeandleLLVMOptions=");
-        sb.append("-jeandle-pea-analyze-only=").append(filter);
-        sb.append(" -jeandle-trace-pea");
-        sb.append(" -jeandle-dump-pea-ir=").append(filter);
-        sb.append(" -jeandle-dump-pea-stats");
-        for (String e : extraOpt) {
-            sb.append(' ').append(e);
+        public static MethodId osr(Method method) {
+            return new MethodId(method, true);
         }
-        return sb.toString();
+
+        public Method method() {
+            return method;
+        }
+
+        public String jvmDescriptor() {
+            return jvmDescriptor;
+        }
+
+        public String dumpStem() {
+            return dumpStem;
+        }
+
+        public String llvmFunctionName() {
+            return llvmFunctionName;
+        }
+
+        public String compileCommandPattern() {
+            return compileCommandPattern;
+        }
+
+        public boolean isOSR() {
+            return osr;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MethodId id
+                    && llvmFunctionName.equals(id.llvmFunctionName)
+                    && compileCommandPattern.equals(id.compileCommandPattern)
+                    && osr == id.osr;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(llvmFunctionName, compileCommandPattern, osr);
+        }
+
+        @Override
+        public String toString() {
+            return llvmFunctionName;
+        }
     }
 
-    // ---- Child-VM runner -----------------------------------------------
-
-    /**
-     * Fluent builder for a PEA child-VM run. Usage:
-     * <pre>{@code
-     *   OutputAnalyzer out = PEATestUtils.run("compiler.jeandle.pea.TestX$TestWrapper")
-     *       .target(TestWrapper.class.getMethod("test"))
-     *       .llvmOptions(PEATestUtils.peaLLVMOptions(m))
-     *       .dontinline("sink")
-     *       .run();
-     * }</pre>
-     */
-    public static Run run(String wrapperFQN) {
-        return new Run(wrapperFQN);
+    /** Create an exact multi-target run with PEA diagnostics and IR dumps. */
+    public static RunBuilder shapeRun(String wrapperFQN, Method... targets) {
+        return new RunBuilder(wrapperFQN, true, targets);
     }
 
-    public static final class Run {
+    /** Create an exact multi-target run for behavior comparison. */
+    public static RunBuilder behaviorRun(String wrapperFQN, Method... targets) {
+        return new RunBuilder(wrapperFQN, false, targets);
+    }
+
+    /** Builder for one child VM. Every target is explicit and descriptor-qualified. */
+    public static final class RunBuilder {
         private final String wrapperFQN;
-        private Method target;
-        private String llvmOptions = "";
-        private boolean whiteBox = false;
-        private boolean printNMethods = false;
-        private boolean peaOn = true; // false => PEA-off control run
-        private boolean explicitCompileOnly = false;
-        private final List<String> extraCompileCommands = new ArrayList<>();
+        private final boolean shape;
+        private final List<MethodId> targets;
+        private final List<MethodId> compileOnly;
+        private final List<MethodId> dontInline = new ArrayList<>();
         private final List<String> extraFlags = new ArrayList<>();
-        private Path dumpDir;
+        private final List<String> extraLLVMOptions = new ArrayList<>();
+        private boolean peaOn = true;
+        private boolean keepDumps;
 
-        private Run(String wrapperFQN) {
-            this.wrapperFQN = wrapperFQN;
-            // Eagerly allocate a unique dump dir tied to this run.
-            String label = wrapperFQN.substring(wrapperFQN.lastIndexOf('.') + 1).replace('$', '_');
-            this.dumpDir = newDumpDir(label);
-        }
-
-        public Run target(Method m) { this.target = m; return this; }
-
-        /** Single {@code -XX:JeandleLLVMOptions=...} value (see {@link #peaLLVMOptions}). */
-        public Run llvmOptions(String s) { this.llvmOptions = s; return this; }
-
-        public Run whiteBox(boolean b) { this.whiteBox = b; return this; }
-
-        public Run printNMethods(boolean b) { this.printNMethods = b; return this; }
-
-        /**
-         * Add a {@code -XX:CompileCommand=compileonly,<wrapper>::<method>}. When any
-         * explicit compileonly is added, the default single-method compileonly
-         * (derived from {@link #target(Method)}) is suppressed, so multi-method
-         * tests compile several methods.
-         */
-        public Run compileonly(String method) {
-            extraCompileCommands.add("-XX:CompileCommand=compileonly," + wrapperFQN + "::" + method);
-            explicitCompileOnly = true;
-            return this;
-        }
-
-        /** Add a {@code -XX:CompileCommand=dontinline,<wrapper>::<method>}. */
-        public Run dontinline(String method) {
-            extraCompileCommands.add("-XX:CompileCommand=dontinline," + wrapperFQN + "::" + method);
-            return this;
-        }
-
-        public Run extraFlags(String... f) { extraFlags.addAll(Arrays.asList(f)); return this; }
-
-        /** Switch to a PEA-off control run (disables PEA on both HotSpot and LLVM sides). */
-        public Run peaOff() { this.peaOn = false; return this; }
-
-        public Path dumpDir() { return dumpDir; }
-
-        public String wrapperFQN() { return wrapperFQN; }
-
-        /** Build the child-VM command line and execute it; asserts exit code 0. */
-        public OutputAnalyzer run() throws Exception {
-            String compileOnlyMethod = (target != null) ? target.getName() : "test";
-            ArrayList<String> cmd = new ArrayList<>();
-            if (whiteBox) {
-                cmd.addAll(Arrays.asList(WHITEBOX_FLAGS));
+        private RunBuilder(String wrapperFQN, boolean shape, Method... methods) {
+            this.wrapperFQN = Objects.requireNonNull(wrapperFQN);
+            this.shape = shape;
+            if (methods.length == 0) {
+                throw new IllegalArgumentException("At least one explicit target method is required");
             }
-            cmd.addAll(Arrays.asList(BASE_FLAGS));
-            if (!peaOn) {
-                // Remove the PEA-on HotSpot flag, then force both sides off.
-                cmd.remove("-XX:+JeandleDoPEA");
-                cmd.add(PEA_OFF_HOTSPOT);
-                cmd.add(PEA_OFF_LLVM);
-            } else if (!llvmOptions.isEmpty()) {
-                cmd.add(llvmOptions);
-            }
-            cmd.add("-XX:JeandleDumpDirectory=" + dumpDir);
-            if (printNMethods) {
-                cmd.add("-XX:+PrintNMethods");
-            }
-            cmd.addAll(Arrays.asList(NO_COMPRESSED_OOPS));
-            // Default: compileonly the target method. If the test added explicit
-            // compileonly directives (multi-method), honor those instead.
-            if (!explicitCompileOnly) {
-                cmd.add("-XX:CompileCommand=compileonly," + wrapperFQN + "::" + compileOnlyMethod);
-            }
-            cmd.addAll(extraCompileCommands);
-            cmd.addAll(extraFlags);
-            cmd.add(wrapperFQN);
-
-            ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(cmd);
-            OutputAnalyzer out = ProcessTools.executeCommand(pb);
-            out.shouldHaveExitValue(0);
-            return out;
-        }
-    }
-
-    // ---- Scoped method-body oracle (final-IR layer) --------------------
-
-    /**
-     * The optimized LLVM-IR body of a single function, with assertions scoped
-     * to that body only (not the whole dump file). Whitespace is collapsed to a
-     * single space per line, matching {@code FileCheck}.
-     */
-    public static final class PEABody {
-        private static final Pattern ALLOC_RE =
-                Pattern.compile("@jeandle\\.new_(instance|array)");
-
-        private final List<String> lines;
-        private final String name;
-
-        /** Body of the function in a Jeandle IR dump file (optimized or pre-opt). */
-        public PEABody(Path dumpDir, Method method, boolean optimized) throws IOException {
-            this.name = mangledFor(method);
-            this.lines = sliceFunction(loadDumpLines(dumpDir, name, optimized), name);
-        }
-
-        /**
-         * Body of the function from raw IR lines (e.g. a PEA-DUMP iteration block
-         * from stderr). Lines are folded and empty lines dropped, then the
-         * function is brace-matched by its mangled name.
-         */
-        PEABody(List<String> rawLines, Method method) {
-            this.name = mangledFor(method);
-            List<String> folded = new ArrayList<>();
-            for (String l : rawLines) {
-                String f = fold(l);
-                if (!f.isEmpty()) {
-                    folded.add(f);
+            LinkedHashMap<String, MethodId> unique = new LinkedHashMap<>();
+            for (Method method : methods) {
+                MethodId id = MethodId.of(method);
+                if (!method.getDeclaringClass().getName().equals(wrapperFQN)) {
+                    throw new IllegalArgumentException("Target " + id
+                            + " is not declared by child wrapper " + wrapperFQN);
+                }
+                if (unique.put(id.llvmFunctionName(), id) != null) {
+                    throw new IllegalArgumentException("Duplicate target " + id);
                 }
             }
-            this.lines = sliceFunction(folded, name);
+            this.targets = List.copyOf(unique.values());
+            this.compileOnly = new ArrayList<>(targets);
         }
 
-        /** All (whitespace-folded) lines of the function body, in order. */
-        public List<String> lines() { return lines; }
-
-        public String functionName() { return name; }
-
-        /**
-         * Count PEA-target allocation invokes in this body: the
-         * {@code @jeandle.new_instance} / {@code @jeandle.new_array} JavaOps the
-         * analyzer operates on. The {@code @jeandle.} prefix excludes the runtime
-         * {@code @new_instance} routine a retained allocation is lowered to, so
-         * this is the precise signal for "how many allocations does PEA see / keep".
-         */
-        public int allocCount() {
-            return (int) lines.stream().filter(l -> ALLOC_RE.matcher(l).find()).count();
+        public RunBuilder compileOnly(Method method) {
+            addUnique(compileOnly, MethodId.of(method), "compileonly");
+            return this;
         }
 
-        public void assertPresent(String substr) {
-            final String needle = fold(substr);
-            Asserts.assertTrue(lines.stream().anyMatch(l -> l.contains(needle)),
-                    "PEABody[" + name + "]: expected '" + needle + "'");
+        public RunBuilder compileonly(Method method) {
+            return compileOnly(method);
         }
 
-        public void assertAbsent(String substr) {
-            final String needle = fold(substr);
-            Asserts.assertFalse(lines.stream().anyMatch(l -> l.contains(needle)),
-                    "PEABody[" + name + "]: unexpected '" + needle + "'");
+        public RunBuilder dontinline(Method method) {
+            addUnique(dontInline, MethodId.of(method), "dontinline");
+            return this;
         }
 
-        public void assertCount(String substr, int expected) {
-            final String needle = fold(substr);
-            long got = lines.stream().filter(l -> l.contains(needle)).count();
-            Asserts.assertTrue(got == expected,
-                    "PEABody[" + name + "]: expected " + expected + " of '" + needle + "', got " + got);
-        }
-
-        /** Assert the first occurrence of {@code a} precedes the first occurrence of {@code b}. */
-        public void assertBefore(String a, String b) {
-            a = fold(a); b = fold(b);
-            int ia = indexOf(a), ib = indexOf(b);
-            Asserts.assertTrue(ia >= 0 && ib >= 0 && ia < ib,
-                    "PEABody[" + name + "]: expected '" + a + "' before '" + b + "'"
-                            + " (ia=" + ia + ", ib=" + ib + ")");
-        }
-
-        /** Assert {@code pat} occurs at least once strictly after {@code lo} and before {@code hi}. */
-        public void assertBetween(String lo, String pat, String hi) {
-            lo = fold(lo); pat = fold(pat); hi = fold(hi);
-            int ilo = indexOf(lo), ihi = indexOf(hi);
-            Asserts.assertTrue(ilo >= 0 && ihi > ilo,
-                    "PEABody[" + name + "]: bad bounds '" + lo + "'.." + hi + "'");
-            boolean found = false;
-            for (int i = ilo + 1; i < ihi; i++) {
-                if (lines.get(i).contains(pat)) { found = true; break; }
+        public RunBuilder extraFlags(String... flags) {
+            for (String flag : flags) {
+                rejectManagedVMFlag(flag);
+                extraFlags.add(flag);
             }
-            Asserts.assertTrue(found,
-                    "PEABody[" + name + "]: '" + pat + "' not between '" + lo + "' and '" + hi + "'");
+            return this;
         }
 
-        /** Assert {@code pat} does NOT occur strictly between {@code lo} and {@code hi}. */
-        public void assertAbsentBetween(String lo, String pat, String hi) {
-            lo = fold(lo); pat = fold(pat); hi = fold(hi);
-            int ilo = indexOf(lo), ihi = indexOf(hi);
-            Asserts.assertTrue(ilo >= 0 && ihi > ilo,
-                    "PEABody[" + name + "]: bad bounds '" + lo + "'.." + hi + "'");
-            for (int i = ilo + 1; i < ihi; i++) {
-                Asserts.assertFalse(lines.get(i).contains(pat),
-                        "PEABody[" + name + "]: unexpected '" + pat + "' between '" + lo + "' and '" + hi + "'");
+        public RunBuilder extraLLVMOptions(String... options) {
+            if (!peaOn && options.length != 0) {
+                throw new IllegalStateException(PEA_OFF_EXTRA_LLVM_ERROR);
+            }
+            for (String option : options) {
+                rejectManagedLLVMOption(option);
+            }
+            for (String option : options) {
+                extraLLVMOptions.add(option);
+            }
+            return this;
+        }
+
+        public RunBuilder peaOff() {
+            if (shape) {
+                throw new IllegalStateException("A shape run requires PEA diagnostics");
+            }
+            if (!extraLLVMOptions.isEmpty()) {
+                throw new IllegalStateException(PEA_OFF_EXTRA_LLVM_ERROR);
+            }
+            peaOn = false;
+            return this;
+        }
+
+        public RunBuilder keepDumps() {
+            keepDumps = true;
+            return this;
+        }
+
+        public RunBuilder keepDumps(boolean keep) {
+            keepDumps = keep;
+            return this;
+        }
+
+        public RunResult run() throws Exception {
+            Path dumpDir = Files.createTempDirectory("jeandle-pea-dumps-");
+            boolean handedOff = false;
+            try {
+                List<String> command = command(dumpDir);
+                ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command);
+                OutputAnalyzer output = ProcessTools.executeCommand(pb);
+                output.shouldHaveExitValue(0);
+                RunResult result = new RunResult(output, command, dumpDir, targets, keepDumps, shape);
+                result.assertRequestedMethodsCompiled();
+                handedOff = true;
+                return result;
+            } finally {
+                if (!handedOff && !keepDumps) {
+                    deleteTree(dumpDir);
+                }
             }
         }
 
-        private int indexOf(String substr) {
-            for (int i = 0; i < lines.size(); i++) {
-                if (lines.get(i).contains(substr)) return i;
+        private List<String> command(Path dumpDir) {
+            ArrayList<String> command = new ArrayList<>();
+            command.addAll(Arrays.asList(WHITEBOX_FLAGS));
+            command.add("-Xbatch");
+            command.add("-XX:-TieredCompilation");
+            command.add("-XX:+UseJeandleCompiler");
+            command.add(peaOn ? "-XX:+JeandleDoPEA" : "-XX:-JeandleDoPEA");
+            command.add("-Xlog:jeandle=debug");
+            command.add(shape ? "-XX:+JeandleDumpIR" : "-XX:-JeandleDumpIR");
+            command.add("-XX:JeandleDumpDirectory=" + dumpDir);
+            command.addAll(Arrays.asList(NO_COMPRESSED_OOPS));
+            command.add("-D" + CONFIGURED_TARGETS_PROPERTY + "="
+                    + targets.stream().map(PEATestUtils::configuredTarget)
+                            .collect(Collectors.joining(",")));
+            if (shape) {
+                command.add("-XX:CICompilerCount=1");
             }
-            return -1;
+            for (MethodId id : compileOnly) {
+                command.add("-XX:CompileCommand=compileonly," + id.compileCommandPattern());
+            }
+            for (MethodId id : dontInline) {
+                command.add("-XX:CompileCommand=dontinline," + id.compileCommandPattern());
+            }
+
+            List<String> llvmOptions = new ArrayList<>();
+            if (!peaOn) {
+                llvmOptions.add("-jeandle-pea-iterations=0");
+            } else if (shape) {
+                llvmOptions.add("-jeandle-trace-pea");
+                llvmOptions.add("-jeandle-dump-pea-stats");
+                for (MethodId id : targets) {
+                    llvmOptions.add("-jeandle-pea-analyze-function=" + id.llvmFunctionName());
+                    llvmOptions.add("-jeandle-dump-pea-ir-function=" + id.llvmFunctionName());
+                }
+                llvmOptions.addAll(extraLLVMOptions);
+            } else {
+                llvmOptions.addAll(extraLLVMOptions);
+            }
+            if (!llvmOptions.isEmpty()) {
+                command.add(LLVM_OPTIONS_PREFIX + String.join(" ", llvmOptions));
+            }
+            command.addAll(extraFlags);
+            command.add(wrapperFQN);
+            return List.copyOf(command);
         }
     }
 
-    // ---- PEA-phase oracle (stderr) -------------------------------------
+    /** Result of one child VM. Closing it removes its unique dump directory. */
+    public static final class RunResult implements AutoCloseable {
+        private final OutputAnalyzer output;
+        private final List<String> command;
+        private final Path dumpDir;
+        private final List<MethodId> targets;
+        private final boolean keepDumps;
+        private final boolean shape;
+        private PEAReport reports;
 
-    private static final Pattern STATS_RE = Pattern.compile(
-            ";; PEA stats @([^:]*): NeverEscapes=(\\d+) PartiallyEscapes=(\\d+) AlwaysEscapes=(\\d+)");
+        private RunResult(OutputAnalyzer output, List<String> command, Path dumpDir,
+                          List<MethodId> targets, boolean keepDumps, boolean shape) {
+            this.output = output;
+            this.command = command;
+            this.dumpDir = dumpDir;
+            this.targets = targets;
+            this.keepDumps = keepDumps;
+            this.shape = shape;
+        }
 
-    /**
-     * Assert some iteration's {@code ;; PEA stats @<func>} line reports the given
-     * classification. Stats are emitted once per outer-fixpoint iteration: a
-     * NeverEscape object shows {@code NeverEscapes=1} on the iteration that
-     * analyzes the original method, then {@code NeverEscapes=0} on later
-     * iterations (the allocation is already gone). So the oracle is "the object
-     * reached this classification in some iteration", i.e. an exact-triple
-     * match exists among the per-iteration stat lines for the target method.
-     */
-    public static void assertStats(OutputAnalyzer out, Method target,
-                                   int never, int partial, int always) {
-        String mangled = mangledFor(target);
-        Matcher m = STATS_RE.matcher(out.getStderr());
-        String seen = null;
-        while (m.find()) {
-            if (!m.group(1).contains(mangled)) {
-                continue;
+        public OutputAnalyzer output() {
+            return output;
+        }
+
+        public List<String> command() {
+            return command;
+        }
+
+        public Path dumpDir() {
+            return dumpDir;
+        }
+
+        public PEAReport report(Method method) {
+            if (!shape) {
+                throw new IllegalStateException("Behavior runs do not collect PEA shape reports");
             }
-            int n = Integer.parseInt(m.group(2));
-            int p = Integer.parseInt(m.group(3));
-            int a = Integer.parseInt(m.group(4));
-            seen = (seen == null) ? (n + "/" + p + "/" + a) : seen + ", " + n + "/" + p + "/" + a;
-            if (n == never && p == partial && a == always) {
-                return;
+            if (reports == null) {
+                reports = PEAReport.parse(output.getStderr(), targets.toArray(MethodId[]::new));
+            }
+            return reports.report(MethodId.of(method));
+        }
+
+        public IRBody frontendIR(Method method) throws IOException {
+            return PEATestUtils.frontendIR(dumpDir, MethodId.of(method));
+        }
+
+        public IRBody finalIR(Method method) throws IOException {
+            return PEATestUtils.finalIR(dumpDir, MethodId.of(method));
+        }
+
+        private void assertRequestedMethodsCompiled() {
+            List<String> lines = splitLines(output.getStdout());
+            long allSentinels = lines.stream().filter(l -> l.startsWith(COMPILED_SENTINEL)).count();
+            Asserts.assertEquals(allSentinels, (long) targets.size(),
+                    "Expected exactly one compilation sentinel per requested method");
+            for (MethodId id : targets) {
+                String sentinel = compiledSentinel(id);
+                long count = lines.stream().filter(sentinel::equals).count();
+                Asserts.assertEquals(count, 1L, "Missing or duplicate sentinel " + sentinel);
             }
         }
-        throw new RuntimeException("No ;; PEA stats line for " + mangled
-                + " matching Never=" + never + " Partial=" + partial + " Always=" + always
-                + (seen != null ? "; saw: " + seen : ""));
-    }
 
-    /** Count {@code PEA: <kind>} trace lines on stderr for the target method. */
-    public static int effectCount(OutputAnalyzer out, String kind) {
-        Pattern p = Pattern.compile("PEA: " + Pattern.quote(kind) + "\\b");
-        int count = 0;
-        for (String line : out.getStderr().split("\n")) {
-            if (p.matcher(line).find()) count++;
-        }
-        return count;
-    }
-
-    /**
-     * Assert at least one {@code PEA: <kind>} effect fired. Note: in a one-run
-     * multi-method test this is a GLOBAL check (it does not attribute the effect
-     * to a specific method — the per-effect trace line carries no function name).
-     * Use it to corroborate "PEA did work"; for per-method attribution use
-     * {@link #assertStats} or the {@link #assertNeverEscapes}/{@link #assertAllocRetained}
-     * before/after allocation comparison.
-     */
-    public static void assertEffect(OutputAnalyzer out, String kind) {
-        Asserts.assertTrue(effectCount(out, kind) > 0, "Expected PEA effect: " + kind);
-    }
-
-    public static void assertEffectCount(OutputAnalyzer out, String kind, int n) {
-        int got = effectCount(out, kind);
-        Asserts.assertTrue(got == n, "Expected " + n + " PEA:" + kind + " effects, got " + got);
-    }
-
-    public static void assertNoEffect(OutputAnalyzer out, String kind) {
-        Asserts.assertTrue(effectCount(out, kind) == 0, "Unexpected PEA effect: " + kind);
-    }
-
-    /**
-     * Lines of the function IR from a PEA-DUMP iteration block on stderr:
-     * {@code ;; PEA-DUMP <before|after> iter=N function <name>}. The block ends
-     * at the next line starting with {@code ;;} (the next PEA-DUMP marker or the
-     * stats line) or {@code PEA:} (the per-effect trace, which sits between the
-     * before-IR and the after-marker), so the returned lines are pure IR.
-     */
-    public static List<String> iterationIR(OutputAnalyzer out, Method target, int iter, boolean before) {
-        String mangled = mangledFor(target);
-        String marker = ";; PEA-DUMP " + (before ? "before" : "after")
-                + " iter=" + iter + " function ";
-        List<String> body = new ArrayList<>();
-        boolean inBlock = false;
-        for (String line : out.getStderr().split("\n")) {
-            if (line.startsWith(marker)) {
-                inBlock = line.contains(mangled);
-                continue;
+        @Override
+        public void close() throws IOException {
+            if (!keepDumps) {
+                deleteTree(dumpDir);
             }
-            if (inBlock) {
-                if (line.startsWith(";; ") || line.startsWith("PEA:")) {
-                    inBlock = false;
+        }
+    }
+
+    /** Enqueue each target at level 4, wait for confirmation, then print exact sentinels. */
+    public static void enqueueAndAwaitLevel4(Method... methods) throws InterruptedException {
+        if (methods.length == 0) {
+            throw new IllegalArgumentException("At least one method is required");
+        }
+        WhiteBox whiteBox = WhiteBox.getWhiteBox();
+        for (Method method : methods) {
+            whiteBox.deoptimizeMethod(method);
+            long deadline = System.nanoTime() + COMPILE_TIMEOUT_NANOS;
+            while (whiteBox.getMethodCompilationLevel(method) != FULL_OPTIMIZATION_LEVEL) {
+                if (!whiteBox.isMethodQueuedForCompilation(method)) {
+                    whiteBox.enqueueMethodForCompilation(method, FULL_OPTIMIZATION_LEVEL);
+                }
+                if (System.nanoTime() - deadline >= 0) {
+                    throw new RuntimeException("Timed out waiting for level-4 compilation of "
+                            + MethodId.of(method));
+                }
+                Thread.sleep(10);
+            }
+        }
+        confirmLevel4(methods);
+    }
+
+    /** Compile the exact descriptor-qualified targets selected by the parent runner. */
+    public static void compileConfiguredTargetsAtLevel4() throws Exception {
+        String configured = System.getProperty(CONFIGURED_TARGETS_PROPERTY);
+        if (configured == null || configured.isEmpty()) {
+            throw new IllegalStateException("No configured PEA targets");
+        }
+        ArrayList<Method> methods = new ArrayList<>();
+        for (String target : configured.split(",", -1)) {
+            int separator = target.indexOf('#');
+            int descriptor = target.indexOf('(', separator + 1);
+            if (separator <= 0 || descriptor <= separator + 1) {
+                throw new IllegalStateException("Malformed configured PEA target " + target);
+            }
+            String className = target.substring(0, separator);
+            String methodName = target.substring(separator + 1, descriptor);
+            String jvmDescriptor = target.substring(descriptor);
+            Class<?> holder = Class.forName(className);
+            Method match = null;
+            for (Method candidate : holder.getDeclaredMethods()) {
+                if (candidate.getName().equals(methodName)
+                        && descriptor(candidate).equals(jvmDescriptor)) {
+                    if (match != null) {
+                        throw new IllegalStateException("Ambiguous configured PEA target " + target);
+                    }
+                    match = candidate;
+                }
+            }
+            if (match == null) {
+                throw new IllegalStateException("Configured PEA target not found " + target);
+            }
+            methods.add(match);
+        }
+        enqueueAndAwaitLevel4(methods.toArray(Method[]::new));
+    }
+
+    /** Confirm level 4 in the child and publish one exact parent-visible sentinel per method. */
+    public static void confirmLevel4(Method... methods) {
+        WhiteBox whiteBox = WhiteBox.getWhiteBox();
+        for (Method method : methods) {
+            int level = whiteBox.getMethodCompilationLevel(method);
+            if (level != FULL_OPTIMIZATION_LEVEL) {
+                throw new RuntimeException(MethodId.of(method) + " compiled at level " + level
+                        + ", expected " + FULL_OPTIMIZATION_LEVEL);
+            }
+            System.out.println(compiledSentinel(MethodId.of(method)));
+        }
+    }
+
+    private static String compiledSentinel(MethodId id) {
+        return COMPILED_SENTINEL + id.llvmFunctionName() + ":level=4";
+    }
+
+    private static String configuredTarget(MethodId id) {
+        return id.method().getDeclaringClass().getName() + "#"
+                + id.method().getName() + id.jvmDescriptor();
+    }
+
+    private static String descriptor(Method method) {
+        return MethodType.methodType(method.getReturnType(), method.getParameterTypes())
+                .descriptorString();
+    }
+
+    /** Parsed effect line attributed to an exact LLVM function and PEA round. */
+    public static final class PEAEffect {
+        private final String kind;
+        private final String functionName;
+        private final int iteration;
+        private final String detail;
+
+        private PEAEffect(String kind, String functionName, int iteration, String detail) {
+            this.kind = kind;
+            this.functionName = functionName;
+            this.iteration = iteration;
+            this.detail = detail;
+        }
+
+        public String kind() {
+            return kind;
+        }
+
+        public String functionName() {
+            return functionName;
+        }
+
+        public int iteration() {
+            return iteration;
+        }
+
+        public String detail() {
+            return detail;
+        }
+    }
+
+    /** One complete before/stats/effects/after PEA iteration. */
+    public static final class PEARound {
+        private final int iteration;
+        private final IRBody before;
+        private final IRBody after;
+        private final int neverEscapes;
+        private final int partiallyEscapes;
+        private final int alwaysEscapes;
+        private final List<PEAEffect> effects;
+        private final boolean hasStats;
+
+        private PEARound(int iteration, IRBody before, IRBody after,
+                         int neverEscapes, int partiallyEscapes, int alwaysEscapes,
+                         List<PEAEffect> effects, boolean hasStats) {
+            this.iteration = iteration;
+            this.before = before;
+            this.after = after;
+            this.neverEscapes = neverEscapes;
+            this.partiallyEscapes = partiallyEscapes;
+            this.alwaysEscapes = alwaysEscapes;
+            this.effects = List.copyOf(effects);
+            this.hasStats = hasStats;
+        }
+
+        public int iteration() {
+            return iteration;
+        }
+
+        public IRBody before() {
+            return before;
+        }
+
+        public IRBody after() {
+            return after;
+        }
+
+        public int neverEscapes() {
+            requireStats();
+            return neverEscapes;
+        }
+
+        public int partiallyEscapes() {
+            requireStats();
+            return partiallyEscapes;
+        }
+
+        public int alwaysEscapes() {
+            requireStats();
+            return alwaysEscapes;
+        }
+
+        public boolean hasStats() {
+            return hasStats;
+        }
+
+        public List<PEAEffect> effects() {
+            return effects;
+        }
+
+        private void requireStats() {
+            if (!hasStats) {
+                throw new IllegalStateException("No PEA stats for round " + iteration);
+            }
+        }
+    }
+
+    /** Exact reports for one or more requested LLVM functions. */
+    public static final class PEAReport {
+        private final MethodId methodId;
+        private final List<PEARound> rounds;
+        private final Map<MethodId, PEAReport> reports;
+
+        private PEAReport(MethodId methodId, List<PEARound> rounds) {
+            this.methodId = methodId;
+            this.rounds = List.copyOf(rounds);
+            this.reports = Map.of();
+        }
+
+        private PEAReport(Map<MethodId, PEAReport> reports) {
+            this.methodId = null;
+            this.rounds = List.of();
+            this.reports = Collections.unmodifiableMap(new LinkedHashMap<>(reports));
+        }
+
+        public static PEAReport parse(String stderr, MethodId... methods) {
+            if (methods.length == 0) {
+                throw new IllegalArgumentException("At least one exact method is required");
+            }
+            List<String> lines = splitLines(stderr);
+            LinkedHashMap<MethodId, PEAReport> parsed = new LinkedHashMap<>();
+            for (MethodId method : methods) {
+                if (parsed.containsKey(method)) {
+                    throw new IllegalArgumentException("Duplicate report target " + method);
+                }
+                parsed.put(method, parseFunction(lines, method));
+            }
+            return new PEAReport(parsed);
+        }
+
+        public PEAReport report(MethodId method) {
+            PEAReport report = reports.get(method);
+            if (report == null) {
+                throw new IllegalArgumentException("No report requested for " + method);
+            }
+            return report;
+        }
+
+        public MethodId methodId() {
+            requireFunctionReport();
+            return methodId;
+        }
+
+        public int roundCount() {
+            requireFunctionReport();
+            return rounds.size();
+        }
+
+        public List<PEARound> rounds() {
+            requireFunctionReport();
+            return rounds;
+        }
+
+        public PEARound round(int iteration) {
+            requireFunctionReport();
+            if (iteration < 0 || iteration >= rounds.size()) {
+                throw new IllegalArgumentException("No PEA round " + iteration + " for " + methodId);
+            }
+            return rounds.get(iteration);
+        }
+
+        public IRBody round0Before() {
+            return round(0).before();
+        }
+
+        public IRBody finalAfter() {
+            requireFunctionReport();
+            return rounds.get(rounds.size() - 1).after();
+        }
+
+        public List<PEAEffect> effects(String kind) {
+            requireFunctionReport();
+            return rounds.stream().flatMap(r -> r.effects().stream())
+                    .filter(e -> e.kind().equals(kind)).collect(Collectors.toUnmodifiableList());
+        }
+
+        private void requireFunctionReport() {
+            if (methodId == null) {
+                throw new IllegalStateException("Select an exact method report first");
+            }
+        }
+
+        private static PEAReport parseFunction(List<String> lines, MethodId method) {
+            ArrayList<PEARound> rounds = new ArrayList<>();
+            RoundBuilder current = null;
+            Capture capture = Capture.NONE;
+            String function = method.llvmFunctionName();
+
+            for (String line : lines) {
+                Matcher marker = MARKER.matcher(line);
+                if (marker.matches()) {
+                    String markerFunction = marker.group(3);
+                    boolean matches = markerFunction.equals(function);
+                    if (!matches) {
+                        if (current != null && !current.afterSeen) {
+                            throw malformed(method, "interleaved marker before after marker");
+                        }
+                        if (current != null) {
+                            rounds.add(current.finish(method));
+                            current = null;
+                        }
+                        capture = Capture.NONE;
+                        continue;
+                    }
+
+                    int iteration = Integer.parseInt(marker.group(2));
+                    if (marker.group(1).equals("before")) {
+                        if (current != null) {
+                            if (!current.afterSeen) {
+                                throw malformed(method, "duplicate or missing after marker for round "
+                                        + current.iteration);
+                            }
+                            rounds.add(current.finish(method));
+                        }
+                        if (iteration != rounds.size()) {
+                            throw malformed(method, "gapped or duplicate before marker: expected round "
+                                    + rounds.size() + ", got " + iteration);
+                        }
+                        current = new RoundBuilder(iteration);
+                        capture = Capture.BEFORE;
+                    } else {
+                        if (current == null || current.iteration != iteration) {
+                            throw malformed(method, "after marker without matching before for round "
+                                    + iteration);
+                        }
+                        if (current.afterSeen) {
+                            throw malformed(method, "duplicate after marker for round " + iteration);
+                        }
+                        current.afterSeen = true;
+                        capture = Capture.AFTER;
+                    }
                     continue;
                 }
-                body.add(line);
-            }
-        }
-        return body;
-    }
 
-    /** The function body as it enters PEA round 0 (pre-transform, pre-lowering). */
-    public static PEABody bodyBeforePEA(OutputAnalyzer out, Method target) {
-        return new PEABody(iterationIR(out, target, 0, true), target);
-    }
+                Matcher stats = STATS.matcher(line);
+                if (stats.matches()) {
+                    capture = Capture.NONE;
+                    if (!stats.group(1).equals(function)) {
+                        continue;
+                    }
+                    if (current == null || current.afterSeen) {
+                        throw malformed(method, "stats outside an open round");
+                    }
+                    if (current.statsSeen) {
+                        throw malformed(method, "duplicate stats for round " + current.iteration);
+                    }
+                    current.statsSeen = true;
+                    current.never = Integer.parseInt(stats.group(2));
+                    current.partial = Integer.parseInt(stats.group(3));
+                    current.always = Integer.parseInt(stats.group(4));
+                    continue;
+                }
 
-    /** The function body right after PEA round 0's transform (pre-lowering). */
-    public static PEABody bodyAfterPEA(OutputAnalyzer out, Method target) {
-        return new PEABody(iterationIR(out, target, 0, false), target);
-    }
+                Matcher effect = EFFECT.matcher(line);
+                if (effect.matches()) {
+                    capture = Capture.NONE;
+                    String effectFunction = decodeLLVMOperand(effect.group(2));
+                    if (!effectFunction.equals(function)) {
+                        continue;
+                    }
+                    if (current == null || current.afterSeen) {
+                        throw malformed(method, "effect outside an open round");
+                    }
+                    current.effects.add(new PEAEffect(effect.group(1), effectFunction,
+                            current.iteration, effect.group(3) == null ? "" : effect.group(3)));
+                    continue;
+                }
 
-    /**
-     * NeverEscape oracle via the PEA target: the method has at least one
-     * {@code @jeandle.new_(instance|array)} before PEA (it really allocates —
-     * also guards against a deopt-stub method that never reached PEA), and zero
-     * after PEA (the allocation was eliminated).
-     */
-    public static void assertNeverEscapes(OutputAnalyzer out, Method target) {
-        int before = bodyBeforePEA(out, target).allocCount();
-        int after = bodyAfterPEA(out, target).allocCount();
-        Asserts.assertTrue(before >= 1,
-                target.getName() + ": expected >=1 @jeandle.new_(instance|array) before PEA, got " + before);
-        Asserts.assertTrue(after == 0,
-                target.getName() + ": expected 0 @jeandle.new_(instance|array) after PEA (NeverEscape), got " + after);
-    }
-
-    /**
-     * Retained-allocation oracle via the PEA target: exactly {@code retained}
-     * {@code @jeandle.new_(instance|array)} remain after PEA (OrigAlloc kept),
-     * with at least that many before. Use for PartiallyEscapes / AlwaysEscapes /
-     * materialized cases.
-     */
-    public static void assertAllocRetained(OutputAnalyzer out, Method target, int retained) {
-        int before = bodyBeforePEA(out, target).allocCount();
-        int after = bodyAfterPEA(out, target).allocCount();
-        Asserts.assertTrue(before >= retained,
-                target.getName() + ": expected >=" + retained
-                        + " @jeandle.new_(instance|array) before PEA, got " + before);
-        Asserts.assertTrue(after == retained,
-                target.getName() + ": expected " + retained
-                        + " @jeandle.new_(instance|array) retained after PEA, got " + after);
-    }
-
-    // ---- PEA-on / PEA-off behavioral equivalence ----------------------
-
-    /**
-     * Run the same wrapper with PEA on and PEA off (no PEA dumps), asserting the
-     * observable stdout is identical. Used to prove an optimization is not
-     * silently changing behavior. Both runs share the same extra flags.
-     */
-    public static void assertPEAOnOffEquivalent(String wrapperFQN, String... extraFlags) throws Exception {
-        OutputAnalyzer on = run(wrapperFQN).extraFlags(extraFlags).run();
-        OutputAnalyzer off = run(wrapperFQN).peaOff().extraFlags(extraFlags).run();
-        String onOut = on.getStdout();
-        String offOut = off.getStdout();
-        Asserts.assertTrue(onOut.equals(offOut),
-                "PEA-on/off behavioral mismatch.\n--- PEA-on ---\n" + onOut
-                        + "\n--- PEA-off ---\n" + offOut);
-    }
-
-    // ---- internals -----------------------------------------------------
-
-    private static String fold(String s) {
-        return s.replaceAll("\\s+", " ").trim();
-    }
-
-    private static List<String> loadDumpLines(Path dumpDir, String mangledPrefix, boolean optimized)
-            throws IOException {
-        String suffix = optimized ? "_optimized.ll" : ".ll";
-        List<Path> matches = Files.list(dumpDir)
-                .filter(Files::isRegularFile)
-                .filter(p -> {
-                    String n = p.getFileName().toString();
-                    return n.startsWith(mangledPrefix) && n.endsWith(suffix)
-                            && (optimized || !n.endsWith("_optimized.ll"));
-                })
-                .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                .collect(Collectors.toList());
-        if (matches.isEmpty()) {
-            throw new RuntimeException("No PEA dump file for " + mangledPrefix
-                    + "* in " + dumpDir);
-        }
-        Path dump = matches.get(matches.size() - 1);
-        return Files.readAllLines(dump).stream()
-                .map(PEATestUtils::fold)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * Slice the body of the function whose mangled name contains {@code mangled},
-     * from its {@code define} line to the matching closing brace. Uses a brace
-     * counter (not "first standalone }") so inline-asm / metadata braces inside
-     * the body cannot end the slice early.
-     */
-    private static List<String> sliceFunction(List<String> folded, String mangled) {
-        List<String> body = new ArrayList<>();
-        boolean inFunc = false;
-        int depth = 0;
-        for (String line : folded) {
-            if (!inFunc) {
-                if (line.contains("define ") && line.contains(mangled)) {
-                    inFunc = true;
-                    body.add(line);
-                    depth += braceDelta(line);
-                    if (depth == 0) {
-                        break; // one-line "define ... {}" body
+                if (line.startsWith(";; PEA-DUMP ") || line.startsWith(";; PEA stats @")
+                        || line.startsWith("PEA: ")) {
+                    capture = Capture.NONE;
+                    continue;
+                }
+                if (current != null) {
+                    if (capture == Capture.BEFORE) {
+                        current.beforeLines.add(line);
+                    } else if (capture == Capture.AFTER) {
+                        current.afterLines.add(line);
                     }
                 }
-                continue;
             }
-            body.add(line);
-            depth += braceDelta(line);
-            if (depth == 0) {
-                break;
+
+            if (current != null) {
+                if (!current.afterSeen) {
+                    throw malformed(method, "missing after marker for round " + current.iteration);
+                }
+                rounds.add(current.finish(method));
             }
+            if (rounds.isEmpty()) {
+                throw malformed(method, "no exact PEA rounds found");
+            }
+            return new PEAReport(method, rounds);
         }
-        if (body.isEmpty()) {
-            throw new RuntimeException("Function body for '" + mangled + "' not found in dump");
-        }
-        return body;
     }
 
-    /** Net brace delta of a line: +1 per '{', -1 per '}'. */
+    private enum Capture { NONE, BEFORE, AFTER }
+
+    private static final class RoundBuilder {
+        private final int iteration;
+        private final List<String> beforeLines = new ArrayList<>();
+        private final List<String> afterLines = new ArrayList<>();
+        private final List<PEAEffect> effects = new ArrayList<>();
+        private boolean statsSeen;
+        private boolean afterSeen;
+        private int never;
+        private int partial;
+        private int always;
+
+        private RoundBuilder(int iteration) {
+            this.iteration = iteration;
+        }
+
+        private PEARound finish(MethodId method) {
+            if (!afterSeen) {
+                throw malformed(method, "missing after marker for round " + iteration);
+            }
+            return new PEARound(iteration,
+                    IRBody.fromModuleLines(beforeLines, method),
+                    IRBody.fromModuleLines(afterLines, method),
+                    never, partial, always, effects, statsSeen);
+        }
+    }
+
+    /** One exact LLVM function definition with line- and occurrence-aware assertions. */
+    public static final class IRBody {
+        private static final Pattern PEA_ALLOCATION = Pattern.compile(
+                "@jeandle\\.new_(?:instance|array)(?=\\s*\\()");
+        private static final Pattern LOWERED_ALLOCATION = Pattern.compile(
+                "@new_(?:instance|array)(?=\\s*\\()");
+        private final MethodId method;
+        private final List<String> lines;
+        private final String text;
+
+        private IRBody(MethodId method, List<String> lines) {
+            this.method = method;
+            this.lines = List.copyOf(lines);
+            this.text = String.join("\n", lines);
+        }
+
+        private static IRBody fromModuleLines(List<String> rawLines, MethodId method) {
+            List<String> folded = rawLines.stream().map(PEATestUtils::fold)
+                    .filter(s -> !s.isEmpty()).collect(Collectors.toList());
+            ArrayList<List<String>> definitions = new ArrayList<>();
+            for (int i = 0; i < folded.size(); i++) {
+                String line = folded.get(i);
+                String defined = definedFunctionName(line);
+                if (!method.llvmFunctionName().equals(defined)) {
+                    continue;
+                }
+                ArrayList<String> body = new ArrayList<>();
+                int depth = 0;
+                boolean opened = false;
+                for (int j = i; j < folded.size(); j++) {
+                    String bodyLine = folded.get(j);
+                    body.add(bodyLine);
+                    int delta = braceDelta(bodyLine);
+                    if (delta > 0) {
+                        opened = true;
+                    }
+                    depth += delta;
+                    if (opened && depth == 0) {
+                        break;
+                    }
+                }
+                if (!opened || depth != 0) {
+                    throw new IllegalStateException("Unbalanced function definition for " + method);
+                }
+                definitions.add(body);
+            }
+            if (definitions.isEmpty()) {
+                throw new IllegalStateException("Exact function definition not found: " + method);
+            }
+            if (definitions.size() != 1) {
+                throw new IllegalStateException("Ambiguous exact function definitions for " + method
+                        + ": " + definitions.size());
+            }
+            return new IRBody(method, definitions.get(0));
+        }
+
+        public MethodId methodId() {
+            return method;
+        }
+
+        public List<String> lines() {
+            return lines;
+        }
+
+        public int peaAllocCount() {
+            return (int) lines.stream().filter(l -> PEA_ALLOCATION.matcher(l).find()).count();
+        }
+
+        public int loweredAllocCount() {
+            return (int) lines.stream().filter(l -> LOWERED_ALLOCATION.matcher(l).find()).count();
+        }
+
+        public int lineCount(String substring) {
+            String needle = fold(substring);
+            return (int) lines.stream().filter(l -> l.contains(needle)).count();
+        }
+
+        public int occurrenceCount(String substring) {
+            String needle = fold(substring);
+            if (needle.isEmpty()) {
+                throw new IllegalArgumentException("Occurrence needle must not be empty");
+            }
+            int count = 0;
+            int from = 0;
+            while ((from = text.indexOf(needle, from)) >= 0) {
+                count++;
+                from += needle.length();
+            }
+            return count;
+        }
+
+        public void assertPresent(String substring) {
+            Asserts.assertTrue(occurrenceCount(substring) > 0,
+                    method + ": expected '" + fold(substring) + "'");
+        }
+
+        public void assertAbsent(String substring) {
+            Asserts.assertEquals(occurrenceCount(substring), 0,
+                    method + ": unexpected '" + fold(substring) + "'");
+        }
+
+        public void assertLineCount(String substring, int expected) {
+            Asserts.assertEquals(lineCount(substring), expected,
+                    method + ": line count for '" + fold(substring) + "'");
+        }
+
+        public void assertOccurrenceCount(String substring, int expected) {
+            Asserts.assertEquals(occurrenceCount(substring), expected,
+                    method + ": occurrence count for '" + fold(substring) + "'");
+        }
+
+        public void assertBefore(String first, int firstOccurrence,
+                                 String second, int secondOccurrence) {
+            int firstAt = occurrencePosition(first, firstOccurrence);
+            int secondAt = occurrencePosition(second, secondOccurrence);
+            Asserts.assertTrue(firstAt < secondAt, method + ": expected occurrence "
+                    + firstOccurrence + " of '" + fold(first) + "' before occurrence "
+                    + secondOccurrence + " of '" + fold(second) + "'");
+        }
+
+        public void assertBetween(String lower, int lowerOccurrence,
+                                  String pattern, int patternOccurrence,
+                                  String upper, int upperOccurrence) {
+            int lowerAt = occurrencePosition(lower, lowerOccurrence) + fold(lower).length();
+            int patternAt = occurrencePosition(pattern, patternOccurrence);
+            int upperAt = occurrencePosition(upper, upperOccurrence);
+            Asserts.assertTrue(lowerAt <= patternAt && patternAt < upperAt,
+                    method + ": occurrence " + patternOccurrence + " of '" + fold(pattern)
+                            + "' is outside the requested interval");
+        }
+
+        public void assertAbsentBetween(String lower, int lowerOccurrence,
+                                        String pattern, String upper, int upperOccurrence) {
+            int lowerAt = occurrencePosition(lower, lowerOccurrence) + fold(lower).length();
+            int upperAt = occurrencePosition(upper, upperOccurrence);
+            Asserts.assertTrue(lowerAt <= upperAt, method + ": invalid interval");
+            Asserts.assertFalse(text.substring(lowerAt, upperAt).contains(fold(pattern)),
+                    method + ": unexpected '" + fold(pattern) + "' in interval");
+        }
+
+        private int occurrencePosition(String substring, int occurrence) {
+            if (occurrence < 0) {
+                throw new IllegalArgumentException("Occurrence index must be non-negative");
+            }
+            String needle = fold(substring);
+            if (needle.isEmpty()) {
+                throw new IllegalArgumentException("Occurrence needle must not be empty");
+            }
+            int at = -needle.length();
+            for (int i = 0; i <= occurrence; i++) {
+                at = text.indexOf(needle, at + needle.length());
+                if (at < 0) {
+                    throw new IllegalStateException(method + ": no occurrence " + occurrence
+                            + " of '" + needle + "'");
+                }
+            }
+            return at;
+        }
+    }
+
+    /** Resolve the exact timestamp-paired frontend dump for a method. */
+    public static IRBody frontendIR(Path dumpDir, MethodId method) throws IOException {
+        return dumpPair(dumpDir, method).frontend;
+    }
+
+    /** Resolve the exact timestamp-paired optimized dump for a method. */
+    public static IRBody finalIR(Path dumpDir, MethodId method) throws IOException {
+        return dumpPair(dumpDir, method).optimized;
+    }
+
+    private static DumpPair dumpPair(Path dumpDir, MethodId method) throws IOException {
+        if (!Files.isDirectory(dumpDir)) {
+            throw new IllegalArgumentException("Dump path is not a directory: " + dumpDir);
+        }
+        String prefix = method.dumpStem() + "_";
+        LinkedHashMap<String, Path[]> byTimestamp = new LinkedHashMap<>();
+        try (Stream<Path> stream = Files.list(dumpDir)) {
+            stream.filter(Files::isRegularFile).sorted().forEach(path -> {
+                String name = path.getFileName().toString();
+                if (!name.startsWith(prefix) || !name.endsWith(".ll")
+                        || name.endsWith("_inline_callees.ll")) {
+                    return;
+                }
+                boolean optimized = name.endsWith("_optimized.ll");
+                String suffix = optimized ? "_optimized.ll" : ".ll";
+                String timestamp = name.substring(prefix.length(), name.length() - suffix.length());
+                if (timestamp.isEmpty()) {
+                    return;
+                }
+                Path[] pair = byTimestamp.computeIfAbsent(timestamp, ignored -> new Path[2]);
+                int slot = optimized ? 1 : 0;
+                if (pair[slot] != null) {
+                    throw new IllegalStateException("Duplicate " + suffix + " dump for "
+                            + method + " timestamp " + timestamp);
+                }
+                pair[slot] = path;
+            });
+        }
+
+        ArrayList<DumpPair> exact = new ArrayList<>();
+        for (Map.Entry<String, Path[]> entry : byTimestamp.entrySet()) {
+            Path[] paths = entry.getValue();
+            if (paths[0] == null || paths[1] == null) {
+                continue;
+            }
+            IRBody frontend;
+            IRBody optimized;
+            try {
+                frontend = IRBody.fromModuleLines(Files.readAllLines(paths[0]), method);
+                optimized = IRBody.fromModuleLines(Files.readAllLines(paths[1]), method);
+            } catch (IllegalStateException notThisMethod) {
+                if (notThisMethod.getMessage().startsWith("Exact function definition not found:")) {
+                    continue;
+                }
+                throw notThisMethod;
+            }
+            exact.add(new DumpPair(entry.getKey(), frontend, optimized));
+        }
+        if (exact.isEmpty()) {
+            throw new IllegalStateException("No exact timestamp-paired dumps for " + method
+                    + " in " + dumpDir);
+        }
+        if (exact.size() != 1) {
+            throw new IllegalStateException("Ambiguous timestamp-paired dumps for " + method
+                    + " in " + dumpDir + ": "
+                    + exact.stream().map(p -> p.timestamp).collect(Collectors.joining(", ")));
+        }
+        return exact.get(0);
+    }
+
+    private static final class DumpPair {
+        private final String timestamp;
+        private final IRBody frontend;
+        private final IRBody optimized;
+
+        private DumpPair(String timestamp, IRBody frontend, IRBody optimized) {
+            this.timestamp = timestamp;
+            this.frontend = frontend;
+            this.optimized = optimized;
+        }
+    }
+
+    /** Compare the single stable result payload from PEA-on and PEA-off children. */
+    public static void assertPEAOnOffEquivalent(String wrapperFQN, Method... targets)
+            throws Exception {
+        try (RunResult on = behaviorRun(wrapperFQN, targets).run();
+             RunResult off = behaviorRun(wrapperFQN, targets).peaOff().run()) {
+            String onPayload = exactResultPayload(on.output().getStdout());
+            String offPayload = exactResultPayload(off.output().getStdout());
+            Asserts.assertEquals(onPayload, offPayload, "PEA-on/off result payload mismatch");
+        }
+    }
+
+    private static String exactResultPayload(String stdout) {
+        List<String> results = splitLines(stdout).stream()
+                .filter(line -> line.startsWith(RESULT_SENTINEL)).collect(Collectors.toList());
+        if (results.size() != 1) {
+            throw new IllegalStateException("Expected exactly one " + RESULT_SENTINEL
+                    + " line, got " + results.size());
+        }
+        return results.get(0).substring(RESULT_SENTINEL.length());
+    }
+
+    private static void rejectManagedVMFlag(String flag) {
+        if (flag.startsWith("@")) {
+            throw new IllegalArgumentException("Caller may not use an argument file " + flag);
+        }
+        if (CONFIGURED_TARGETS_PROPERTY.equals(systemPropertyName(flag))) {
+            throw new IllegalArgumentException(
+                    "Caller may not override configured PEA targets " + flag);
+        }
+        String optionName = vmOptionName(flag);
+        if (optionName != null && MANAGED_VM_OPTIONS.contains(optionName)) {
+            throw new IllegalArgumentException("Caller may not override managed VM flag " + flag);
+        }
+    }
+
+    private static String systemPropertyName(String flag) {
+        if (!flag.startsWith("-D") || flag.length() == 2) {
+            return null;
+        }
+        int equals = flag.indexOf('=', 2);
+        return equals < 0 ? flag.substring(2) : flag.substring(2, equals);
+    }
+
+    private static String vmOptionName(String flag) {
+        if (!flag.startsWith("-XX:") || flag.length() == 4) {
+            return null;
+        }
+        String option = flag.substring(4);
+        if (option.charAt(0) == '+' || option.charAt(0) == '-') {
+            option = option.substring(1);
+        }
+        int equals = option.indexOf('=');
+        if (equals >= 0) {
+            option = option.substring(0, equals);
+        }
+        if (option.endsWith(":")) {
+            option = option.substring(0, option.length() - 1);
+        }
+        return option;
+    }
+
+    private static void rejectManagedLLVMOption(String option) {
+        String trimmed = option.trim();
+        if (trimmed.isEmpty() || trimmed.contains(" ") || trimmed.contains("\t")) {
+            throw new IllegalArgumentException("LLVM options must be individual non-empty arguments: "
+                    + option);
+        }
+        String optionName = trimmed.replaceFirst("^-+", "");
+        int equals = optionName.indexOf('=');
+        if (equals >= 0) {
+            optionName = optionName.substring(0, equals);
+        }
+        if (MANAGED_LLVM_OPTIONS.contains(optionName)) {
+            throw new IllegalArgumentException("Caller may not override managed PEA option " + option);
+        }
+    }
+
+    private static void addUnique(List<MethodId> methods, MethodId method, String command) {
+        if (methods.contains(method)) {
+            throw new IllegalArgumentException("Duplicate " + command + " method " + method);
+        }
+        methods.add(method);
+    }
+
+    private static String definedFunctionName(String line) {
+        if (!line.startsWith("define ")) {
+            return null;
+        }
+        int at = line.indexOf('@');
+        if (at < 0) {
+            return null;
+        }
+        return parseLLVMOperand(line, at).value;
+    }
+
+    private static String decodeLLVMOperand(String operand) {
+        ParsedOperand parsed = parseLLVMOperand(operand, 0);
+        if (parsed.end != operand.length()) {
+            throw new IllegalArgumentException("Trailing characters in LLVM operand " + operand);
+        }
+        return parsed.value;
+    }
+
+    private static ParsedOperand parseLLVMOperand(String text, int at) {
+        if (at >= text.length() || text.charAt(at) != '@') {
+            throw new IllegalArgumentException("Expected LLVM global operand at " + at + ": " + text);
+        }
+        int index = at + 1;
+        if (index < text.length() && text.charAt(index) == '"') {
+            index++;
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            while (index < text.length() && text.charAt(index) != '"') {
+                char ch = text.charAt(index++);
+                if (ch == '\\') {
+                    if (index + 1 >= text.length()
+                            || !isHex(text.charAt(index)) || !isHex(text.charAt(index + 1))) {
+                        throw new IllegalArgumentException("Malformed LLVM quoted operand: " + text);
+                    }
+                    bytes.write(Integer.parseInt(text.substring(index, index + 2), 16));
+                    index += 2;
+                } else {
+                    byte[] encoded = String.valueOf(ch).getBytes(StandardCharsets.UTF_8);
+                    bytes.writeBytes(encoded);
+                }
+            }
+            if (index >= text.length()) {
+                throw new IllegalArgumentException("Unterminated LLVM quoted operand: " + text);
+            }
+            return new ParsedOperand(bytes.toString(StandardCharsets.UTF_8), index + 1);
+        }
+        int start = index;
+        while (index < text.length()) {
+            char ch = text.charAt(index);
+            if (!(Character.isLetterOrDigit(ch) || ch == '-' || ch == '$'
+                    || ch == '.' || ch == '_')) {
+                break;
+            }
+            index++;
+        }
+        if (index == start) {
+            throw new IllegalArgumentException("Empty LLVM global operand: " + text);
+        }
+        return new ParsedOperand(text.substring(start, index), index);
+    }
+
+    private static final class ParsedOperand {
+        private final String value;
+        private final int end;
+
+        private ParsedOperand(String value, int end) {
+            this.value = value;
+            this.end = end;
+        }
+    }
+
+    private static boolean isHex(char ch) {
+        return ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F';
+    }
+
     private static int braceDelta(String line) {
-        int d = 0;
+        int delta = 0;
+        boolean quoted = false;
         for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (c == '{') {
-                d++;
-            } else if (c == '}') {
-                d--;
+            char ch = line.charAt(i);
+            if (!quoted && ch == ';') {
+                break;
+            }
+            if (ch == '"') {
+                quoted = !quoted;
+                continue;
+            }
+            if (quoted && ch == '\\') {
+                i = Math.min(i + 2, line.length() - 1);
+                continue;
+            }
+            if (!quoted && ch == '{') {
+                delta++;
+            } else if (!quoted && ch == '}') {
+                delta--;
             }
         }
-        return d;
+        return delta;
     }
+
+    private static String fold(String value) {
+        return value.replaceAll("\\s+", " ").trim();
+    }
+
+    private static List<String> splitLines(String text) {
+        return Arrays.asList(text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1));
+    }
+
+    private static IllegalStateException malformed(MethodId method, String detail) {
+        return new IllegalStateException("Malformed PEA transcript for " + method + ": " + detail);
+    }
+
+    private static void deleteTree(Path directory) throws IOException {
+        if (!Files.exists(directory)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(directory)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+                Files.deleteIfExists(path);
+            }
+        }
+    }
+
 }
