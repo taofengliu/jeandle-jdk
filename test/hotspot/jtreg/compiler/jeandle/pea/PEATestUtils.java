@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,6 +61,7 @@ public final class PEATestUtils {
             "PEA-off runs do not accept extra LLVM options";
     private static final Set<String> MANAGED_VM_OPTIONS = Set.of(
             "UnlockDiagnosticVMOptions",
+            "UnlockExperimentalVMOptions",
             "WhiteBoxAPI",
             "TieredCompilation",
             "UseJeandleCompiler",
@@ -74,6 +76,7 @@ public final class PEATestUtils {
             "CompileOnly",
             "Flags",
             "VMOptionsFile",
+            "LockingMode",
             "JeandleLLVMOptions");
     private static final Set<String> MANAGED_LLVM_OPTIONS = Set.of(
             "jeandle-pea-iterations",
@@ -99,6 +102,12 @@ public final class PEATestUtils {
     private static final Pattern EFFECT = Pattern.compile(
             "^PEA: (\\S+) function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
                     + "|[-A-Za-z$._0-9]+))(?:\\s+(.*))?$"
+    );
+    private static final Pattern LOCK_REPLAY = Pattern.compile(
+            "^PEA: LockReplay function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
+                    + "|[-A-Za-z$._0-9]+)) logical_escape=([0-9]+) batch=([0-9]+)"
+                    + " emit_site=([0-9]+) source=([0-9]+) receiver_vo=([0-9]+)"
+                    + " depth=([0-9]+) ordinal=([0-9]+)$"
     );
 
     private PEATestUtils() {}
@@ -198,6 +207,7 @@ public final class PEATestUtils {
         private final List<String> extraLLVMOptions;
         private boolean peaOn = true;
         private Integer peaIterations;
+        private Integer lockingMode;
         private boolean keepDumps;
 
         private RunBuilder(String wrapperFQN, boolean shape, Method... methods) {
@@ -234,6 +244,7 @@ public final class PEATestUtils {
             this.extraLLVMOptions = new ArrayList<>(other.extraLLVMOptions);
             this.peaOn = other.peaOn;
             this.peaIterations = other.peaIterations;
+            this.lockingMode = other.lockingMode;
             this.keepDumps = other.keepDumps;
         }
 
@@ -284,6 +295,17 @@ public final class PEATestUtils {
             return this;
         }
 
+        public RunBuilder lockingMode(int mode) {
+            if (mode != 1 && mode != 2) {
+                throw new IllegalArgumentException("LockingMode must be 1 or 2");
+            }
+            if (lockingMode != null) {
+                throw new IllegalStateException("LockingMode is already configured");
+            }
+            lockingMode = mode;
+            return this;
+        }
+
         public RunBuilder peaOff() {
             if (shape) {
                 throw new IllegalStateException("A shape run requires PEA diagnostics");
@@ -326,6 +348,14 @@ public final class PEATestUtils {
         }
 
         public void runPEAOnOffEquivalent() throws Exception {
+            runPEAOnOffEquivalentImpl();
+        }
+
+        public PEAOnOffResult runPEAOnOffEquivalentWithCommands() throws Exception {
+            return runPEAOnOffEquivalentImpl();
+        }
+
+        private PEAOnOffResult runPEAOnOffEquivalentImpl() throws Exception {
             RunBuilder onBuilder = new RunBuilder(this);
             onBuilder.peaOn = true;
             RunBuilder offBuilder = new RunBuilder(onBuilder).peaOff();
@@ -334,12 +364,17 @@ public final class PEATestUtils {
                 String offPayload = exactResultPayload(off.output().getStdout());
                 Asserts.assertEquals(onPayload, offPayload,
                         "PEA-on/off result payload mismatch");
+                return new PEAOnOffResult(on.command(), off.command());
             }
         }
 
         private List<String> command(Path dumpDir) {
             ArrayList<String> command = new ArrayList<>();
             command.addAll(Arrays.asList(WHITEBOX_FLAGS));
+            if (lockingMode != null) {
+                command.add("-XX:+UnlockExperimentalVMOptions");
+                command.add("-XX:LockingMode=" + lockingMode);
+            }
             command.add("-Xbatch");
             command.add("-XX:-TieredCompilation");
             command.add("-XX:+UseJeandleCompiler");
@@ -385,6 +420,14 @@ public final class PEATestUtils {
             command.addAll(extraFlags);
             command.add(wrapperFQN);
             return List.copyOf(command);
+        }
+    }
+
+    /** Immutable commands from a successful PEA-on/off behavior comparison. */
+    public record PEAOnOffResult(List<String> onCommand, List<String> offCommand) {
+        public PEAOnOffResult {
+            onCommand = List.copyOf(Objects.requireNonNull(onCommand));
+            offCommand = List.copyOf(Objects.requireNonNull(offCommand));
         }
     }
 
@@ -468,8 +511,16 @@ public final class PEATestUtils {
             whiteBox.deoptimizeMethod(method);
             long deadline = System.nanoTime() + COMPILE_TIMEOUT_NANOS;
             while (whiteBox.getMethodCompilationLevel(method) != FULL_OPTIMIZATION_LEVEL) {
+                if (!whiteBox.isMethodCompilable(method, FULL_OPTIMIZATION_LEVEL)) {
+                    throw new RuntimeException("Method is not compilable at level 4: "
+                            + MethodId.of(method));
+                }
                 if (!whiteBox.isMethodQueuedForCompilation(method)) {
                     whiteBox.enqueueMethodForCompilation(method, FULL_OPTIMIZATION_LEVEL);
+                    if (!whiteBox.isMethodCompilable(method, FULL_OPTIMIZATION_LEVEL)) {
+                        throw new RuntimeException("Method became not compilable at level 4: "
+                                + MethodId.of(method));
+                    }
                 }
                 if (System.nanoTime() - deadline >= 0) {
                     throw new RuntimeException("Timed out waiting for level-4 compilation of "
@@ -574,6 +625,48 @@ public final class PEATestUtils {
         }
     }
 
+    /** Exact typed values from one LockReplay diagnostic. */
+    public record PEALockReplay(int logicalEscape, int batch, int emitSite, int source,
+                                int receiverVO, int depth, int ordinal) {
+        public PEALockReplay {
+            if (logicalEscape < 0 || batch < 0 || emitSite < 0 || source < 0
+                    || receiverVO < 0 || depth < 0 || ordinal < 0) {
+                throw new IllegalArgumentException("LockReplay values must be non-negative");
+            }
+        }
+
+        public PEALockReplayGroup group() {
+            return new PEALockReplayGroup(logicalEscape, batch, emitSite, source);
+        }
+
+        public PEALockReplayPhysicalGroup physicalGroup() {
+            return new PEALockReplayPhysicalGroup(batch, emitSite, source);
+        }
+    }
+
+    /** One logical consumer's associations within a physical replay batch/path. */
+    public record PEALockReplayGroup(int logicalEscape, int batch, int emitSite, int source) {
+        public PEALockReplayGroup {
+            if (logicalEscape < 0 || batch < 0 || emitSite < 0 || source < 0) {
+                throw new IllegalArgumentException("LockReplay group values must be non-negative");
+            }
+        }
+    }
+
+    /** One transform-consumed physical replay batch/path. */
+    public record PEALockReplayPhysicalGroup(int batch, int emitSite, int source) {
+        public PEALockReplayPhysicalGroup {
+            if (batch < 0 || emitSite < 0 || source < 0) {
+                throw new IllegalArgumentException(
+                        "Physical LockReplay group values must be non-negative");
+            }
+        }
+    }
+
+    private record LockReplayGrouping(
+            Map<PEALockReplayGroup, List<PEALockReplay>> logical,
+            Map<PEALockReplayPhysicalGroup, List<PEALockReplay>> physical) {}
+
     /** One complete before/stats/effects/after PEA iteration. */
     public static final class PEARound {
         private final int iteration;
@@ -583,12 +676,17 @@ public final class PEATestUtils {
         private final int partiallyEscapes;
         private final int alwaysEscapes;
         private final List<PEAEffect> effects;
+        private final List<PEALockReplay> lockReplays;
+        private final Map<PEALockReplayGroup, List<PEALockReplay>> lockReplayGroups;
+        private final Map<PEALockReplayPhysicalGroup, List<PEALockReplay>>
+                lockReplayPhysicalGroups;
         private final boolean hasStats;
         private final boolean transformIdle;
 
         private PEARound(int iteration, IRBody before, IRBody after,
                          int neverEscapes, int partiallyEscapes, int alwaysEscapes,
-                         List<PEAEffect> effects, boolean hasStats, boolean transformIdle) {
+                         List<PEAEffect> effects, List<PEALockReplay> lockReplays,
+                         boolean hasStats, boolean transformIdle) {
             this.iteration = iteration;
             this.before = before;
             this.after = after;
@@ -596,6 +694,10 @@ public final class PEATestUtils {
             this.partiallyEscapes = partiallyEscapes;
             this.alwaysEscapes = alwaysEscapes;
             this.effects = List.copyOf(effects);
+            this.lockReplays = List.copyOf(lockReplays);
+            LockReplayGrouping grouping = groupLockReplays(this.lockReplays, iteration);
+            this.lockReplayGroups = grouping.logical();
+            this.lockReplayPhysicalGroups = grouping.physical();
             this.hasStats = hasStats;
             this.transformIdle = transformIdle;
         }
@@ -635,6 +737,39 @@ public final class PEATestUtils {
             return effects;
         }
 
+        public List<PEALockReplay> lockReplays() {
+            return lockReplays;
+        }
+
+        public Map<PEALockReplayGroup, List<PEALockReplay>> lockReplayGroups() {
+            return lockReplayGroups;
+        }
+
+        public Map<PEALockReplayPhysicalGroup, List<PEALockReplay>>
+                lockReplayPhysicalGroups() {
+            return lockReplayPhysicalGroups;
+        }
+
+        public void assertLockReplaySequence(PEALockReplayGroup group,
+                                             PEALockReplay... expected) {
+            Objects.requireNonNull(group);
+            Objects.requireNonNull(expected);
+            List<PEALockReplay> actual = lockReplayGroups.getOrDefault(group, List.of());
+            Asserts.assertEquals(actual, List.of(expected),
+                    "LockReplay sequence for " + group + " in round " + iteration);
+        }
+
+        public long distinctLockReplaySourceCount(int logicalEscape) {
+            if (logicalEscape < 0) {
+                throw new IllegalArgumentException("logical escape must be non-negative");
+            }
+            return lockReplayGroups.keySet().stream()
+                    .filter(group -> group.logicalEscape() == logicalEscape)
+                    .map(PEALockReplayGroup::source)
+                    .distinct()
+                    .count();
+        }
+
         public boolean transformIdle() {
             return transformIdle;
         }
@@ -670,6 +805,81 @@ public final class PEATestUtils {
             if (!hasStats) {
                 throw new IllegalStateException("No PEA stats for round " + iteration);
             }
+        }
+
+        private static LockReplayGrouping groupLockReplays(
+                List<PEALockReplay> replays, int iteration) {
+            LinkedHashMap<PEALockReplayGroup, List<PEALockReplay>> logical =
+                    new LinkedHashMap<>();
+            LinkedHashMap<PEALockReplayPhysicalGroup, List<PEALockReplay>> physical =
+                    new LinkedHashMap<>();
+            LinkedHashMap<Integer, PEALockReplayPhysicalGroup> batchIdentities =
+                    new LinkedHashMap<>();
+            HashSet<PEALockReplay> associations = new HashSet<>();
+            for (PEALockReplay replay : replays) {
+                if (!associations.add(replay)) {
+                    throw new IllegalArgumentException(
+                            "Duplicate LockReplay association in round "
+                            + iteration + ": " + replay);
+                }
+                PEALockReplayPhysicalGroup previousBatch =
+                        batchIdentities.putIfAbsent(replay.batch(), replay.physicalGroup());
+                if (previousBatch != null && !previousBatch.equals(replay.physicalGroup())) {
+                    throw new IllegalArgumentException(
+                            "LockReplay batch " + replay.batch()
+                            + " has inconsistent physical identity in round " + iteration
+                            + ": " + previousBatch + " vs " + replay.physicalGroup());
+                }
+                logical.computeIfAbsent(replay.group(), ignored -> new ArrayList<>()).add(replay);
+                physical.computeIfAbsent(replay.physicalGroup(),
+                        ignored -> new ArrayList<>()).add(replay);
+            }
+
+            LinkedHashMap<PEALockReplayPhysicalGroup, List<PEALockReplay>>
+                    immutablePhysical = new LinkedHashMap<>();
+            for (Map.Entry<PEALockReplayPhysicalGroup, List<PEALockReplay>> entry
+                    : physical.entrySet()) {
+                int currentOrdinal = -1;
+                int currentReceiver = -1;
+                int currentDepth = -1;
+                for (PEALockReplay replay : entry.getValue()) {
+                    if (replay.ordinal() == currentOrdinal) {
+                        if (replay.receiverVO() == currentReceiver
+                                && replay.depth() == currentDepth) {
+                            continue;
+                        }
+                        throw new IllegalArgumentException(
+                                "Conflicting LockReplay aliases for physical ordinal "
+                                + replay.ordinal() + " in " + entry.getKey()
+                                + " in round " + iteration);
+                    }
+                    if (replay.ordinal() != currentOrdinal + 1) {
+                        throw new IllegalArgumentException(
+                                "Non-contiguous physical LockReplay ordinal for "
+                                + entry.getKey() + " in round " + iteration + ": expected "
+                                + (currentOrdinal + 1) + ", got " + replay.ordinal());
+                    }
+                    if (replay.depth() <= currentDepth) {
+                        throw new IllegalArgumentException(
+                                "Non-increasing physical LockReplay depth for "
+                                + entry.getKey() + " in round " + iteration);
+                    }
+                    currentOrdinal = replay.ordinal();
+                    currentReceiver = replay.receiverVO();
+                    currentDepth = replay.depth();
+                }
+                immutablePhysical.put(entry.getKey(), List.copyOf(entry.getValue()));
+            }
+
+            LinkedHashMap<PEALockReplayGroup, List<PEALockReplay>> immutableLogical =
+                    new LinkedHashMap<>();
+            for (Map.Entry<PEALockReplayGroup, List<PEALockReplay>> entry
+                    : logical.entrySet()) {
+                immutableLogical.put(entry.getKey(), List.copyOf(entry.getValue()));
+            }
+            return new LockReplayGrouping(
+                    Collections.unmodifiableMap(immutableLogical),
+                    Collections.unmodifiableMap(immutablePhysical));
         }
     }
 
@@ -727,6 +937,16 @@ public final class PEATestUtils {
         public List<PEARound> rounds() {
             requireFunctionReport();
             return rounds;
+        }
+
+        public void assertConverged() {
+            requireFunctionReport();
+            PEARound last = rounds.get(rounds.size() - 1);
+            if (!last.transformIdle()) {
+                throw new IllegalStateException("PEA did not converge for " + methodId
+                        + ": final round " + last.iteration()
+                        + " is not transform-idle");
+            }
         }
 
         public PEARound round(int iteration) {
@@ -836,6 +1056,29 @@ public final class PEATestUtils {
                 }
 
                 Matcher effect = EFFECT.matcher(line);
+                if (line.startsWith("PEA: LockReplay ")) {
+                    capture = Capture.NONE;
+                    Matcher lockReplay = LOCK_REPLAY.matcher(line);
+                    if (!lockReplay.matches()) {
+                        throw malformed(method, "malformed LockReplay line: " + line);
+                    }
+                    String effectFunction = decodeLLVMOperand(lockReplay.group(1));
+                    if (!effectFunction.equals(function)) {
+                        continue;
+                    }
+                    if (current == null || current.afterSeen) {
+                        throw malformed(method, "LockReplay outside an open round");
+                    }
+                    current.lockReplays.add(new PEALockReplay(
+                            lockReplayInt(method, "logical_escape", lockReplay.group(2)),
+                            lockReplayInt(method, "batch", lockReplay.group(3)),
+                            lockReplayInt(method, "emit_site", lockReplay.group(4)),
+                            lockReplayInt(method, "source", lockReplay.group(5)),
+                            lockReplayInt(method, "receiver_vo", lockReplay.group(6)),
+                            lockReplayInt(method, "depth", lockReplay.group(7)),
+                            lockReplayInt(method, "ordinal", lockReplay.group(8))));
+                    continue;
+                }
                 if (effect.matches()) {
                     capture = Capture.NONE;
                     String effectFunction = decodeLLVMOperand(effect.group(2));
@@ -884,6 +1127,7 @@ public final class PEATestUtils {
         private final List<String> beforeLines = new ArrayList<>();
         private final List<String> afterLines = new ArrayList<>();
         private final List<PEAEffect> effects = new ArrayList<>();
+        private final List<PEALockReplay> lockReplays = new ArrayList<>();
         private boolean statsSeen;
         private boolean afterSeen;
         private boolean transformIdle;
@@ -899,10 +1143,24 @@ public final class PEATestUtils {
             if (!afterSeen) {
                 throw malformed(method, "missing after marker for round " + iteration);
             }
+            // An allocation-free idle transform need not request PEA analysis, so
+            // no stats line is emitted for that round.
+            if (!statsSeen && (!transformIdle || !effects.isEmpty()
+                    || !lockReplays.isEmpty())) {
+                throw malformed(method, "missing stats for active round " + iteration);
+            }
             return new PEARound(iteration,
                     IRBody.fromModuleLines(beforeLines, method),
                     IRBody.fromModuleLines(afterLines, method),
-                    never, partial, always, effects, statsSeen, transformIdle);
+                    never, partial, always, effects, lockReplays, statsSeen, transformIdle);
+        }
+    }
+
+    private static int lockReplayInt(MethodId method, String field, String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw malformed(method, "LockReplay " + field + " value overflows int: " + value);
         }
     }
 
@@ -997,6 +1255,34 @@ public final class PEATestUtils {
                 result.add(Integer.parseInt(matcher.group(1)));
             }
             return List.copyOf(result);
+        }
+
+        /** Maps each allocation result SSA value to its source BCI. */
+        public Map<String, Integer> allocationBCIsByResult() {
+            LinkedHashMap<String, Integer> result = new LinkedHashMap<>();
+            for (String line : lines) {
+                if (!PEA_ALLOCATION.matcher(line).find()) {
+                    continue;
+                }
+                int assignment = line.indexOf(" = ");
+                if (assignment <= 1 || line.charAt(0) != '%') {
+                    throw new AssertionError(method
+                            + ": allocation lacks an SSA result: " + line);
+                }
+                Matcher matcher = DEOPT_BCI.matcher(line);
+                if (!matcher.find()) {
+                    throw new AssertionError(method
+                            + ": allocation lacks a source BCI: " + line);
+                }
+                String allocationResult = line.substring(0, assignment);
+                Integer previous = result.putIfAbsent(
+                        allocationResult, Integer.parseInt(matcher.group(1)));
+                if (previous != null) {
+                    throw new AssertionError(method
+                            + ": duplicate allocation SSA result: " + allocationResult);
+                }
+            }
+            return Collections.unmodifiableMap(result);
         }
 
         public IRBlock blockContaining(String substring, int occurrence) {

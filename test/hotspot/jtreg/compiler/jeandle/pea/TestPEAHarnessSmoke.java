@@ -38,6 +38,9 @@ import java.util.Comparator;
 import java.util.List;
 
 import jdk.test.lib.Asserts;
+import jdk.test.lib.process.OutputAnalyzer;
+import jdk.test.lib.process.ProcessTools;
+import jdk.test.whitebox.WhiteBox;
 
 public class TestPEAHarnessSmoke {
     private static final String WRAPPER =
@@ -51,8 +54,12 @@ public class TestPEAHarnessSmoke {
 
         testMethodIds(noArgs, complex, decoy);
         testSyntheticParser(noArgs, complex, decoy);
+        testLockReplayParser(noArgs, complex);
         testMalformedTranscripts(noArgs);
+        testMalformedLockReplays(noArgs);
         testManagedOptionRejection(noArgs);
+        testLockingModes(noArgs);
+        testNotCompilableFailsFast();
         testDumpPairing(noArgs, complex);
         testRealShapeRun(noArgs, complex, decoy);
         testIterationsAndExactEffects(noArgs, decoy);
@@ -102,7 +109,7 @@ public class TestPEAHarnessSmoke {
                 stats(first, 1, 0, 0),
                 effect("EliminateAllocation", first, "[VO=0]"),
                 effect("ReplaceLoad", first, "value=%x"),
-                after(first, 0),
+                after(first, 0, false),
                 function(first, "%twice = add i32 %x, %x", "ret i32 %twice"),
                 before(overloaded, 0),
                 function(overloaded, "%alloc = invoke ptr addrspace(1) @jeandle.new_instance()",
@@ -158,9 +165,166 @@ public class TestPEAHarnessSmoke {
         expectFailure("missing transform-idle flag", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat,
                         ";; PEA-DUMP after iter=0 function " + id.llvmFunctionName(), body), id));
+        expectFailure("missing stats for active round", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body,
+                        after(id, 0, false), body), id));
+        PEATestUtils.PEAReport.parse(String.join("\n",
+                before(id, 0), body, after(id, 0), body), id)
+                .report(id).assertConverged();
         expectFailure("gapped rounds", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat, after(id, 0), body,
                         before(id, 2), body, stat, after(id, 2), body), id));
+        expectFailure("non-converged report", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, stat,
+                        after(id, 0, false), body), id).report(id).assertConverged());
+    }
+
+    private static void testLockReplayParser(Method noArgs, Method complex) {
+        PEATestUtils.MethodId first = PEATestUtils.MethodId.of(noArgs);
+        PEATestUtils.MethodId overloaded = PEATestUtils.MethodId.of(complex);
+        PEATestUtils.PEALockReplay firstDepth =
+                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 17, 1, 0);
+        PEATestUtils.PEALockReplay secondReceiver =
+                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 18, 2, 1);
+        PEATestUtils.PEALockReplay secondReceiverAlias =
+                new PEATestUtils.PEALockReplay(8, 3, 11, 13, 18, 2, 1);
+        PEATestUtils.PEALockReplay tenthDepth =
+                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 17, 10, 2);
+        PEATestUtils.PEALockReplay thirdReceiver =
+                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 19, 11, 3);
+        PEATestUtils.PEALockReplay thirdReceiverAlias =
+                new PEATestUtils.PEALockReplay(8, 3, 11, 13, 19, 11, 3);
+        PEATestUtils.PEALockReplay otherSource =
+                new PEATestUtils.PEALockReplay(7, 4, 12, 14, 18, 4, 0);
+        PEATestUtils.PEALockReplay laterRound =
+                new PEATestUtils.PEALockReplay(8, 5, 15, 16, 19, 3, 0);
+        PEATestUtils.PEALockReplay otherFunction =
+                new PEATestUtils.PEALockReplay(9, 6, 20, 21, 22, 4, 0);
+
+        String transcript = String.join("\n",
+                before(first, 0),
+                function(first, "ret i32 1"),
+                stats(first, 0, 0, 0),
+                lockReplay(first, firstDepth),
+                lockReplay(first, secondReceiver),
+                lockReplay(first, secondReceiverAlias),
+                lockReplay(first, tenthDepth),
+                lockReplay(first, thirdReceiver),
+                lockReplay(first, thirdReceiverAlias),
+                lockReplay(first, otherSource),
+                effect("ReplaceLoad", first, "depth=10"),
+                after(first, 0, false),
+                function(first, "ret i32 1"),
+                before(overloaded, 0),
+                function(overloaded, "ret i32 2"),
+                stats(overloaded, 0, 0, 0),
+                lockReplay(overloaded, otherFunction),
+                after(overloaded, 0),
+                function(overloaded, "ret i32 2"),
+                before(first, 1),
+                function(first, "ret i32 1"),
+                stats(first, 0, 0, 0),
+                lockReplay(first, laterRound),
+                after(first, 1),
+                function(first, "ret i32 1"));
+
+        PEATestUtils.PEAReport reports = PEATestUtils.PEAReport.parse(
+                transcript, first, overloaded);
+        PEATestUtils.PEARound firstRound = reports.report(first).round(0);
+        Asserts.assertEquals(firstRound.lockReplays(),
+                List.of(firstDepth, secondReceiver, secondReceiverAlias, tenthDepth,
+                        thirdReceiver, thirdReceiverAlias, otherSource));
+        Asserts.assertEquals(reports.report(first).round(1).lockReplays(),
+                List.of(laterRound));
+        Asserts.assertEquals(reports.report(overloaded).round(0).lockReplays(),
+                List.of(otherFunction));
+        Asserts.assertEquals(firstRound.effects().size(), 1,
+                "LockReplay diagnostics are typed separately from general effects");
+
+        PEATestUtils.PEALockReplayGroup primary =
+                new PEATestUtils.PEALockReplayGroup(7, 3, 11, 13);
+        PEATestUtils.PEALockReplayGroup alternate =
+                new PEATestUtils.PEALockReplayGroup(7, 4, 12, 14);
+        PEATestUtils.PEALockReplayGroup aliasedConsumer =
+                new PEATestUtils.PEALockReplayGroup(8, 3, 11, 13);
+        Asserts.assertEquals(firstRound.lockReplayGroups().size(), 3);
+        Asserts.assertEquals(firstRound.lockReplayGroups().get(primary),
+                List.of(firstDepth, secondReceiver, tenthDepth, thirdReceiver));
+        Asserts.assertEquals(firstRound.lockReplayGroups().get(aliasedConsumer),
+                List.of(secondReceiverAlias, thirdReceiverAlias));
+        Asserts.assertEquals(firstRound.lockReplayGroups().get(alternate),
+                List.of(otherSource));
+        PEATestUtils.PEALockReplayPhysicalGroup physicalPrimary =
+                new PEATestUtils.PEALockReplayPhysicalGroup(3, 11, 13);
+        PEATestUtils.PEALockReplayPhysicalGroup physicalAlternate =
+                new PEATestUtils.PEALockReplayPhysicalGroup(4, 12, 14);
+        Asserts.assertEquals(firstRound.lockReplayPhysicalGroups().size(), 2);
+        Asserts.assertEquals(firstRound.lockReplayPhysicalGroups().get(physicalPrimary),
+                List.of(firstDepth, secondReceiver, secondReceiverAlias, tenthDepth,
+                        thirdReceiver, thirdReceiverAlias));
+        Asserts.assertEquals(firstRound.lockReplayPhysicalGroups().get(physicalAlternate),
+                List.of(otherSource));
+        firstRound.assertLockReplaySequence(primary,
+                firstDepth, secondReceiver, tenthDepth, thirdReceiver);
+        Asserts.assertEquals(firstRound.distinctLockReplaySourceCount(7), 2L);
+    }
+
+    private static void testMalformedLockReplays(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        String prefix = "PEA: LockReplay function=@\"" + id.llvmFunctionName() + "\" ";
+        String valid = prefix + "logical_escape=1 batch=2 emit_site=3 source=4"
+                + " receiver_vo=5 depth=6 ordinal=0";
+
+        expectFailure("LockReplay missing key", () -> parseLockTranscript(id,
+                prefix + "logical_escape=1 batch=2 emit_site=3 source=4"
+                        + " receiver_vo=5 depth=6"));
+        expectFailure("LockReplay extra key", () -> parseLockTranscript(id,
+                valid + " extra=7"));
+        expectFailure("LockReplay duplicate key", () -> parseLockTranscript(id,
+                valid + " depth=7"));
+        expectFailure("LockReplay negative value", () -> parseLockTranscript(id,
+                valid.replace("depth=6", "depth=-6")));
+        expectFailure("LockReplay non-decimal value", () -> parseLockTranscript(id,
+                valid.replace("depth=6", "depth=0x6")));
+        expectFailure("LockReplay overflow value", () -> parseLockTranscript(id,
+                valid.replace("depth=6", "depth=2147483648")));
+        expectFailure("LockReplay wrong key", () -> parseLockTranscript(id,
+                valid.replace("receiver_vo=5", "receiverVo=5")));
+        expectFailure("LockReplay wrong order", () -> parseLockTranscript(id,
+                prefix + "batch=2 logical_escape=1 emit_site=3 source=4"
+                        + " receiver_vo=5 depth=6 ordinal=0"));
+        expectFailure("duplicate LockReplay entry", () -> parseLockTranscript(id,
+                valid, valid));
+        expectFailure("non-contiguous LockReplay ordinal", () -> parseLockTranscript(id,
+                valid, valid.replace("depth=6 ordinal=0", "depth=7 ordinal=2")));
+        expectFailure("non-increasing LockReplay depth", () -> parseLockTranscript(id,
+                valid, valid.replace("receiver_vo=5", "receiver_vo=6")
+                        .replace("ordinal=0", "ordinal=1")));
+        expectFailure("conflicting same-ordinal LockReplay alias", () ->
+                parseLockTranscript(id, valid,
+                        valid.replace("logical_escape=1", "logical_escape=2")
+                                .replace("receiver_vo=5", "receiver_vo=6")));
+        expectFailure("late same-ordinal LockReplay alias", () ->
+                parseLockTranscript(id, valid,
+                        valid.replace("receiver_vo=5 depth=6 ordinal=0",
+                                "receiver_vo=6 depth=7 ordinal=1"),
+                        valid.replace("logical_escape=1", "logical_escape=2")));
+        expectFailure("reused LockReplay batch with different identity", () ->
+                parseLockTranscript(id, valid,
+                        valid.replace("logical_escape=1", "logical_escape=2")
+                                .replace("emit_site=3 source=4",
+                                        "emit_site=8 source=9")));
+    }
+
+    private static void parseLockTranscript(PEATestUtils.MethodId id, String... replays) {
+        java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+        lines.add(before(id, 0));
+        lines.add(function(id, "ret i32 1"));
+        lines.add(stats(id, 0, 0, 0));
+        lines.addAll(List.of(replays));
+        lines.add(after(id, 0));
+        lines.add(function(id, "ret i32 1"));
+        PEATestUtils.PEAReport.parse(String.join("\n", lines), id);
     }
 
     private static void testDumpPairing(Method noArgs, Method complex) throws Exception {
@@ -255,10 +419,30 @@ public class TestPEAHarnessSmoke {
                         "-jeandle-trace-pea-extra=false");
     }
 
+    private static void testLockingModes(Method target) {
+        PEATestUtils.behaviorRun(WRAPPER, target).lockingMode(1);
+        PEATestUtils.behaviorRun(WRAPPER, target).lockingMode(2);
+        expectFailure("invalid locking mode zero",
+                () -> PEATestUtils.behaviorRun(WRAPPER, target).lockingMode(0));
+        expectFailure("invalid locking mode three",
+                () -> PEATestUtils.behaviorRun(WRAPPER, target).lockingMode(3));
+        expectFailure("repeated same locking mode", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).lockingMode(1).lockingMode(1));
+        expectFailure("repeated different locking mode", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).lockingMode(1).lockingMode(2));
+        expectFailure("raw experimental unlock flag", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).extraFlags("-XX:+UnlockExperimentalVMOptions"));
+        expectFailure("raw locking mode flag", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).extraFlags("-XX:LockingMode=2"));
+    }
+
     private static void testRealShapeRun(Method noArgs, Method complex, Method decoy)
             throws Exception {
-        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, noArgs, complex).run()) {
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, noArgs, complex)
+                .lockingMode(1)
+                .run()) {
             List<String> command = run.command();
+            assertLockingModeCommand(command, 1);
             Asserts.assertEquals(command.stream()
                     .filter(s -> s.startsWith("-XX:JeandleLLVMOptions=")).count(), 1L);
             String llvm = command.stream()
@@ -310,6 +494,9 @@ public class TestPEAHarnessSmoke {
                 .peaIterations(4)
                 .run()) {
             List<String> command = run.command();
+            Asserts.assertFalse(command.contains("-XX:+UnlockExperimentalVMOptions"));
+            Asserts.assertFalse(command.stream()
+                    .anyMatch(s -> s.startsWith("-XX:LockingMode=")));
             String llvm = command.stream()
                     .filter(s -> s.startsWith("-XX:JeandleLLVMOptions="))
                     .findFirst().orElseThrow();
@@ -337,10 +524,37 @@ public class TestPEAHarnessSmoke {
         Asserts.assertThrows(IllegalArgumentException.class,
                 () -> PEATestUtils.shapeRun(WRAPPER, target).peaIterations(17));
 
-        PEATestUtils.behaviorRun(WRAPPER, target)
+        PEATestUtils.PEAOnOffResult comparison = PEATestUtils.behaviorRun(WRAPPER, target)
+                .lockingMode(2)
                 .peaIterations(4)
                 .dontinline(helper)
-                .runPEAOnOffEquivalent();
+                .runPEAOnOffEquivalentWithCommands();
+        assertLockingModeCommand(comparison.onCommand(), 2);
+        assertLockingModeCommand(comparison.offCommand(), 2);
+        Asserts.assertThrows(UnsupportedOperationException.class,
+                () -> comparison.onCommand().add("-version"));
+    }
+
+    private static void assertLockingModeCommand(List<String> command, int mode) {
+        String unlock = "-XX:+UnlockExperimentalVMOptions";
+        String lockingMode = "-XX:LockingMode=" + mode;
+        Asserts.assertEquals(command.stream().filter(unlock::equals).count(), 1L);
+        Asserts.assertEquals(command.stream().filter(lockingMode::equals).count(), 1L);
+        Asserts.assertTrue(command.indexOf(unlock) < command.indexOf(lockingMode),
+                "Experimental options must be unlocked before selecting LockingMode");
+    }
+
+    private static void testNotCompilableFailsFast() throws Exception {
+        ProcessBuilder process = ProcessTools.createLimitedTestJavaProcessBuilder(
+                "-Xbootclasspath/a:.",
+                "-XX:+UnlockDiagnosticVMOptions",
+                "-XX:+WhiteBoxAPI",
+                "-XX:-TieredCompilation",
+                "-XX:+UseJeandleCompiler",
+                CompileFailureWrapper.class.getName());
+        OutputAnalyzer output = ProcessTools.executeCommand(process);
+        output.shouldHaveExitValue(0);
+        output.shouldContain("PEATestUtils not-compilable fail-fast: OK");
     }
 
     private static String before(PEATestUtils.MethodId id, int round) {
@@ -348,8 +562,13 @@ public class TestPEAHarnessSmoke {
     }
 
     private static String after(PEATestUtils.MethodId id, int round) {
+        return after(id, round, true);
+    }
+
+    private static String after(PEATestUtils.MethodId id, int round,
+                                boolean transformIdle) {
         return ";; PEA-DUMP after iter=" + round + " function " + id.llvmFunctionName()
-                + " transform_idle=false";
+                + " transform_idle=" + transformIdle;
     }
 
     private static String stats(PEATestUtils.MethodId id, int never, int partial, int always) {
@@ -359,6 +578,18 @@ public class TestPEAHarnessSmoke {
 
     private static String effect(String kind, PEATestUtils.MethodId id, String detail) {
         return "PEA: " + kind + " function=@\"" + id.llvmFunctionName() + "\" " + detail;
+    }
+
+    private static String lockReplay(PEATestUtils.MethodId id,
+                                     PEATestUtils.PEALockReplay replay) {
+        return "PEA: LockReplay function=@\"" + id.llvmFunctionName() + "\""
+                + " logical_escape=" + replay.logicalEscape()
+                + " batch=" + replay.batch()
+                + " emit_site=" + replay.emitSite()
+                + " source=" + replay.source()
+                + " receiver_vo=" + replay.receiverVO()
+                + " depth=" + replay.depth()
+                + " ordinal=" + replay.ordinal();
     }
 
     private static String function(PEATestUtils.MethodId id, String... instructions) {
@@ -436,6 +667,29 @@ public class TestPEAHarnessSmoke {
 
         public static int testExtra() {
             return 99;
+        }
+    }
+
+    public static class CompileFailureWrapper {
+        public static void main(String[] args) throws Exception {
+            Method method = CompileFailureWrapper.class.getMethod("target");
+            WhiteBox whiteBox = WhiteBox.getWhiteBox();
+            whiteBox.makeMethodNotCompilable(method, 4);
+
+            long start = System.nanoTime();
+            RuntimeException failure = Asserts.assertThrows(RuntimeException.class,
+                    () -> PEATestUtils.enqueueAndAwaitLevel4(method));
+            long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - start);
+            Asserts.assertTrue(failure.getMessage().contains("not compilable at level 4"),
+                    "fail-fast reports the compilation state: " + failure.getMessage());
+            Asserts.assertTrue(elapsedMillis < 10_000,
+                    "not-compilable target must fail promptly, elapsed=" + elapsedMillis + "ms");
+            System.out.println("PEATestUtils not-compilable fail-fast: OK");
+        }
+
+        public static int target() {
+            return 1;
         }
     }
 }
