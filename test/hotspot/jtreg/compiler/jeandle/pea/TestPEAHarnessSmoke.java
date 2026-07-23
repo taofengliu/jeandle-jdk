@@ -31,6 +31,8 @@
 package compiler.jeandle.pea;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,6 +59,9 @@ public class TestPEAHarnessSmoke {
         testTypedDeoptParser(noArgs);
         testMalformedDeoptBundles(noArgs);
         testExactAllocationSelection(noArgs);
+        testTypedAllocationSitesAndRetention(noArgs);
+        testMultilineCallAndInvokeParsing(noArgs);
+        testBlockLocalExactAssertions(noArgs);
         testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
         testMalformedTranscripts(noArgs);
@@ -64,6 +69,7 @@ public class TestPEAHarnessSmoke {
         testManagedOptionRejection(noArgs);
         testLockingModes(noArgs);
         testInlineCommandHandling(noArgs, decoy);
+        testExecutableDirectivesAndMaxArrayLength(noArgs);
         testActiveFrameArgumentChecks(decoy);
         testNotCompilableFailsFast();
         testDumpPairing(noArgs, complex);
@@ -199,6 +205,13 @@ public class TestPEAHarnessSmoke {
                 "ret i32 1");
         expectFailure("indirect call argument is not the callee",
                 () -> indirect.deoptBundleAtCall("exact.site", 0));
+
+        PEATestUtils.IRBody mixed = bodyWithInstructions(id,
+                "call void %fp(ptr @exact.site) [ " + deoptBundle(71) + " ]",
+                "call void @exact.site() [ " + deoptBundle(72) + " ]",
+                "ret i32 1");
+        Asserts.assertEquals(mixed.deoptBundleAtCall("exact.site", 0).rootScope().bci(), 72,
+                "an indirect call must not prevent locating the later exact direct call");
     }
 
     private static void testMalformedDeoptBundles(Method method) {
@@ -269,6 +282,80 @@ public class TestPEAHarnessSmoke {
                 "ret i32 1");
         expectFailure("ambiguous allocation SSA",
                 () -> ambiguous.deoptBundleAtAllocation("%same"));
+    }
+
+    private static void testTypedAllocationSitesAndRetention(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody before = bodyWithInstructions(id,
+                "%instance = invoke ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(7) + " ] to label %next unwind label %fail",
+                "%array = call ptr addrspace(1) @jeandle.new_array() [ "
+                        + deoptBundle(19) + " ]",
+                "ret i32 1");
+        PEATestUtils.IRBody retained = bodyWithInstructions(id,
+                "%instance = invoke ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(7) + " ] to label %next unwind label %fail",
+                "ret i32 1");
+
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+        Asserts.assertEquals(allocations.size(), 2);
+        Asserts.assertEquals(allocations.get(0).result(), "%instance");
+        Asserts.assertEquals(allocations.get(0).key(), new PEATestUtils.AllocationKey(
+                PEATestUtils.AllocationKind.INSTANCE, 7));
+        Asserts.assertEquals(allocations.get(1).result(), "%array");
+        Asserts.assertEquals(allocations.get(1).key(), new PEATestUtils.AllocationKey(
+                PEATestUtils.AllocationKind.ARRAY, 19));
+        retained.assertRetainsExactlyOriginalAllocations(before,
+                new PEATestUtils.AllocationKey(PEATestUtils.AllocationKind.INSTANCE, 7));
+        expectFailure("retained allocation kind must match original",
+                () -> retained.assertRetainsExactlyOriginalAllocations(before,
+                        new PEATestUtils.AllocationKey(PEATestUtils.AllocationKind.ARRAY, 7)));
+        expectAssertionFailure("retained allocation assertion rejects unrequested source allocation",
+                () -> before.assertRetainsExactlyOriginalAllocations(before,
+                        new PEATestUtils.AllocationKey(PEATestUtils.AllocationKind.INSTANCE, 7)));
+    }
+
+    private static void testMultilineCallAndInvokeParsing(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "%call = call i32 @multiline.call(\n"
+                        + "  i32 7,\n"
+                        + "  i32 9) [ " + deoptBundle(41) + " ]",
+                "%invoke = invoke i32 @multiline.invoke(\n"
+                        + "  i32 11,\n"
+                        + "  i32 13) [ " + deoptBundle(43) + " ]\n"
+                        + "  to label %next unwind label %fail",
+                "next:",
+                "ret i32 1",
+                "fail:",
+                "ret i32 0");
+        Asserts.assertEquals(body.deoptBundleAtCall("multiline.call", 0).rootScope().bci(), 41);
+        Asserts.assertEquals(body.deoptBundleAtCall("multiline.invoke", 0).rootScope().bci(), 43);
+        Asserts.assertEquals(body.callOccurrencesAtBCI("multiline.call", 41), List.of(0));
+        Asserts.assertEquals(body.callOccurrencesAtBCI("multiline.invoke", 43), List.of(0));
+    }
+
+    private static void testBlockLocalExactAssertions(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "entry:",
+                "%first = add i32 %x, 1",
+                "%middle = add i32 %first, 2",
+                "%last = add i32 %middle, 3",
+                "br label %exit",
+                "exit:",
+                "ret i32 %last");
+        PEATestUtils.IRBlock entry = body.blockContaining("%middle", 0);
+        entry.assertPresent("%first");
+        entry.assertOccurrenceCount("add i32", 3);
+        entry.assertOccurrenceCountBetween("%first", 0, "add i32", "%last", 0, 2);
+        entry.assertBetween("%first", 0, "%middle", 0, "%last", 0);
+        entry.assertAbsentBetween("%first", 0, "ret i32", "%last", 0);
+        expectAssertionFailure("block-local exact count rejects a false positive",
+                () -> entry.assertOccurrenceCount("add i32", 2));
+        expectAssertionFailure("block-local interval count rejects a false negative",
+                () -> entry.assertOccurrenceCountBetween("%first", 0, "add i32", "%last", 0,
+                        1));
     }
 
     private static void testLoweredAllocationCounting(Method method) {
@@ -646,6 +733,34 @@ public class TestPEAHarnessSmoke {
                 WRAPPER, target).dontinline(helper).inline(helper));
     }
 
+    private static void testExecutableDirectivesAndMaxArrayLength(Method target)
+            throws Exception {
+        Constructor<TestWrapper> constructor = TestWrapper.class.getConstructor();
+        Executable executableConstructor = constructor;
+        PEATestUtils.PEAOnOffResult comparison = PEATestUtils.behaviorRun(WRAPPER, target)
+                .compileOnly(executableConstructor)
+                .dontinline(executableConstructor)
+                .maxArrayLength(128)
+                .runPEAOnOffEquivalentWithCommands();
+        String constructorPattern = WRAPPER + "::<init>()V";
+        String compileOnly = "-XX:CompileCommand=compileonly," + constructorPattern;
+        String dontinline = "-XX:CompileCommand=dontinline," + constructorPattern;
+        for (List<String> command : List.of(comparison.onCommand(), comparison.offCommand())) {
+            Asserts.assertEquals(command.stream().filter(compileOnly::equals).count(), 1L);
+            Asserts.assertEquals(command.stream().filter(dontinline::equals).count(), 1L);
+            Asserts.assertTrue(command.stream().anyMatch(option -> option.contains(
+                    "-jeandle-pea-max-array-length=128")));
+        }
+        expectFailure("duplicate constructor compileonly",
+                () -> PEATestUtils.behaviorRun(WRAPPER, target)
+                        .compileOnly(executableConstructor).compileOnly(executableConstructor));
+        expectFailure("constructor inline/dontinline conflict",
+                () -> PEATestUtils.behaviorRun(WRAPPER, target)
+                        .inline(executableConstructor).dontinline(executableConstructor));
+        expectFailure("negative maximum array length",
+                () -> PEATestUtils.behaviorRun(WRAPPER, target).maxArrayLength(-1));
+    }
+
     private static void testActiveFrameArgumentChecks(Method uncompiled) {
         Asserts.assertTrue(PEATestUtils.ActiveFrameDeoptEvidence.class.isRecord());
         Asserts.assertThrows(NullPointerException.class,
@@ -862,6 +977,19 @@ public class TestPEAHarnessSmoke {
                 + failureMessage(label, action));
     }
 
+    private static void expectAssertionFailure(String label, ThrowingRunnable action) {
+        try {
+            action.run();
+        } catch (AssertionError | RuntimeException expected) {
+            System.out.println("expected assertion rejection: " + label + ": "
+                    + expected.getMessage());
+            return;
+        } catch (Exception unexpected) {
+            throw new RuntimeException("Wrong exception for " + label, unexpected);
+        }
+        throw new RuntimeException("Expected assertion failure: " + label);
+    }
+
     private static String failureMessage(String label, ThrowingRunnable action) {
         try {
             action.run();
@@ -898,6 +1026,8 @@ public class TestPEAHarnessSmoke {
     }
 
     public static class TestWrapper {
+        public TestWrapper() {}
+
         public static void main(String[] args) throws Exception {
             new Point();
             PEATestUtils.compileConfiguredTargetsAtLevel4();

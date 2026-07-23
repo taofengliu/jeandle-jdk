@@ -23,6 +23,8 @@ package compiler.jeandle.pea;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -82,6 +84,7 @@ public final class PEATestUtils {
             "jeandle-pea-iterations",
             "jeandle-pea-analyze-function",
             "jeandle-pea-analyze-only",
+            "jeandle-pea-max-array-length",
             "jeandle-dump-pea-ir-function",
             "jeandle-dump-pea-ir",
             "jeandle-dump-pea-stats",
@@ -201,13 +204,14 @@ public final class PEATestUtils {
         private final String wrapperFQN;
         private final boolean shape;
         private final List<MethodId> targets;
-        private final List<MethodId> compileOnly;
-        private final List<MethodId> inline;
-        private final List<MethodId> dontInline;
+        private final List<String> compileOnly;
+        private final List<String> inline;
+        private final List<String> dontInline;
         private final List<String> extraFlags;
         private final List<String> extraLLVMOptions;
         private boolean peaOn = true;
         private Integer peaIterations;
+        private Integer maxArrayLength;
         private Integer lockingMode;
         private boolean keepDumps;
 
@@ -229,7 +233,8 @@ public final class PEATestUtils {
                 }
             }
             this.targets = List.copyOf(unique.values());
-            this.compileOnly = new ArrayList<>(targets);
+            this.compileOnly = targets.stream().map(MethodId::compileCommandPattern)
+                    .collect(Collectors.toCollection(ArrayList::new));
             this.inline = new ArrayList<>();
             this.dontInline = new ArrayList<>();
             this.extraFlags = new ArrayList<>();
@@ -247,12 +252,17 @@ public final class PEATestUtils {
             this.extraLLVMOptions = new ArrayList<>(other.extraLLVMOptions);
             this.peaOn = other.peaOn;
             this.peaIterations = other.peaIterations;
+            this.maxArrayLength = other.maxArrayLength;
             this.lockingMode = other.lockingMode;
             this.keepDumps = other.keepDumps;
         }
 
         public RunBuilder compileOnly(Method method) {
-            addUnique(compileOnly, MethodId.of(method), "compileonly");
+            return compileOnly((Executable) method);
+        }
+
+        public RunBuilder compileOnly(Executable executable) {
+            addUnique(compileOnly, compileCommandPattern(executable), "compileonly");
             return this;
         }
 
@@ -260,17 +270,29 @@ public final class PEATestUtils {
             return compileOnly(method);
         }
 
+        public RunBuilder compileonly(Executable executable) {
+            return compileOnly(executable);
+        }
+
         public RunBuilder dontinline(Method method) {
-            MethodId id = MethodId.of(method);
-            rejectConflictingInlineCommand(id, inline, "inline", "dontinline");
-            addUnique(dontInline, id, "dontinline");
+            return dontinline((Executable) method);
+        }
+
+        public RunBuilder dontinline(Executable executable) {
+            String pattern = compileCommandPattern(executable);
+            rejectConflictingInlineCommand(pattern, inline, "inline", "dontinline");
+            addUnique(dontInline, pattern, "dontinline");
             return this;
         }
 
         public RunBuilder inline(Method method) {
-            MethodId id = MethodId.of(method);
-            rejectConflictingInlineCommand(id, dontInline, "dontinline", "inline");
-            addUnique(inline, id, "inline");
+            return inline((Executable) method);
+        }
+
+        public RunBuilder inline(Executable executable) {
+            String pattern = compileCommandPattern(executable);
+            rejectConflictingInlineCommand(pattern, dontInline, "dontinline", "inline");
+            addUnique(inline, pattern, "inline");
             return this;
         }
 
@@ -304,6 +326,18 @@ public final class PEATestUtils {
                 throw new IllegalStateException("PEA-off runs force zero iterations");
             }
             peaIterations = iterations;
+            return this;
+        }
+
+        /** Set the maximum constant array length eligible for PEA virtualization. */
+        public RunBuilder maxArrayLength(int length) {
+            if (length < 0) {
+                throw new IllegalArgumentException("Maximum array length must be non-negative");
+            }
+            if (maxArrayLength != null) {
+                throw new IllegalStateException("Maximum array length is already configured");
+            }
+            maxArrayLength = length;
             return this;
         }
 
@@ -401,22 +435,28 @@ public final class PEATestUtils {
             if (shape) {
                 command.add("-XX:CICompilerCount=1");
             }
-            for (MethodId id : compileOnly) {
-                command.add("-XX:CompileCommand=compileonly," + id.compileCommandPattern());
+            for (String pattern : compileOnly) {
+                command.add("-XX:CompileCommand=compileonly," + pattern);
             }
-            for (MethodId id : inline) {
-                command.add("-XX:CompileCommand=inline," + id.compileCommandPattern());
+            for (String pattern : inline) {
+                command.add("-XX:CompileCommand=inline," + pattern);
             }
-            for (MethodId id : dontInline) {
-                command.add("-XX:CompileCommand=dontinline," + id.compileCommandPattern());
+            for (String pattern : dontInline) {
+                command.add("-XX:CompileCommand=dontinline," + pattern);
             }
 
             List<String> llvmOptions = new ArrayList<>();
             if (!peaOn) {
                 llvmOptions.add("-jeandle-pea-iterations=0");
+                if (maxArrayLength != null) {
+                    llvmOptions.add("-jeandle-pea-max-array-length=" + maxArrayLength);
+                }
             } else {
                 if (peaIterations != null) {
                     llvmOptions.add("-jeandle-pea-iterations=" + peaIterations);
+                }
+                if (maxArrayLength != null) {
+                    llvmOptions.add("-jeandle-pea-max-array-length=" + maxArrayLength);
                 }
                 if (shape) {
                     llvmOptions.add("-jeandle-trace-pea");
@@ -1449,6 +1489,28 @@ public final class PEATestUtils {
         return Collections.unmodifiableMap(new LinkedHashMap<>(values));
     }
 
+    /** The source allocation operation represented by a Jeandle PEA allocation. */
+    public enum AllocationKind {
+        INSTANCE,
+        ARRAY
+    }
+
+    /** Exact source identity for an allocation retained after PEA. */
+    public record AllocationKey(AllocationKind kind, int bci) {
+        public AllocationKey {
+            Objects.requireNonNull(kind);
+        }
+    }
+
+    /** One source-level Jeandle allocation instruction. */
+    public record AllocationSite(AllocationKey key, String result, String instruction) {
+        public AllocationSite {
+            Objects.requireNonNull(key);
+            Objects.requireNonNull(result);
+            Objects.requireNonNull(instruction);
+        }
+    }
+
     /** One exact LLVM function definition with line- and occurrence-aware assertions. */
     public static final class IRBody {
         private static final String LLVM_LABEL_NAME =
@@ -1458,7 +1520,7 @@ public final class PEATestUtils {
         private static final Pattern LOWERED_ALLOCATION_TARGET = Pattern.compile(
                 "@new_(?:instance|array)\\s*$");
         private static final Pattern DEOPT_BCI = Pattern.compile(
-                "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1,");
+                "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1(?:,|\\))");
         private static final Pattern BLOCK_LABEL = Pattern.compile(
                 "^(" + LLVM_LABEL_NAME + "):(?: ;.*)?$");
         private final MethodId method;
@@ -1561,47 +1623,96 @@ public final class PEATestUtils {
             return LOWERED_ALLOCATION_TARGET.matcher(operands.get(2)).find();
         }
 
-        public List<Integer> allocationBCIs() {
-            ArrayList<Integer> result = new ArrayList<>();
-            for (String line : lines) {
-                if (!PEA_ALLOCATION.matcher(line).find()) {
-                    continue;
-                }
-                Matcher matcher = DEOPT_BCI.matcher(line);
-                if (!matcher.find()) {
-                    throw new AssertionError(method + ": allocation lacks a source BCI: " + line);
-                }
-                result.add(Integer.parseInt(matcher.group(1)));
+        private static AllocationKind allocationKind(String callee) {
+            if ("jeandle.new_instance".equals(callee)) {
+                return AllocationKind.INSTANCE;
             }
-            return List.copyOf(result);
+            if ("jeandle.new_array".equals(callee)) {
+                return AllocationKind.ARRAY;
+            }
+            return null;
+        }
+
+        public List<Integer> allocationBCIs() {
+            return allocations().stream().map(site -> site.key().bci()).toList();
         }
 
         /** Maps each allocation result SSA value to its source BCI. */
         public Map<String, Integer> allocationBCIsByResult() {
             LinkedHashMap<String, Integer> result = new LinkedHashMap<>();
-            for (String line : lines) {
-                if (!PEA_ALLOCATION.matcher(line).find()) {
-                    continue;
-                }
-                int assignment = line.indexOf(" = ");
-                if (assignment <= 1 || line.charAt(0) != '%') {
-                    throw new AssertionError(method
-                            + ": allocation lacks an SSA result: " + line);
-                }
-                Matcher matcher = DEOPT_BCI.matcher(line);
-                if (!matcher.find()) {
-                    throw new AssertionError(method
-                            + ": allocation lacks a source BCI: " + line);
-                }
-                String allocationResult = line.substring(0, assignment);
-                Integer previous = result.putIfAbsent(
-                        allocationResult, Integer.parseInt(matcher.group(1)));
+            for (AllocationSite site : allocations()) {
+                Integer previous = result.putIfAbsent(site.result(), site.key().bci());
                 if (previous != null) {
-                    throw new AssertionError(method
-                            + ": duplicate allocation SSA result: " + allocationResult);
+                    throw new AssertionError(method + ": duplicate allocation SSA result: "
+                            + site.result());
                 }
             }
             return Collections.unmodifiableMap(result);
+        }
+
+        /** Return all Jeandle allocation instructions with typed source identities. */
+        public List<AllocationSite> allocations() {
+            ArrayList<AllocationSite> result = new ArrayList<>();
+            for (int i = 0; i < lines.size(); i++) {
+                String callee = calledFunctionName(lines.get(i));
+                AllocationKind kind = allocationKind(callee);
+                if (kind == null) {
+                    continue;
+                }
+                String instruction = instructionStartingAt(i);
+                int assignment = lines.get(i).indexOf(" = ");
+                if (assignment <= 1 || lines.get(i).charAt(0) != '%') {
+                    throw new AssertionError(method
+                            + ": allocation lacks an SSA result: " + instruction);
+                }
+                Matcher matcher = DEOPT_BCI.matcher(instruction);
+                if (!matcher.find()) {
+                    throw new AssertionError(method
+                            + ": allocation lacks a source BCI: " + instruction);
+                }
+                result.add(new AllocationSite(new AllocationKey(kind,
+                        Integer.parseInt(matcher.group(1))),
+                        lines.get(i).substring(0, assignment), instruction));
+            }
+            return List.copyOf(result);
+        }
+
+        /**
+         * Assert that this body retains exactly the requested original allocation sites,
+         * in source order, and that every retained site existed in {@code original}.
+         */
+        public void assertRetainsExactlyOriginalAllocations(
+                IRBody original, AllocationKey... expected) {
+            Objects.requireNonNull(original);
+            Objects.requireNonNull(expected);
+            List<AllocationKey> expectedKeys = List.of(expected.clone());
+            List<AllocationKey> sourceKeys = original.allocations().stream()
+                    .map(AllocationSite::key).toList();
+            if (new HashSet<>(sourceKeys).size() != sourceKeys.size()) {
+                throw new IllegalStateException(method
+                        + ": original allocation keys must be unique: " + sourceKeys);
+            }
+            if (new HashSet<>(expectedKeys).size() != expectedKeys.size()) {
+                throw new IllegalArgumentException(
+                        "Expected retained allocation keys must be unique: " + expectedKeys);
+            }
+            for (AllocationKey key : expectedKeys) {
+                if (!sourceKeys.contains(key)) {
+                    throw new IllegalArgumentException(method + ": expected allocation " + key
+                            + " is not an original allocation in " + original.method);
+                }
+            }
+            List<AllocationKey> expectedInSourceOrder = sourceKeys.stream()
+                    .filter(new HashSet<>(expectedKeys)::contains).toList();
+            if (!expectedKeys.equals(expectedInSourceOrder)) {
+                throw new IllegalArgumentException(method
+                        + ": expected retained allocations must use original source order");
+            }
+            List<AllocationKey> retainedKeys = allocations().stream()
+                    .map(AllocationSite::key).toList();
+            Asserts.assertEquals(retainedKeys, expectedKeys,
+                    method + ": retained allocations must be exactly the requested originals"
+                            + " in source order");
         }
 
         /** Parse the bundle on one call selected by exact LLVM callee and occurrence. */
@@ -1641,9 +1752,13 @@ public final class PEATestUtils {
             }
             ArrayList<String> matches = new ArrayList<>();
             for (int i = 0; i < lines.size(); i++) {
-                String callee = calledFunctionName(lines.get(i));
+                if (!containsCallOrInvoke(lines.get(i))) {
+                    continue;
+                }
+                String instruction = instructionStartingAt(i);
+                String callee = calledFunctionName(instruction);
                 if (exactCallee.equals(callee)) {
-                    matches.add(instructionStartingAt(i));
+                    matches.add(instruction);
                 }
             }
             return List.copyOf(matches);
@@ -1664,10 +1779,11 @@ public final class PEATestUtils {
                 if (!line.startsWith(assignment)) {
                     continue;
                 }
-                String callee = calledFunctionName(line);
+                String instruction = instructionStartingAt(i);
+                String callee = calledFunctionName(instruction);
                 if ("jeandle.new_instance".equals(callee)
                         || "jeandle.new_array".equals(callee)) {
-                    matches.add(instructionStartingAt(i));
+                    matches.add(instruction);
                 }
             }
             if (matches.isEmpty()) {
@@ -1683,16 +1799,16 @@ public final class PEATestUtils {
 
         private String instructionStartingAt(int startLine) {
             StringBuilder instruction = new StringBuilder(lines.get(startLine));
-            int deopt = instruction.indexOf("\"deopt\"(");
-            if (deopt < 0) {
-                return instruction.toString();
-            }
-            for (int i = startLine + 1;
-                 matchingDelimiter(instruction.toString(),
-                         instruction.indexOf("(", deopt), '(', ')') < 0
-                         && i < lines.size();
-                 i++) {
+            boolean invoke = instruction.indexOf("invoke") >= 0;
+            int i = startLine + 1;
+            while (i < lines.size()
+                    && instructionNeedsContinuation(instruction.toString(), invoke, lines.get(i))) {
                 instruction.append(' ').append(lines.get(i));
+                i++;
+            }
+            if (hasUnbalancedInstructionDelimiters(instruction.toString())) {
+                throw new IllegalStateException(method + ": unterminated LLVM instruction: "
+                        + instruction);
             }
             return instruction.toString();
         }
@@ -2346,6 +2462,83 @@ public final class PEATestUtils {
         return null;
     }
 
+    private static boolean containsCallOrInvoke(String line) {
+        return Pattern.compile("\\b(?:call|invoke)\\b").matcher(line).find();
+    }
+
+    private static boolean instructionNeedsContinuation(
+            String instruction, boolean invoke, String nextLine) {
+        if (hasUnbalancedInstructionDelimiters(instruction)) {
+            return true;
+        }
+        if (!hasCallCalleeOperand(instruction)) {
+            return true;
+        }
+        String continuation = nextLine.trim();
+        return continuation.startsWith("[") || continuation.startsWith(", !")
+                || invoke && (continuation.startsWith("to label ")
+                        || continuation.startsWith("unwind label "));
+    }
+
+    private static boolean hasUnbalancedInstructionDelimiters(String instruction) {
+        int parentheses = 0;
+        int brackets = 0;
+        int braces = 0;
+        boolean quoted = false;
+        for (int i = 0; i < instruction.length(); i++) {
+            char ch = instruction.charAt(i);
+            if (quoted) {
+                if (ch == '\\') {
+                    i++;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+                continue;
+            }
+            switch (ch) {
+                case '(' -> parentheses++;
+                case ')' -> parentheses--;
+                case '[' -> brackets++;
+                case ']' -> brackets--;
+                case '{' -> braces++;
+                case '}' -> braces--;
+                default -> { }
+            }
+            if (parentheses < 0 || brackets < 0 || braces < 0) {
+                throw new IllegalStateException("Unbalanced LLVM instruction delimiters: "
+                        + instruction);
+            }
+        }
+        return quoted || parentheses != 0 || brackets != 0 || braces != 0;
+    }
+
+    private static boolean hasCallCalleeOperand(String line) {
+        Matcher operation = Pattern.compile("\\b(?:call|invoke)\\b").matcher(line);
+        if (!operation.find()) {
+            return false;
+        }
+        for (int at = operation.end(); at < line.length(); at++) {
+            char sigil = line.charAt(at);
+            if (sigil != '@' && sigil != '%') {
+                continue;
+            }
+            ParsedOperand operand = parseLLVMNamedOperand(line, at);
+            int next = operand.end;
+            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
+                next++;
+            }
+            if (next < line.length() && line.charAt(next) == '(') {
+                return true;
+            }
+            at = operand.end - 1;
+        }
+        return false;
+    }
+
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {
         return new IllegalStateException(
                 "Malformed deopt bundle for " + method + ": " + detail);
@@ -2380,6 +2573,16 @@ public final class PEATestUtils {
                     method + ": unexpected '" + fold(substring) + "' in block");
         }
 
+        public void assertPresent(String substring) {
+            Asserts.assertTrue(occurrenceCount(substring) > 0,
+                    method + ": expected '" + fold(substring) + "' in block");
+        }
+
+        public void assertOccurrenceCount(String substring, int expected) {
+            Asserts.assertEquals(occurrenceCount(substring), expected,
+                    method + ": occurrence count for '" + fold(substring) + "' in block");
+        }
+
         public void assertBefore(String first, int firstOccurrence,
                                  String second, int secondOccurrence) {
             int firstAt = occurrencePosition(first, firstOccurrence);
@@ -2387,6 +2590,48 @@ public final class PEATestUtils {
             Asserts.assertTrue(firstAt < secondAt, method + ": expected occurrence "
                     + firstOccurrence + " of '" + fold(first) + "' before occurrence "
                     + secondOccurrence + " of '" + fold(second) + "' in block");
+        }
+
+        public void assertBetween(String lower, int lowerOccurrence,
+                                  String pattern, int patternOccurrence,
+                                  String upper, int upperOccurrence) {
+            int lowerAt = occurrencePosition(lower, lowerOccurrence) + fold(lower).length();
+            int patternAt = occurrencePosition(pattern, patternOccurrence);
+            int upperAt = occurrencePosition(upper, upperOccurrence);
+            Asserts.assertTrue(lowerAt <= patternAt && patternAt < upperAt,
+                    method + ": occurrence " + patternOccurrence + " of '" + fold(pattern)
+                            + "' is outside the requested block-local interval");
+        }
+
+        public void assertAbsentBetween(String lower, int lowerOccurrence,
+                                        String pattern, String upper, int upperOccurrence) {
+            assertOccurrenceCountBetween(lower, lowerOccurrence, pattern, upper, upperOccurrence,
+                    0);
+        }
+
+        public void assertOccurrenceCountBetween(String lower, int lowerOccurrence,
+                                                 String pattern, String upper, int upperOccurrence,
+                                                 int expected) {
+            if (expected < 0) {
+                throw new IllegalArgumentException(
+                        "Expected occurrence count must be non-negative");
+            }
+            int lowerAt = occurrencePosition(lower, lowerOccurrence) + fold(lower).length();
+            int upperAt = occurrencePosition(upper, upperOccurrence);
+            Asserts.assertTrue(lowerAt <= upperAt, method + ": invalid block-local interval");
+            String needle = fold(pattern);
+            if (needle.isEmpty()) {
+                throw new IllegalArgumentException("Occurrence needle must not be empty");
+            }
+            int count = 0;
+            int from = lowerAt;
+            while ((from = text.indexOf(needle, from)) >= 0 && from < upperAt) {
+                count++;
+                from += needle.length();
+            }
+            Asserts.assertEquals(count, expected,
+                    method + ": occurrence count for '" + needle
+                            + "' in requested block-local interval");
         }
 
         private int occurrencePosition(String substring, int occurrence) {
@@ -2568,19 +2813,29 @@ public final class PEATestUtils {
         }
     }
 
-    private static void addUnique(List<MethodId> methods, MethodId method, String command) {
-        if (methods.contains(method)) {
-            throw new IllegalArgumentException("Duplicate " + command + " method " + method);
+    private static String compileCommandPattern(Executable executable) {
+        Objects.requireNonNull(executable);
+        Class<?> returnType = executable instanceof Method method
+                ? method.getReturnType() : void.class;
+        String descriptor = MethodType.methodType(returnType, executable.getParameterTypes())
+                .descriptorString();
+        String name = executable instanceof Constructor<?> ? "<init>" : executable.getName();
+        return executable.getDeclaringClass().getName() + "::" + name + descriptor;
+    }
+
+    private static void addUnique(List<String> patterns, String pattern, String command) {
+        if (patterns.contains(pattern)) {
+            throw new IllegalArgumentException("Duplicate " + command + " method " + pattern);
         }
-        methods.add(method);
+        patterns.add(pattern);
     }
 
     private static void rejectConflictingInlineCommand(
-            MethodId method, List<MethodId> conflicting,
+            String pattern, List<String> conflicting,
             String existingCommand, String requestedCommand) {
-        if (conflicting.contains(method)) {
+        if (conflicting.contains(pattern)) {
             throw new IllegalArgumentException("Conflicting " + existingCommand + "/"
-                    + requestedCommand + " method " + method);
+                    + requestedCommand + " method " + pattern);
         }
     }
 
