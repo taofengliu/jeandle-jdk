@@ -84,14 +84,20 @@ public class TestNestedAllocDeopt {
                 target + ": selected allocation bundle BCI");
         Asserts.assertEquals(bundle.rootScope().duplicateBCI(), secondBCI,
                 target + ": selected allocation bundle duplicated BCI");
+        Asserts.assertEquals(bundle.scopes().size(), 1,
+                target + ": one root scope at the second allocation");
         bundle.assertVirtualObjectIds(0);
         PEATestUtils.VirtualObjectDescriptor first = bundle.virtualObject(0);
         Asserts.assertEquals(first.kind(), PEATestUtils.DescriptorKind.INSTANCE,
                 target + ": first allocation is described as an instance");
-        PEATestUtils.VirtualObjectEntry value = first.fields().get(
-                Math.toIntExact(UNSAFE.objectFieldOffset(
-                        TestWrapper.A.class.getDeclaredField("x"))));
+        int xOffset = Math.toIntExact(UNSAFE.objectFieldOffset(
+                TestWrapper.A.class.getDeclaredField("x")));
+        Asserts.assertEquals(first.fields().keySet(), Set.of(xOffset),
+                target + ": first descriptor contains only initialized x");
+        PEATestUtils.VirtualObjectEntry value = first.fields().get(xOffset);
         Asserts.assertNotNull(value, target + ": first object field is in closure");
+        Asserts.assertEquals(value.basicType(), PEATestUtils.DeoptBasicType.INT,
+                target + ": first object field type");
         Asserts.assertEquals(value.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
                 target + ": first object field is scalar");
         Asserts.assertEquals(value.value().operand(), "i32 10",

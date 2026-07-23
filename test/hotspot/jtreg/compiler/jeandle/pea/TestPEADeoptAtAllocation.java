@@ -156,6 +156,8 @@ public class TestPEADeoptAtAllocation {
                 target + ": instance descriptor has one exact field");
         PEATestUtils.VirtualObjectEntry value = descriptor.fields().get(valueOffset);
         Asserts.assertNotNull(value, target + ": instance value is in closure");
+        Asserts.assertEquals(value.basicType(), PEATestUtils.DeoptBasicType.INT,
+                target + ": instance value type");
         Asserts.assertEquals(value.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
                 target + ": instance value is scalar");
         Asserts.assertEquals(value.value().operand(), "i32 " + expectedValue,
