@@ -120,6 +120,10 @@ public final class PEATestUtils {
     private static final Pattern INLINE_ASM_CALLEE = Pattern.compile("\\basm\\b");
     private static final Pattern CONSTANT_CALLEE = Pattern.compile(
             "\\b(?:null|undef|poison|zeroinitializer)\\s*\\(");
+    // LangRef defines exactly these two unparenthesized constant operators
+    // whose operand is a global function name.
+    private static final Set<String> NAMED_CONSTANT_CALLEE_OPERATORS =
+            Set.of("dso_local_equivalent", "no_cfi");
     private static final Pattern ASSIGNED_INSTRUCTION = Pattern.compile(
             "^(" + LLVM_LOCAL_NAME + ")\\s*=");
     private static final Pattern ASSIGNMENT_ONLY = Pattern.compile(
@@ -2424,6 +2428,15 @@ public final class PEATestUtils {
 
     private static List<String> splitTopLevelOperands(
             String text, MethodId method) {
+        try {
+            return splitTopLevelSegments(text, "deopt operand list");
+        } catch (IllegalArgumentException malformed) {
+            throw invalidDeopt(method, malformed.getMessage());
+        }
+    }
+
+    private static List<String> splitTopLevelSegments(
+            String text, String context) {
         ArrayList<String> result = new ArrayList<>();
         int start = 0;
         int parentheses = 0;
@@ -2461,28 +2474,30 @@ public final class PEATestUtils {
                 angles--;
             } else if (ch == ',' && parentheses == 0 && brackets == 0
                     && braces == 0 && angles == 0) {
-                addBundleOperand(result, text.substring(start, i), method);
+                addTopLevelSegment(result, text.substring(start, i), context);
                 start = i + 1;
             }
             if (parentheses < 0 || brackets < 0 || braces < 0 || angles < 0) {
-                throw invalidDeopt(method, "unbalanced deopt operand: " + text);
+                throw new IllegalArgumentException(
+                        "unbalanced " + context + ": " + text);
             }
         }
         if (quoted || parentheses != 0 || brackets != 0
                 || braces != 0 || angles != 0) {
-            throw invalidDeopt(method, "unbalanced deopt operand list: " + text);
+            throw new IllegalArgumentException(
+                    "unbalanced " + context + ": " + text);
         }
-        addBundleOperand(result, text.substring(start), method);
+        addTopLevelSegment(result, text.substring(start), context);
         return List.copyOf(result);
     }
 
-    private static void addBundleOperand(
-            List<String> operands, String operand, MethodId method) {
-        String folded = fold(operand);
+    private static void addTopLevelSegment(
+            List<String> segments, String segment, String context) {
+        String folded = fold(segment);
         if (folded.isEmpty()) {
-            throw invalidDeopt(method, "empty deopt operand");
+            throw new IllegalArgumentException("empty " + context);
         }
-        operands.add(folded);
+        segments.add(folded);
     }
 
     private static int matchingDelimiter(
@@ -2518,22 +2533,8 @@ public final class PEATestUtils {
         if (!operation.find()) {
             return null;
         }
-        int arguments = callableArgumentListStart(line, operation.end());
-        if (arguments < 0) {
-            return null;
-        }
-        for (int at = operation.end(); at < line.length(); at++) {
-            char sigil = line.charAt(at);
-            if (sigil != '@' && sigil != '%') {
-                continue;
-            }
-            ParsedOperand operand = parseLLVMNamedOperand(line, at);
-            if (skipWhitespace(line, operand.end) == arguments) {
-                return sigil == '@' ? operand.value : null;
-            }
-            at = operand.end - 1;
-        }
-        return null;
+        ParsedCallableOperand callable = parseCallableOperand(line, operation.end());
+        return callable == null ? null : callable.directGlobal();
     }
 
     private static boolean containsCallOrInvoke(String line) {
@@ -2600,11 +2601,13 @@ public final class PEATestUtils {
         if (!operation.find()) {
             return false;
         }
-        int arguments = callableArgumentListStart(line, operation.end());
-        return arguments >= 0 && matchingDelimiter(line, arguments, '(', ')') >= 0;
+        ParsedCallableOperand callable = parseCallableOperand(line, operation.end());
+        return callable != null
+                && matchingDelimiter(line, callable.arguments(), '(', ')') >= 0;
     }
 
-    private static int callableArgumentListStart(String line, int operationEnd) {
+    private static ParsedCallableOperand parseCallableOperand(
+            String line, int operationEnd) {
         int parentheses = 0;
         int brackets = 0;
         int braces = 0;
@@ -2667,7 +2670,19 @@ public final class PEATestUtils {
             int next = skipWhitespace(line, operand.end);
             if (next < line.length() && line.charAt(next) == '('
                     && hasCallableSuffix(line, next)) {
-                return next;
+                if (sigil == '%') {
+                    return new ParsedCallableOperand(
+                            next, CallableOperandKind.INDIRECT_LOCAL, null);
+                }
+                String precedingToken =
+                        precedingTopLevelToken(line, operationEnd, at);
+                CallableOperandKind kind =
+                        NAMED_CONSTANT_CALLEE_OPERATORS.contains(precedingToken)
+                                ? CallableOperandKind.CONSTANT
+                                : CallableOperandKind.DIRECT_GLOBAL;
+                return new ParsedCallableOperand(
+                        next, kind, kind == CallableOperandKind.DIRECT_GLOBAL
+                                ? operand.value : null);
             }
             at = operand.end - 1;
         }
@@ -2675,25 +2690,67 @@ public final class PEATestUtils {
         int expressionArguments =
                 parenthesizedCallableArgumentListStart(line, operationEnd);
         if (expressionArguments >= 0) {
-            return expressionArguments;
+            return new ParsedCallableOperand(
+                    expressionArguments, CallableOperandKind.CONSTANT_EXPRESSION, null);
         }
 
         Matcher asm = INLINE_ASM_CALLEE.matcher(line);
         if (asm.find(operationEnd)) {
             int afterConstraints = afterQuotedStrings(line, asm.end(), 2);
             if (afterConstraints < 0) {
-                return -1;
+                return null;
             }
             int arguments = skipWhitespace(line, afterConstraints);
             return arguments < line.length() && line.charAt(arguments) == '('
-                    ? arguments : -1;
+                    ? new ParsedCallableOperand(
+                            arguments, CallableOperandKind.INLINE_ASM, null)
+                    : null;
         }
 
         Matcher constant = CONSTANT_CALLEE.matcher(line);
         if (constant.find(operationEnd)) {
-            return line.indexOf('(', constant.start());
+            return new ParsedCallableOperand(
+                    line.indexOf('(', constant.start()),
+                    CallableOperandKind.CONSTANT, null);
         }
-        return -1;
+        return null;
+    }
+
+    private static String precedingTopLevelToken(
+            String text, int lowerBound, int before) {
+        int end = before;
+        while (end > lowerBound && Character.isWhitespace(text.charAt(end - 1))) {
+            end--;
+        }
+        int start = end;
+        while (start > lowerBound) {
+            char ch = text.charAt(start - 1);
+            if (!(Character.isLetterOrDigit(ch) || ch == '-' || ch == '$'
+                    || ch == '.' || ch == '_' || ch == '%' || ch == '@')) {
+                break;
+            }
+            start--;
+        }
+        return text.substring(start, end);
+    }
+
+    private enum CallableOperandKind {
+        DIRECT_GLOBAL,
+        INDIRECT_LOCAL,
+        CONSTANT,
+        CONSTANT_EXPRESSION,
+        INLINE_ASM
+    }
+
+    private record ParsedCallableOperand(
+            int arguments, CallableOperandKind kind, String directGlobal) {
+        private ParsedCallableOperand {
+            if (arguments < 0 || kind == null
+                    || (kind == CallableOperandKind.DIRECT_GLOBAL)
+                            != (directGlobal != null)) {
+                throw new IllegalArgumentException("Invalid parsed LLVM callable operand");
+            }
+        }
     }
 
     private static int parenthesizedCallableArgumentListStart(
@@ -2802,13 +2859,8 @@ public final class PEATestUtils {
 
     /** One labeled LLVM basic block with occurrence-aware assertions. */
     public static final class IRBlock {
-        private static final Pattern CONDITIONAL_BRANCH = Pattern.compile(
-                "^br i1 [^,]+, label (" + LLVM_LOCAL_NAME + "), label ("
-                        + LLVM_LOCAL_NAME + ")"
-                        + "(?:, ![-A-Za-z$._0-9]+ ![^,\\s]+)*$");
-        private static final Pattern UNCONDITIONAL_BRANCH = Pattern.compile(
-                "^br label (" + LLVM_LOCAL_NAME + ")"
-                        + "(?:, ![-A-Za-z$._0-9]+ ![^,\\s]+)*$");
+        private static final Pattern METADATA_ATTACHMENT = Pattern.compile(
+                "^![-A-Za-z$._0-9]+\\s+!.+$");
         private final MethodId method;
         private final List<String> lines;
         private final String text;
@@ -2827,35 +2879,111 @@ public final class PEATestUtils {
             return normalizeBlockLabel(label.group(1));
         }
 
+        public List<String> lines() {
+            return lines;
+        }
+
         public List<String> conditionalBranchTargets() {
-            List<String> branches = lines.stream()
-                    .filter(line -> line.startsWith("br i1 ")).toList();
-            if (branches.size() != 1 || !branches.get(0).equals(lines.get(lines.size() - 1))) {
+            List<String> instructions = semanticLines();
+            List<String> branches = instructions.stream()
+                    .filter(line -> line.startsWith("br ")).toList();
+            if (branches.size() != 1
+                    || !branches.get(0).equals(instructions.get(instructions.size() - 1))
+                    || !branches.get(0).startsWith("br i1 ")) {
                 throw new IllegalStateException(method + ": block " + label()
                         + " must end in exactly one conditional branch");
             }
-            Matcher branch = CONDITIONAL_BRANCH.matcher(branches.get(0));
-            if (!branch.matches()) {
-                throw new IllegalStateException(method + ": malformed conditional branch in "
-                        + label() + ": " + branches.get(0));
+            String branch = branches.get(0);
+            List<String> operands = branchOperands(branch);
+            if (operands.size() < 3
+                    || !operands.get(0).startsWith("i1 ")
+                    || operands.get(0).substring(3).isBlank()) {
+                throw malformedBranch(branch);
             }
-            return List.of(normalizeBlockLabel(branch.group(1)),
-                    normalizeBlockLabel(branch.group(2)));
+            validateMetadataAttachments(operands, 3, branch);
+            return List.of(parseLabelOperand(operands.get(1), branch),
+                    parseLabelOperand(operands.get(2), branch));
         }
 
         public String unconditionalBranchTarget() {
-            List<String> branches = lines.stream()
-                    .filter(line -> line.startsWith("br label ")).toList();
-            if (branches.size() != 1 || !branches.get(0).equals(lines.get(lines.size() - 1))) {
+            List<String> instructions = semanticLines();
+            List<String> branches = instructions.stream()
+                    .filter(line -> line.startsWith("br ")).toList();
+            if (branches.size() != 1
+                    || !branches.get(0).equals(instructions.get(instructions.size() - 1))
+                    || !branches.get(0).startsWith("br label ")) {
                 throw new IllegalStateException(method + ": block " + label()
                         + " must end in exactly one unconditional branch");
             }
-            Matcher branch = UNCONDITIONAL_BRANCH.matcher(branches.get(0));
-            if (!branch.matches()) {
-                throw new IllegalStateException(method + ": malformed unconditional branch in "
-                        + label() + ": " + branches.get(0));
+            String branch = branches.get(0);
+            List<String> operands = branchOperands(branch);
+            if (operands.isEmpty()) {
+                throw malformedBranch(branch);
             }
-            return normalizeBlockLabel(branch.group(1));
+            validateMetadataAttachments(operands, 1, branch);
+            return parseLabelOperand(operands.get(0), branch);
+        }
+
+        public boolean isEmptyForwardingBlock() {
+            List<String> instructions = semanticLines();
+            if (instructions.size() != 2
+                    || !IRBody.BLOCK_LABEL.matcher(instructions.get(0)).matches()
+                    || !instructions.get(1).startsWith("br label ")) {
+                return false;
+            }
+            unconditionalBranchTarget();
+            return true;
+        }
+
+        public String emptyForwardingTarget() {
+            if (!isEmptyForwardingBlock()) {
+                throw new IllegalStateException(method + ": block " + label()
+                        + " is not an empty forwarding block");
+            }
+            return unconditionalBranchTarget();
+        }
+
+        private List<String> semanticLines() {
+            return lines.stream()
+                    .map(PEATestUtils::cleanInstructionLine)
+                    .filter(line -> !line.isEmpty())
+                    .filter(line -> !DEBUG_RECORD.matcher(line).find())
+                    .toList();
+        }
+
+        private List<String> branchOperands(String branch) {
+            try {
+                return splitTopLevelSegments(branch.substring(3), "branch operand list");
+            } catch (IllegalArgumentException malformed) {
+                throw new IllegalStateException(method + ": malformed branch in " + label()
+                        + ": " + malformed.getMessage());
+            }
+        }
+
+        private String parseLabelOperand(String operand, String branch) {
+            if (!operand.startsWith("label ")) {
+                throw malformedBranch(branch);
+            }
+            String labelOperand = operand.substring("label ".length());
+            try {
+                return normalizeBlockLabel(labelOperand);
+            } catch (IllegalArgumentException malformed) {
+                throw malformedBranch(branch);
+            }
+        }
+
+        private void validateMetadataAttachments(
+                List<String> operands, int firstMetadata, String branch) {
+            for (int i = firstMetadata; i < operands.size(); i++) {
+                if (!METADATA_ATTACHMENT.matcher(operands.get(i)).matches()) {
+                    throw malformedBranch(branch);
+                }
+            }
+        }
+
+        private IllegalStateException malformedBranch(String branch) {
+            return new IllegalStateException(method + ": malformed branch in "
+                    + label() + ": " + branch);
         }
 
         public int occurrenceCount(String substring) {
@@ -3253,7 +3381,38 @@ public final class PEATestUtils {
     }
 
     private static String fold(String value) {
-        return value.replaceAll("\\s+", " ").trim();
+        StringBuilder result = new StringBuilder(value.length());
+        boolean quoted = false;
+        boolean pendingWhitespace = false;
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (quoted) {
+                result.append(ch);
+                if (ch == '\\' && i + 1 < value.length()) {
+                    result.append(value.charAt(++i));
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                if (pendingWhitespace && !result.isEmpty()) {
+                    result.append(' ');
+                }
+                pendingWhitespace = false;
+                quoted = true;
+                result.append(ch);
+            } else if (Character.isWhitespace(ch)) {
+                pendingWhitespace = true;
+            } else {
+                if (pendingWhitespace && !result.isEmpty()) {
+                    result.append(' ');
+                }
+                pendingWhitespace = false;
+                result.append(ch);
+            }
+        }
+        return result.toString();
     }
 
     private static String cleanInstructionLine(String line) {

@@ -357,7 +357,7 @@ public class TestPEAArrayLengthBoundsAndTypes {
             if (block.label().equals(expected.label())) {
                 return;
             }
-            label = block.unconditionalBranchTarget();
+            label = block.emptyForwardingTarget();
         }
         throw new AssertionError(body.methodId() + ": cyclic forwarding edge: " + detail);
     }

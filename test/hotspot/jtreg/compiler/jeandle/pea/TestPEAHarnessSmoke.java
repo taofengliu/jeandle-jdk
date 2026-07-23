@@ -74,6 +74,10 @@ public class TestPEAHarnessSmoke {
         testManagedOptionRejection(noArgs);
         testLockingModes(noArgs);
         testInlineCommandHandling(noArgs, decoy);
+        if (List.of(args).contains("--parser-only")) {
+            System.out.println("TestPEAHarnessSmoke: parser OK");
+            return;
+        }
         testExecutableDirectivesAndMaxArrayLength(noArgs);
         testActiveFrameArgumentChecks(decoy);
         testNotCompilableFailsFast();
@@ -349,6 +353,21 @@ public class TestPEAHarnessSmoke {
                 "call void select (i1 true, ptr @left, ptr @right)() memory(none)",
                 "call void blockaddress(@function, %block)() allocsize(0)",
                 "call void getelementptr inbounds (i8, ptr @base, i64 1)()",
+                "call void bitcast (ptr @bitcast.target to ptr)()",
+                "call void addrspacecast "
+                        + "(ptr addrspace(1) @addrspace.target to ptr)()",
+                "call void ptrauth (ptr @ptrauth.target, i32 0)()",
+                "call void dso_local_equivalent @dso.target() [ "
+                        + deoptBundle(47) + " ]",
+                "call void no_cfi @no.cfi.target() [ " + deoptBundle(48) + " ]",
+                "call void null()",
+                "call void undef()",
+                "call void poison()",
+                "call void zeroinitializer()",
+                "%named.no.cfi = call %no_cfi @named.no.cfi.direct() [ "
+                        + deoptBundle(45) + " ]",
+                "%named.dso = call %dso_local_equivalent @named.dso.direct() [ "
+                        + deoptBundle(46) + " ]",
                 "call void asm sideeffect \"\", \"\"() [ \"tag\"() ]",
                 "call noundef nonnull ptr @return.attributes() memory(read)",
                 "call <4 x i32> @vector.return()",
@@ -357,6 +376,40 @@ public class TestPEAHarnessSmoke {
         Asserts.assertEquals(complete.peaAllocCount(), 0);
         Asserts.assertEquals(
                 complete.deoptBundleAtCall("typed.direct", 0).rootScope().bci(), 49);
+        Asserts.assertEquals(
+                complete.deoptBundleAtCall("named.no.cfi.direct", 0).rootScope().bci(), 45);
+        Asserts.assertEquals(
+                complete.deoptBundleAtCall("named.dso.direct", 0).rootScope().bci(), 46);
+        expectFailure("dso_local_equivalent is not an exact direct global callee",
+                () -> complete.deoptBundleAtCall("dso.target", 0));
+        expectFailure("no_cfi is not an exact direct global callee",
+                () -> complete.deoptBundleAtCall("no.cfi.target", 0));
+        for (String wrapped : List.of("bitcast.target", "addrspace.target",
+                "ptrauth.target")) {
+            expectFailure("constant-expression callee is not exact @" + wrapped,
+                    () -> complete.deoptBundleAtCall(wrapped, 0));
+        }
+
+        PEATestUtils.IRBody constantInvoke = bodyWithInstructions(id,
+                "invoke void ptrauth (ptr @invoke.ptrauth.target, i32 0)() [ "
+                        + deoptBundle(50) + " ]"
+                        + " to label %next unwind label %fail",
+                "next:",
+                "ret i32 1",
+                "fail:",
+                "ret i32 0");
+        Asserts.assertEquals(constantInvoke.peaAllocCount(), 0);
+        expectFailure("invoke constant-expression callee is not exact direct global",
+                () -> constantInvoke.deoptBundleAtCall("invoke.ptrauth.target", 0));
+
+        PEATestUtils.IRBody asmInvoke = bodyWithInstructions(id,
+                "invoke void asm unwind \"\", \"\"()"
+                        + " to label %next unwind label %fail",
+                "next:",
+                "ret i32 1",
+                "fail:",
+                "ret i32 0");
+        Asserts.assertEquals(asmInvoke.peaAllocCount(), 0);
 
         PEATestUtils.IRBody truncatedExpression = bodyWithInstructions(id,
                 "call void inttoptr (i64 139956031309536 to ptr) memory(none)",
@@ -498,6 +551,9 @@ public class TestPEAHarnessSmoke {
                 "ret i32 0");
         PEATestUtils.IRBlock entry = body.blockByLabel("entry");
         Asserts.assertEquals(entry.label(), "entry");
+        Asserts.assertEquals(entry.lines().get(0), "entry:");
+        expectAssertionFailure("IR block lines are immutable",
+                () -> entry.lines().add("ret i32 0"));
         Asserts.assertEquals(entry.conditionalBranchTargets(),
                 List.of("success", "fallback.block"));
         Asserts.assertEquals(body.blockByLabel("%success").label(), "success");
@@ -505,8 +561,67 @@ public class TestPEAHarnessSmoke {
                 "fallback.block");
         Asserts.assertEquals(body.blockByLabel("forward").unconditionalBranchTarget(),
                 "success");
+        Asserts.assertTrue(body.blockByLabel("forward").isEmptyForwardingBlock());
+        Asserts.assertEquals(body.blockByLabel("forward").emptyForwardingTarget(),
+                "success");
         expectFailure("unknown exact block label",
                 () -> body.blockByLabel("missing"));
+
+        PEATestUtils.IRBody legalSyntax = bodyWithInstructions(id,
+                "br i1 %\"condition,with,commas\", label %left, label %right,"
+                        + " !dbg !DILocation(line: 1, scope: !11),"
+                        + " !prof !{!\"branch_weights\", i32 1, i32 1000} ; branch comment",
+                "left:",
+                "br label %exit, !nosanitize !{} ; unconditional comment",
+                "right:",
+                "br label %exit",
+                "exit:",
+                "ret i32 0");
+        Asserts.assertEquals(
+                legalSyntax.blockByLabel("entry").conditionalBranchTargets(),
+                List.of("left", "right"));
+        Asserts.assertEquals(
+                legalSyntax.blockByLabel("left").unconditionalBranchTarget(), "exit");
+        PEATestUtils.IRBody invalidMetadata = bodyWithInstructions(id,
+                "br i1 %condition, label %left, label %right, !dbg garbage",
+                "left:",
+                "ret i32 1",
+                "right:",
+                "ret i32 0");
+        expectFailure("branch suffix must be an LLVM metadata attachment",
+                () -> invalidMetadata.blockByLabel("entry").conditionalBranchTargets());
+
+        String spacedLabel = "space  \tlabel";
+        PEATestUtils.IRBody quotedWhitespace = bodyWithInstructions(id,
+                "br label %\"space  \tlabel\"",
+                "\"space  \tlabel\":",
+                "ret i32 0");
+        Asserts.assertEquals(
+                quotedWhitespace.blockByLabel("%\"space  \tlabel\"").label(),
+                spacedLabel);
+        Asserts.assertEquals(
+                quotedWhitespace.blockByLabel("entry").unconditionalBranchTarget(),
+                spacedLabel);
+
+        PEATestUtils.IRBody forwarding = bodyWithInstructions(id,
+                "br label %debug.forward",
+                "debug.forward:",
+                "; ignored comment",
+                "#dbg_value(i32 %value, !1, !DIExpression())",
+                "br label %exit",
+                "side.effect:",
+                "store i32 1, ptr %out",
+                "br label %exit",
+                "exit:",
+                "ret i32 0");
+        Asserts.assertTrue(
+                forwarding.blockByLabel("debug.forward").isEmptyForwardingBlock());
+        Asserts.assertEquals(
+                forwarding.blockByLabel("debug.forward").emptyForwardingTarget(), "exit");
+        Asserts.assertFalse(
+                forwarding.blockByLabel("side.effect").isEmptyForwardingBlock());
+        expectFailure("a side-effecting block is not an empty forwarding block",
+                () -> forwarding.blockByLabel("side.effect").emptyForwardingTarget());
 
         PEATestUtils.IRBody ambiguous = bodyWithInstructions(id,
                 "same:",

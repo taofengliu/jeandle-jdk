@@ -31,8 +31,13 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import jdk.test.lib.Asserts;
 
@@ -44,6 +49,11 @@ public class TestSymbolicIndexStorePEA {
     private static final String DEOPTIMIZE_I64 = "llvm.experimental.deoptimize.i64";
     private static final String DEOPTIMIZE_I64_CALL = "@" + DEOPTIMIZE_I64;
     private static final String LOWERED_DEOPTIMIZE = "@__llvm_deoptimize";
+    private static final String LLVM_LOCAL =
+            "(?:%[-A-Za-z$._0-9]+|%\"(?:[^\"\\\\]|\\\\.)*\")";
+    private static final String GEP_FLAGS =
+            "(?: inbounds)?(?: nusw)?(?: nuw)?"
+            + "(?: inrange\\(-?\\d+, -?\\d+\\))?";
 
     public static void main(String[] args) throws Exception {
         Method store = TestWrapper.class.getMethod(
@@ -171,36 +181,376 @@ public class TestSymbolicIndexStorePEA {
         PEATestUtils.PEAReport report = assertOriginalMaterialization(run, target, 2);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
-        Asserts.assertEquals(before.allocations().stream()
-                        .filter(site -> site.key().kind()
-                                == PEATestUtils.AllocationKind.INSTANCE).count(),
-                1L, target + ": one nested child source allocation");
-        Asserts.assertEquals(before.allocations().stream()
-                        .filter(site -> site.key().kind()
-                                == PEATestUtils.AllocationKind.ARRAY).count(),
-                1L, target + ": one nested array source allocation");
-        PEATestUtils.IRBlock consumer =
-                after.blockContaining(
-                        "%array_element_address2 = getelementptr", 0);
-        PEATestUtils.DeoptBundle fallback =
-                assertBoundsFallback(after, 0, 25, consumer);
+        PEATestUtils.AllocationSite child =
+                uniqueAllocation(before, PEATestUtils.AllocationKind.INSTANCE, target);
+        PEATestUtils.AllocationSite array =
+                uniqueAllocation(before, PEATestUtils.AllocationKind.ARRAY, target);
+        String afterChild = allocationResult(after, child.key());
+        String afterArray = allocationResult(after, array.key());
+        PEATestUtils.DeoptBundle fallback = boundsFallbackAtBCI(after, 25);
         fallback.assertVirtualObjectIds(0, 1);
-        Asserts.assertEquals(fallback.virtualObject(0).kind(),
+        PEATestUtils.VirtualObjectDescriptor arrayDescriptor =
+                fallback.virtualObject(0);
+        PEATestUtils.VirtualObjectDescriptor childDescriptor =
+                fallback.virtualObject(1);
+        Asserts.assertEquals(arrayDescriptor.kind(),
                 PEATestUtils.DescriptorKind.ARRAY,
                 target + ": bounds fallback carries the nested array");
-        Asserts.assertEquals(fallback.virtualObject(1).kind(),
+        Asserts.assertEquals(childDescriptor.kind(),
                 PEATestUtils.DescriptorKind.INSTANCE,
                 target + ": bounds fallback carries the nested child");
-        fallback.assertVORef(0, 24, 1);
+        List<PEATestUtils.VirtualObjectEntry> childReferences =
+                arrayDescriptor.elements().values().stream()
+                        .filter(entry -> entry.value().kind()
+                                == PEATestUtils.DeoptValueKind.VO_REF
+                                && entry.value().virtualObjectId() == 1)
+                        .toList();
+        Asserts.assertEquals(childReferences.size(), 1,
+                target + ": one exact array element references the nested child");
+        PEATestUtils.VirtualObjectEntry arrayElement = childReferences.get(0);
+        Asserts.assertEquals(arrayElement.offset(), 24,
+                target + ": nested child is replayed into array[0]");
+        fallback.assertVORef(0, arrayElement.offset(), 1);
+        Asserts.assertEquals(childDescriptor.fields().size(), 1,
+                target + ": one exact nested child field");
+        PEATestUtils.VirtualObjectEntry childField =
+                childDescriptor.fields().values().iterator().next();
+        Asserts.assertEquals(childField.basicType(), PEATestUtils.DeoptBasicType.INT,
+                target + ": nested child value is an int");
+        Asserts.assertEquals(childField.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR,
+                target + ": nested child value is scalar");
+
+        NestedStoreShape shape = findNestedStoreShape(
+                after, afterArray, afterChild, arrayElement.offset(),
+                childField.offset(), childField.value().operand(), target);
+        PEATestUtils.IRBlock bounds =
+                findExactBoundsBlock(after, shape.sourceIndex(), target);
+        PEATestUtils.IRBlock fallbackBlock =
+                after.blockContaining(DEOPTIMIZE_I64_CALL,
+                        uniqueCallOccurrenceAtBCI(after, DEOPTIMIZE_I64, 25));
+        assertNestedConditionalTargets(
+                after, bounds, shape, fallbackBlock, true);
+
         PEATestUtils.IRBody finalIR = run.finalIR(target);
-        assertFinalBoundsFallbackDirect(finalIR,
-                finalIR.blockContaining(
-                        "%array_element_address2 = getelementptr", 0));
-        consumer.assertOccurrenceCount("store atomic", 3);
-        consumer.assertBefore("store atomic", 0, "store atomic", 2);
-        consumer.assertBefore("store atomic", 1, "store atomic", 2);
-        assertNoAllocationAtConsumer(consumer);
-        assertNormalPathHasNoDeopt(run, target, consumer, "store atomic", 0);
+        NestedStoreShape finalShape = findNestedStoreShape(
+                finalIR, null, null, arrayElement.offset(),
+                childField.offset(), null, target);
+        PEATestUtils.IRBlock finalBounds =
+                findExactBoundsBlock(finalIR, finalShape.sourceIndex(), target);
+        PEATestUtils.IRBlock finalFallback =
+                finalIR.blockContaining(LOWERED_DEOPTIMIZE, 0);
+        finalIR.assertOccurrenceCount(LOWERED_DEOPTIMIZE, 1);
+        assertNestedConditionalTargets(
+                finalIR, finalBounds, finalShape, finalFallback, false);
+
+        assertNoAllocationAtConsumer(shape.consumer());
+        shape.consumer().assertAbsent(DEOPTIMIZE);
+        finalShape.consumer().assertAbsent(LOWERED_DEOPTIMIZE);
+    }
+
+    private record NestedStoreShape(
+            String sourceIndex, String childReplay, String arrayReplay,
+            String symbolicStore, PEATestUtils.IRBlock childReplayBlock,
+            PEATestUtils.IRBlock arrayReplayBlock, PEATestUtils.IRBlock consumer) {}
+
+    private static PEATestUtils.AllocationSite uniqueAllocation(
+            PEATestUtils.IRBody body, PEATestUtils.AllocationKind kind,
+            Method target) {
+        List<PEATestUtils.AllocationSite> sites = body.allocations().stream()
+                .filter(site -> site.key().kind() == kind).toList();
+        Asserts.assertEquals(sites.size(), 1,
+                target + ": one source allocation of kind " + kind);
+        return sites.get(0);
+    }
+
+    private static String allocationResult(
+            PEATestUtils.IRBody body, PEATestUtils.AllocationKey key) {
+        List<String> results = body.allocations().stream()
+                .filter(site -> site.key().equals(key))
+                .map(PEATestUtils.AllocationSite::result)
+                .toList();
+        Asserts.assertEquals(results.size(), 1,
+                body.methodId() + ": one allocation for " + key);
+        return results.get(0);
+    }
+
+    private static PEATestUtils.DeoptBundle boundsFallbackAtBCI(
+            PEATestUtils.IRBody body, int bci) {
+        return body.deoptBundleAtCall(
+                DEOPTIMIZE_I64,
+                uniqueCallOccurrenceAtBCI(body, DEOPTIMIZE_I64, bci));
+    }
+
+    private static int uniqueCallOccurrenceAtBCI(
+            PEATestUtils.IRBody body, String callee, int bci) {
+        List<Integer> occurrences = body.callOccurrencesAtBCI(callee, bci);
+        Asserts.assertEquals(occurrences.size(), 1,
+                body.methodId() + ": exact fallback BCI " + bci);
+        return occurrences.get(0);
+    }
+
+    private static NestedStoreShape findNestedStoreShape(
+            PEATestUtils.IRBody body, String expectedArray, String expectedChild,
+            int arrayOffset, int childOffset, String expectedChildValue,
+            Method target) {
+        record Candidate(
+                String sourceIndex, String array, String child,
+                String symbolicStore) {}
+
+        List<String> lines = body.lines();
+        ArrayList<Candidate> candidates = new ArrayList<>();
+        Pattern indexedGEP = Pattern.compile("^(" + LLVM_LOCAL
+                + ") = getelementptr" + GEP_FLAGS + " ptr addrspace\\(1\\), "
+                + "ptr addrspace\\(1\\) (" + LLVM_LOCAL + "), "
+                + "i(?:32|64) (" + LLVM_LOCAL + ")(?:, .*)?$");
+        for (String line : lines) {
+            Matcher indexed = indexedGEP.matcher(line);
+            if (!indexed.matches()) {
+                continue;
+            }
+            String array = directByteGEPOwner(
+                    lines, indexed.group(2), arrayOffset);
+            if (array == null
+                    || expectedArray != null && !expectedArray.equals(array)) {
+                continue;
+            }
+            String sourceIndex = sourceIndex(lines, indexed.group(3));
+            if (findBoundsComparisons(lines, sourceIndex).size() != 1) {
+                continue;
+            }
+            Pattern store = Pattern.compile(
+                    "^store atomic ptr addrspace\\(1\\) (" + LLVM_LOCAL
+                    + "), ptr addrspace\\(1\\) "
+                    + Pattern.quote(indexed.group(1))
+                    + " unordered, align \\d+(?:, .*)?$");
+            for (String storeLine : lines) {
+                Matcher matcher = store.matcher(storeLine);
+                if (matcher.matches()
+                        && (expectedChild == null
+                                || expectedChild.equals(matcher.group(1)))) {
+                    candidates.add(new Candidate(
+                            sourceIndex, array, matcher.group(1), storeLine));
+                }
+            }
+        }
+        Asserts.assertEquals(candidates.size(), 1,
+                target + ": one symbolic-index store bound to the nested allocations");
+        Candidate candidate = candidates.get(0);
+
+        String childReplay = uniqueReplayStore(
+                body, candidate.child(), childOffset,
+                expectedChildValue == null ? null : "i32 " + scalarValue(
+                        expectedChildValue, "i32", target),
+                null, "child.value", target);
+        String arrayReplay = uniqueReplayStore(
+                body, candidate.array(), arrayOffset,
+                "ptr addrspace(1) " + candidate.child(),
+                candidate.symbolicStore(), "array[0]", target);
+        if (expectedChildValue != null) {
+            Asserts.assertTrue(childReplay.startsWith(
+                            "store atomic " + expectedChildValue + ","),
+                    target + ": child.value replay preserves the descriptor operand");
+        }
+        PEATestUtils.IRBlock childReplayBlock =
+                body.blockContaining(childReplay, 0);
+        PEATestUtils.IRBlock arrayReplayBlock =
+                body.blockContaining(arrayReplay, 0);
+        PEATestUtils.IRBlock consumer =
+                body.blockContaining(candidate.symbolicStore(), 0);
+        assertOrderInSharedBlock(
+                childReplayBlock, childReplay, arrayReplayBlock, arrayReplay,
+                target + ": child replay precedes array replay");
+        assertOrderInSharedBlock(
+                arrayReplayBlock, arrayReplay, consumer, candidate.symbolicStore(),
+                target + ": array replay precedes the symbolic store");
+        return new NestedStoreShape(
+                candidate.sourceIndex(), childReplay, arrayReplay,
+                candidate.symbolicStore(),
+                childReplayBlock, arrayReplayBlock, consumer);
+    }
+
+    private static String scalarValue(
+            String typedOperand, String expectedType, Method target) {
+        String prefix = expectedType + " ";
+        Asserts.assertTrue(typedOperand.startsWith(prefix),
+                target + ": scalar descriptor operand has type " + expectedType);
+        return typedOperand.substring(prefix.length());
+    }
+
+    private static String directByteGEPOwner(
+            List<String> lines, String result, int offset) {
+        Pattern definition = Pattern.compile("^" + Pattern.quote(result)
+                + " = getelementptr" + GEP_FLAGS
+                + " i8, ptr addrspace\\(1\\) ("
+                + LLVM_LOCAL + "), i(?:32|64) " + offset + "(?:, .*)?$");
+        String owner = null;
+        for (String line : lines) {
+            Matcher matcher = definition.matcher(line);
+            if (matcher.matches()) {
+                if (owner != null) {
+                    throw new AssertionError(
+                            "Ambiguous byte-GEP definition for " + result);
+                }
+                owner = matcher.group(1);
+            }
+        }
+        return owner;
+    }
+
+    private static String sourceIndex(List<String> lines, String index) {
+        Pattern extension = Pattern.compile("^" + Pattern.quote(index)
+                + " = (?:zext(?: nneg)?|sext) i32 (" + LLVM_LOCAL
+                + ") to i64(?:, .*)?$");
+        String source = null;
+        for (String line : lines) {
+            Matcher matcher = extension.matcher(line);
+            if (matcher.matches()) {
+                if (source != null) {
+                    throw new AssertionError(
+                            "Ambiguous symbolic-index definition for " + index);
+                }
+                source = matcher.group(1);
+            }
+        }
+        return source == null ? index : source;
+    }
+
+    private static List<String> findBoundsComparisons(
+            List<String> lines, String sourceIndex) {
+        Pattern compare = Pattern.compile("^(" + LLVM_LOCAL
+                + ") = icmp ult i32 " + Pattern.quote(sourceIndex)
+                + ", 4(?:, .*)?$");
+        return lines.stream().filter(line -> compare.matcher(line).matches()).toList();
+    }
+
+    private static PEATestUtils.IRBlock findExactBoundsBlock(
+            PEATestUtils.IRBody body, String sourceIndex, Method target) {
+        List<String> comparisons = findBoundsComparisons(body.lines(), sourceIndex);
+        Asserts.assertEquals(comparisons.size(), 1,
+                target + ": one bounds comparison for the symbolic source index");
+        PEATestUtils.IRBlock bounds = body.blockContaining(comparisons.get(0), 0);
+        Matcher result = Pattern.compile("^(" + LLVM_LOCAL + ") = ")
+                .matcher(comparisons.get(0));
+        Asserts.assertTrue(result.find(),
+                target + ": bounds comparison has an SSA result");
+        bounds.assertOccurrenceCount(comparisons.get(0), 1);
+        bounds.assertOccurrenceCount("br i1 " + result.group(1) + ",", 1);
+        return bounds;
+    }
+
+    private static String uniqueReplayStore(
+            PEATestUtils.IRBody body, String owner, int offset,
+            String exactTypedValue, String excludedStore,
+            String detail, Method target) {
+        Pattern gep = Pattern.compile("^(" + LLVM_LOCAL
+                + ") = getelementptr" + GEP_FLAGS
+                + " i8, ptr addrspace\\(1\\) "
+                + Pattern.quote(owner) + ", i(?:32|64) " + offset
+                + "(?:, .*)?$");
+        ArrayList<String> matches = new ArrayList<>();
+        for (String line : body.lines()) {
+            Matcher slot = gep.matcher(line);
+            if (!slot.matches()) {
+                continue;
+            }
+            Pattern store = exactTypedValue == null
+                    ? Pattern.compile("^store atomic i32 .+, ptr addrspace\\(1\\) "
+                            + Pattern.quote(slot.group(1))
+                            + " unordered, align \\d+(?:, .*)?$")
+                    : Pattern.compile("^store atomic "
+                            + Pattern.quote(exactTypedValue)
+                            + ", ptr addrspace\\(1\\) "
+                            + Pattern.quote(slot.group(1))
+                            + " unordered, align \\d+(?:, .*)?$");
+            body.lines().stream().filter(candidate -> store.matcher(candidate).matches())
+                    .filter(candidate -> !candidate.equals(excludedStore))
+                    .forEach(matches::add);
+        }
+        Asserts.assertEquals(matches.size(), 1,
+                target + ": one exact replay store for " + detail);
+        return matches.get(0);
+    }
+
+    private static void assertOrderInSharedBlock(
+            PEATestUtils.IRBlock earlierBlock, String earlier,
+            PEATestUtils.IRBlock laterBlock, String later, String detail) {
+        if (earlierBlock.label().equals(laterBlock.label())) {
+            earlierBlock.assertBefore(earlier, 0, later, 0);
+        }
+    }
+
+    private static void assertNestedConditionalTargets(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock bounds,
+            NestedStoreShape shape, PEATestUtils.IRBlock fallback,
+            boolean exactStoresOnly) {
+        List<String> targets = bounds.conditionalBranchTargets();
+        Asserts.assertNotEquals(targets.get(0), targets.get(1),
+                body.methodId() + ": nested bounds targets are distinct");
+        bounds.assertAbsent(DEOPTIMIZE);
+        bounds.assertAbsent(LOWERED_DEOPTIMIZE);
+        fallback.assertAbsent("store atomic");
+        fallback.assertAbsent("load atomic");
+        assertNestedSuccessPath(
+                body, targets.get(0), shape, exactStoresOnly);
+        assertForwardingEdgeReaches(body, targets.get(1), fallback,
+                "nested bounds false edge reaches the exact fallback");
+    }
+
+    private static void assertNestedSuccessPath(
+            PEATestUtils.IRBody body, String start, NestedStoreShape shape,
+            boolean exactStoresOnly) {
+        record State(String label, int milestone) {}
+        List<PEATestUtils.IRBlock> milestones = List.of(
+                shape.childReplayBlock(), shape.arrayReplayBlock(), shape.consumer());
+        Set<String> allowedStores = Set.of(
+                shape.childReplay(), shape.arrayReplay(), shape.symbolicStore());
+        ArrayDeque<State> pending = new ArrayDeque<>();
+        HashSet<State> visited = new HashSet<>();
+        pending.add(new State(start, 0));
+        while (!pending.isEmpty()) {
+            State state = pending.removeFirst();
+            if (!visited.add(state)) {
+                continue;
+            }
+            PEATestUtils.IRBlock block = body.blockByLabel(state.label());
+            if (block.lines().stream().anyMatch(
+                    line -> line.contains(DEOPTIMIZE)
+                            || line.contains(LOWERED_DEOPTIMIZE))) {
+                continue;
+            }
+            if (exactStoresOnly && block.lines().stream()
+                    .filter(line -> line.startsWith("store "))
+                    .anyMatch(line -> !allowedStores.contains(line))) {
+                continue;
+            }
+            int milestone = state.milestone();
+            while (milestone < milestones.size()
+                    && block.label().equals(milestones.get(milestone).label())) {
+                milestone++;
+            }
+            if (milestone == milestones.size()) {
+                return;
+            }
+            for (String successor : branchTargets(block)) {
+                pending.addLast(new State(successor, milestone));
+            }
+        }
+        throw new AssertionError(body.methodId()
+                + ": exact nested replay and symbolic store are not reachable "
+                + "from the matching bounds-success edge");
+    }
+
+    private static List<String> branchTargets(PEATestUtils.IRBlock block) {
+        try {
+            return block.conditionalBranchTargets();
+        } catch (IllegalStateException notConditional) {
+            try {
+                return List.of(block.unconditionalBranchTarget());
+            } catch (IllegalStateException notUnconditional) {
+                return List.of();
+            }
+        }
     }
 
     private static PEATestUtils.PEAReport assertOriginalMaterialization(
@@ -282,22 +632,6 @@ public class TestSymbolicIndexStorePEA {
         }
     }
 
-    private static void assertFinalBoundsFallbackDirect(
-            PEATestUtils.IRBody finalIR, PEATestUtils.IRBlock success) {
-        finalIR.assertOccurrenceCount(BOUNDS_COMPARE, 1);
-        finalIR.assertOccurrenceCount(LOWERED_DEOPTIMIZE, 1);
-        PEATestUtils.IRBlock bounds = finalIR.blockContaining(BOUNDS_COMPARE, 0);
-        PEATestUtils.IRBlock fallback =
-                finalIR.blockContaining(LOWERED_DEOPTIMIZE, 0);
-        List<String> targets = bounds.conditionalBranchTargets();
-        Asserts.assertEquals(targets.get(0), success.label(),
-                finalIR.methodId() + ": final true edge reaches the nested consumer");
-        Asserts.assertEquals(targets.get(1), fallback.label(),
-                finalIR.methodId() + ": final false edge reaches the bounds fallback");
-        Asserts.assertNotEquals(targets.get(0), targets.get(1),
-                finalIR.methodId() + ": final bounds targets are distinct");
-    }
-
     private static void assertConditionalTargets(
             PEATestUtils.IRBody body, PEATestUtils.IRBlock bounds,
             PEATestUtils.IRBlock success, PEATestUtils.IRBlock fallback) {
@@ -320,7 +654,7 @@ public class TestSymbolicIndexStorePEA {
             if (block.label().equals(expected.label())) {
                 return;
             }
-            label = block.unconditionalBranchTarget();
+            label = block.emptyForwardingTarget();
         }
         throw new AssertionError(body.methodId() + ": cyclic forwarding edge: " + detail);
     }
