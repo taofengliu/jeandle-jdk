@@ -31,7 +31,6 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -492,65 +491,148 @@ public class TestSymbolicIndexStorePEA {
         fallback.assertAbsent("store atomic");
         fallback.assertAbsent("load atomic");
         assertNestedSuccessPath(
-                body, targets.get(0), shape, exactStoresOnly);
+                body, targets.get(0), shape, fallback, exactStoresOnly);
         assertForwardingEdgeReaches(body, targets.get(1), fallback,
                 "nested bounds false edge reaches the exact fallback");
     }
 
     private static void assertNestedSuccessPath(
             PEATestUtils.IRBody body, String start, NestedStoreShape shape,
-            boolean exactStoresOnly) {
+            PEATestUtils.IRBlock fallback, boolean exactStoresOnly) {
         record State(String label, int milestone) {}
         List<PEATestUtils.IRBlock> milestones = List.of(
                 shape.childReplayBlock(), shape.arrayReplayBlock(), shape.consumer());
         Set<String> allowedStores = Set.of(
                 shape.childReplay(), shape.arrayReplay(), shape.symbolicStore());
-        ArrayDeque<State> pending = new ArrayDeque<>();
-        HashSet<State> visited = new HashSet<>();
-        pending.add(new State(start, 0));
-        while (!pending.isEmpty()) {
-            State state = pending.removeFirst();
-            if (!visited.add(state)) {
-                continue;
-            }
-            PEATestUtils.IRBlock block = body.blockByLabel(state.label());
-            if (block.lines().stream().anyMatch(
-                    line -> line.contains(DEOPTIMIZE)
-                            || line.contains(LOWERED_DEOPTIMIZE))) {
-                continue;
-            }
-            if (exactStoresOnly && block.lines().stream()
-                    .filter(line -> line.startsWith("store "))
-                    .anyMatch(line -> !allowedStores.contains(line))) {
-                continue;
-            }
-            int milestone = state.milestone();
-            while (milestone < milestones.size()
-                    && block.label().equals(milestones.get(milestone).label())) {
-                milestone++;
-            }
-            if (milestone == milestones.size()) {
-                return;
-            }
-            for (String successor : branchTargets(block)) {
-                pending.addLast(new State(successor, milestone));
+
+        class AllPaths {
+            private final HashSet<State> visiting = new HashSet<>();
+            private final HashSet<State> verified = new HashSet<>();
+            private boolean completedTermination;
+
+            private void verify(State state) {
+                if (verified.contains(state)) {
+                    return;
+                }
+                if (!visiting.add(state)) {
+                    if (state.milestone() < milestones.size()) {
+                        throw new AssertionError(body.methodId()
+                                + ": nested bounds-success path cycles before "
+                                + "all replay/store milestones");
+                    }
+                    return;
+                }
+
+                PEATestUtils.IRBlock block = body.blockByLabel(state.label());
+                if (block.label().equals(fallback.label())) {
+                    throw new AssertionError(body.methodId()
+                            + ": nested bounds-success path reaches "
+                            + "the exact bounds fallback");
+                }
+                if (block.lines().stream().anyMatch(
+                        line -> line.contains(DEOPTIMIZE)
+                                || line.contains(LOWERED_DEOPTIMIZE))) {
+                    throw new AssertionError(body.methodId()
+                            + ": nested bounds-success path reaches deopt in block "
+                            + block.label());
+                }
+                if (exactStoresOnly && block.lines().stream()
+                        .filter(line -> line.startsWith("store "))
+                        .anyMatch(line -> !allowedStores.contains(line))) {
+                    throw new AssertionError(body.methodId()
+                            + ": nested bounds-success path contains an "
+                            + "unexpected store in block " + block.label());
+                }
+
+                int milestone = state.milestone();
+                for (int i = 0; i < milestones.size(); i++) {
+                    if (!block.label().equals(milestones.get(i).label())) {
+                        continue;
+                    }
+                    if (i != milestone) {
+                        throw new AssertionError(body.methodId()
+                                + ": nested replay/store milestone " + i
+                                + " is reached out of order in block "
+                                + block.label());
+                    }
+                    milestone++;
+                }
+
+                List<String> successors = branchTargets(body, block);
+                if (successors.isEmpty()) {
+                    if (milestone != milestones.size()) {
+                        throw new AssertionError(body.methodId()
+                                + ": nested bounds-success path terminates before "
+                                + "all replay/store milestones");
+                    }
+                    completedTermination = true;
+                } else {
+                    for (String successor : successors) {
+                        verify(new State(successor, milestone));
+                    }
+                }
+                visiting.remove(state);
+                verified.add(state);
             }
         }
-        throw new AssertionError(body.methodId()
-                + ": exact nested replay and symbolic store are not reachable "
-                + "from the matching bounds-success edge");
+
+        AllPaths paths = new AllPaths();
+        paths.verify(new State(start, 0));
+        Asserts.assertTrue(paths.completedTermination,
+                body.methodId() + ": nested bounds-success CFG has "
+                        + "a completed normal termination");
     }
 
-    private static List<String> branchTargets(PEATestUtils.IRBlock block) {
+    private static List<String> branchTargets(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block) {
         try {
             return block.conditionalBranchTargets();
         } catch (IllegalStateException notConditional) {
             try {
                 return List.of(block.unconditionalBranchTarget());
             } catch (IllegalStateException notUnconditional) {
-                return List.of();
+                String terminator = lastSemanticInstruction(block);
+                if (terminator.startsWith("ret ")) {
+                    return List.of();
+                }
+                // This jtreg oracle deliberately admits only the current
+                // br-based shape instead of silently approximating a partial
+                // parser for invoke, switch, and the other LLVM terminators.
+                throw new AssertionError(body.methodId() + ": unsupported or malformed "
+                        + "terminator in block " + block.label() + ": " + terminator);
             }
         }
+    }
+
+    private static String lastSemanticInstruction(PEATestUtils.IRBlock block) {
+        List<String> lines = block.lines();
+        for (int i = lines.size() - 1; i > 0; i--) {
+            String line = stripLLVMComment(lines.get(i)).strip();
+            if (!line.isEmpty() && !line.startsWith("#dbg_")) {
+                return line;
+            }
+        }
+        throw new AssertionError("Block " + block.label()
+                + " contains no terminator");
+    }
+
+    private static String stripLLVMComment(String line) {
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (quoted) {
+                if (ch == '\\') {
+                    i++;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+            } else if (ch == '"') {
+                quoted = true;
+            } else if (ch == ';') {
+                return line.substring(0, i);
+            }
+        }
+        return line;
     }
 
     private static PEATestUtils.PEAReport assertOriginalMaterialization(
