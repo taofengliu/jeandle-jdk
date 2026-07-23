@@ -511,6 +511,9 @@ public class TestPEANonVirtualizableInstances {
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
             Object strong = new Object();
+            Object valueBasedAlternate = Integer.valueOf(42);
+            Asserts.assertEquals(valueBasedAlternate.getClass(), Integer.class,
+                    "monitor alternate is a value-based Integer");
             long digest = 0xC2B2AE3D27D4EB4FL;
             boolean executeValueBasedMonitor = !Boolean.getBoolean(SHAPE_RUN_PROPERTY);
             for (int value : new int[] {0, 7, -29, 0x12345678}) {
@@ -557,7 +560,7 @@ public class TestPEANonVirtualizableInstances {
                 digest = mix(digest, observed.value);
 
                 if (executeValueBasedMonitor) {
-                    int valueBasedResult = testValueBasedMonitor(value, strong);
+                    int valueBasedResult = testValueBasedMonitor(value, valueBasedAlternate);
                     Asserts.assertEquals(valueBasedResult, value ^ 0x5A5A5A5A,
                             "value-based monitor check preserves monitor semantics");
                     digest = mix(digest, valueBasedResult);
