@@ -49,6 +49,8 @@ public class TestPEASharedObjectGraph {
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
     private static final Pattern JAVA_KLASS =
             Pattern.compile("\"java-klass\"=\"([0-9]+)\"");
+    private static final String LLVM_LOCAL =
+            "(?:%[-A-Za-z$._0-9]+|%\"(?:[^\"\\\\]|\\\\.)*\")";
 
     public static void main(String[] args) throws Exception {
         Method deopt = TestWrapper.class.getMethod(
@@ -126,10 +128,31 @@ public class TestPEASharedObjectGraph {
         String callee =
                 PEATestUtils.MethodId.of(consumeParent).llvmFunctionName();
         PEATestUtils.IRBlock callBlock = after.blockContaining(callee, 0);
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+        String sourceChild = allocations.get(0).result();
+        String sourceFirstParent = allocations.get(1).result();
+        String child = allocationResult(after, allocations.get(0).key());
+        String firstParent =
+                allocationResult(after, allocations.get(1).key());
+        int childValueOffset = offset(TestWrapper.Child.class, "value");
+        int parentValueOffset = offset(TestWrapper.Parent.class, "value");
+        int parentChildOffset = offset(TestWrapper.Parent.class, "child");
+        assertSourceStore(before, sourceChild, childValueOffset, "i32");
+        assertSourceStore(
+                before, sourceFirstParent, parentValueOffset, "i32");
         callBlock.assertAbsent("jeandle.new_instance");
-        Asserts.assertTrue(callBlock.occurrenceCount("store atomic") >= 3,
-                target + ": child and first-parent fields replay before escape");
-        callBlock.assertBefore("store atomic", 2, callee, 0);
+        assertReplayStore(after, callBlock, child, childValueOffset,
+                "i32", null, callee);
+        assertReplayStore(after, callBlock, firstParent, parentValueOffset,
+                "i32", null, callee);
+        assertReplayStore(after, callBlock, firstParent, parentChildOffset,
+                "ptr addrspace(1)", child, callee);
+        callBlock.assertOccurrenceCount("getelementptr", 3);
+        callBlock.assertOccurrenceCount("store atomic", 3);
+        callBlock.assertOccurrenceCount("store atomic i32", 2);
+        callBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 1);
+        callBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + child + ",", 1);
     }
 
     private static PEATestUtils.RunBuilder runBuilder(
@@ -322,13 +345,22 @@ public class TestPEASharedObjectGraph {
         String callee =
                 PEATestUtils.MethodId.of(consumeParent).llvmFunctionName();
         PEATestUtils.IRBlock callBlock = after.blockContaining(callee, 0);
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+        String sourceParent = allocations.get(1).result();
+        String parentResult =
+                allocationResult(after, allocations.get(1).key());
+        int childOffset = offset(TestWrapper.Parent.class, "child");
+        int valueOffset = offset(TestWrapper.Parent.class, "value");
+        assertSourceStore(before, sourceParent, valueOffset, "i32");
         callBlock.assertAbsent("jeandle.new_instance");
-        callBlock.assertOccurrenceCount(
-                "store atomic ptr addrspace(1) null", 1);
-        callBlock.assertBefore(
-                "store atomic ptr addrspace(1) null", 0, callee, 0);
+        assertReplayStore(after, callBlock, parentResult, childOffset,
+                "ptr addrspace(1)", "null", callee);
+        assertReplayStore(after, callBlock, parentResult, valueOffset,
+                "i32", null, callee);
+        callBlock.assertOccurrenceCount("getelementptr", 2);
+        callBlock.assertOccurrenceCount("store atomic", 2);
+        callBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 1);
         callBlock.assertOccurrenceCount("store atomic i32", 1);
-        callBlock.assertBefore("store atomic i32", 0, callee, 0);
     }
 
     private static List<PEATestUtils.AllocationKey> assertExactSourceAllocations(
@@ -476,6 +508,100 @@ public class TestPEASharedObjectGraph {
             PEATestUtils.IRBlock block, String owner, int offset) {
         block.assertOccurrenceCount(
                 "ptr addrspace(1) " + owner + ", i64 " + offset, 1);
+    }
+
+    private static void assertSourceStore(
+            PEATestUtils.IRBody body, String owner, int offset, String type) {
+        Pattern gep = gepPattern(owner, offset);
+        java.util.HashSet<String> slots = new java.util.HashSet<>();
+        List<String> lines = body.lines();
+        for (String line : lines) {
+            Matcher matcher = gep.matcher(line);
+            if (matcher.matches()) {
+                slots.add(matcher.group(1));
+            }
+        }
+        Asserts.assertTrue(!slots.isEmpty(),
+                body.methodId() + ": source GEP for " + owner
+                        + " at offset " + offset);
+
+        int stores = 0;
+        for (String line : lines) {
+            for (String slot : slots) {
+                Pattern store = Pattern.compile("^store atomic "
+                        + Pattern.quote(type)
+                        + " (.+), ptr addrspace\\(1\\) "
+                        + Pattern.quote(slot)
+                        + " unordered, align \\d+(?:, .*)?$");
+                if (store.matcher(line).matches()) {
+                    stores++;
+                }
+            }
+        }
+        Asserts.assertTrue(stores > 0,
+                body.methodId() + ": typed source store for " + owner
+                        + " at offset " + offset);
+    }
+
+    private static void assertReplayStore(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
+            String owner, int offset, String type, String value,
+            String consumer) {
+        List<String> lines = block.lines();
+        Pattern gep = gepPattern(owner, offset);
+        java.util.ArrayList<String> slots = new java.util.ArrayList<>();
+        for (String line : lines) {
+            Matcher matcher = gep.matcher(line);
+            if (matcher.matches()) {
+                slots.add(matcher.group(1));
+            }
+        }
+        Asserts.assertEquals(slots.size(), 1,
+                body.methodId() + ": one replay GEP for " + owner
+                        + " at offset " + offset);
+        String store;
+        if (value != null) {
+            store = "store atomic " + type + " " + value
+                    + ", ptr addrspace(1) " + slots.get(0);
+            block.assertOccurrenceCount(store, 1);
+        } else {
+            Pattern pattern = Pattern.compile("^store atomic "
+                    + Pattern.quote(type)
+                    + " .+, ptr addrspace\\(1\\) "
+                    + Pattern.quote(slots.get(0))
+                    + " unordered, align \\d+(?:, .*)?$");
+            java.util.ArrayList<String> stores = new java.util.ArrayList<>();
+            for (String line : lines) {
+                if (pattern.matcher(line).matches()) {
+                    stores.add(line);
+                }
+            }
+            Asserts.assertEquals(stores.size(), 1,
+                    body.methodId() + ": one scalar replay store through "
+                            + slots.get(0));
+            store = stores.get(0);
+        }
+        block.assertBefore(store, 0, consumer, 0);
+    }
+
+    private static Pattern gepPattern(String owner, int offset) {
+        return Pattern.compile("^(" + LLVM_LOCAL
+                + ") = getelementptr(?: inbounds)?(?: nusw)?(?: nuw)?"
+                + "(?: inrange\\(-?\\d+, -?\\d+\\))?"
+                + " i8, ptr addrspace\\(1\\) "
+                + Pattern.quote(owner) + ", i64 " + offset
+                + "(?:, ![-A-Za-z$._0-9]+ ![^,\\s]+)*$");
+    }
+
+    private static String allocationResult(
+            PEATestUtils.IRBody body, PEATestUtils.AllocationKey key) {
+        List<String> results = body.allocations().stream()
+                .filter(site -> site.key().equals(key))
+                .map(PEATestUtils.AllocationSite::result)
+                .toList();
+        Asserts.assertEquals(results.size(), 1,
+                body.methodId() + ": one allocation for " + key);
+        return results.get(0);
     }
 
     private static void assertUniqueCall(
