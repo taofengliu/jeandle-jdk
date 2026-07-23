@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, The Jeandle-JDK Authors. All Rights Reserved.
+ * Copyright (c) 2026, the Jeandle-JDK Authors. All Rights Reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -12,136 +12,252 @@
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
  *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this work; if not, write to the Free Software Foundation,
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 /*
  * @test
- * @summary PEA PartiallyEscapes object with a TOUCHED long field kept
- *          virtual at a null-check safepoint. The VO descriptor must carry
- *          the long field (one wire entry enc(offset, LocalType, T_LONG) +
- *          the i64 value), and the HotSpot parse must expand it to the two
- *          field_values slots reassign_fields_by_klass consumes
- *          (ConstantIntValue(0) hi placeholder + ConstantLongValue lo). A
- *          broken two-slot expansion mis-aligns field_values and crashes
- *          reassign_fields_by_klass (assert "Agreement" / out-of-bounds) at
- *          deopt. Validates the long-field parse end-to-end.
+ * @summary PEA reconstructs typed long and double fields for both runtime
+ *          branches of a partial escape, then observes their full-width values
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPartialEscapeDeoptLongField
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Set;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestPartialEscapeDeoptLongField {
-    // A distinctive 64-bit value whose high 32 bits are non-zero, so a
-    // mis-reconstruction that only keeps the low half (e.g. a wrong slot
-    // consumed by long_field_put) is observable. 0x123456789ABCDEF0L.
-    static final long MARK = 0x123456789ABCDEF0L;
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestPartialEscapeDeoptLongField$TestWrapper";
+    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
 
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestPartialEscapeDeoptLongField$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                "-XX:CompileCommand=dontinline," + wrapper + "::sink",
-                wrapper));
+        Method partialFalse = TestWrapper.class.getMethod(
+                "testPartialFalse", boolean.class, long.class, double.class);
+        Method partialTrue = TestWrapper.class.getMethod(
+                "testPartialTrue", boolean.class, long.class, double.class);
+        Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
+        Method sink = TestWrapper.class.getDeclaredMethod(
+                "sink", TestWrapper.Point.class);
+        Method[] targets = {partialFalse, partialTrue};
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+        runBuilder(false, targets, requestDeopt, sink)
+                .runPEAOnOffEquivalent();
 
-        // p is PartiallyEscapes: escapes via sink(p) on escape==true, so PEA
-        // keeps the allocation; but at the other.x null-check safepoint p is
-        // still virtual, so the deopt bundle's p slot is rewritten to a VORef
-        // + ScalarValueType descriptor carrying BOTH fields, including the
-        // touched long field.
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test",
-                        TestWrapper.Point.class, boolean.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc .*test.*");
-        // PartiallyEscapes => allocation retained as @new_instance.
-        checker.check("new_instance");
-        // ScalarValueType VO descriptor header (vo_id 0):
-        // (0<<32)|(4<<16)|T_OBJECT(12) = 262156, and the OrigAlloc locals
-        // slot replaced by a VORefLocalType reference (vo_id=0):
-        // (0<<32)|(8<<16)|12 = 524300. Both encodings sit on the SAME
-        // null-check deopt-bundle line (descriptor first, VORef slot after),
-        // so match them with one pattern (FileCheck advances a whole line
-        // per successful check).
-        checker.checkPattern("262156.*524300");
+        try (PEATestUtils.RunResult run =
+                runBuilder(true, targets, requestDeopt, sink).run()) {
+            assertPartialShape(run, partialFalse, requestDeopt);
+            assertPartialShape(run, partialTrue, requestDeopt);
+        }
+    }
 
-        // Non-deopt path returns p.x (int 10) is not used; we return p.lx +
-        // ox. With p.lx = MARK and some.x = 0, the low 32 bits of MARK are
-        // 0x9ABCDEF0 = -1698898192 (signed), so the int return truncates.
-        // To keep the assertion stable we return a small int derived only
-        // from p.x + ox (p.lx is reconstructed at deopt but its value is
-        // observed via the deopt reconstruction not crashing).
-        output.shouldContain("TestPartialEscapeDeoptLongField result: 10");
-        // test(null, false): null-check deopt at other.x reconstructs p (x=10,
-        // lx=MARK) from the VO descriptor -- a malformed long two-slot
-        // expansion in the parse crashes reassign_fields_by_klass here.
-        output.shouldContain("TestPartialEscapeDeoptLongField deopt: NPE");
+    private static PEATestUtils.RunBuilder runBuilder(
+            boolean shape, Method[] targets, Method requestDeopt, Method sink) {
+        PEATestUtils.RunBuilder builder = shape
+                ? PEATestUtils.shapeRun(WRAPPER, targets)
+                : PEATestUtils.behaviorRun(WRAPPER, targets);
+        return builder.dontinline(requestDeopt).dontinline(sink);
+    }
+
+    private static void assertPartialShape(
+            PEATestUtils.RunResult run, Method target, Method requestDeopt)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        List<Integer> sourceBCIs = report.round0Before().allocationBCIs();
+        Asserts.assertEquals(sourceBCIs.size(), 1,
+                target + ": one source Point allocation");
+        PEATestUtils.PEARound firstRound = report.round(0);
+        Asserts.assertEquals(firstRound.neverEscapes(), 0);
+        Asserts.assertEquals(firstRound.partiallyEscapes(), 1);
+        Asserts.assertEquals(firstRound.alwaysEscapes(), 0);
+        Asserts.assertEquals(report.finalAfter().allocationBCIs(), sourceBCIs,
+                target + ": exact source OrigAlloc retained");
+        Asserts.assertEquals(report.finalAfter().peaAllocCount(), 1);
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1);
+
+        String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        PEATestUtils.DeoptBundle bundle =
+                report.finalAfter().deoptBundleAtCall(callee, 0);
+        bundle.assertVirtualObjectIds(0);
+        PEATestUtils.VirtualObjectDescriptor point = bundle.virtualObject(0);
+        Asserts.assertEquals(point.kind(), PEATestUtils.DescriptorKind.INSTANCE);
+        int xOffset = fieldOffset("x");
+        int longOffset = fieldOffset("longValue");
+        int doubleOffset = fieldOffset("doubleValue");
+        Asserts.assertEquals(point.fields().keySet(),
+                Set.of(xOffset, longOffset, doubleOffset),
+                target + ": exact int/long/double descriptor");
+        assertScalar(point, xOffset, PEATestUtils.DeoptBasicType.INT, "i32 ");
+        assertScalar(point, longOffset, PEATestUtils.DeoptBasicType.LONG, "i64 ");
+        assertScalar(point, doubleOffset,
+                PEATestUtils.DeoptBasicType.DOUBLE, "double ");
+        Asserts.assertEquals(point.fields().get(xOffset).value().operand(), "i32 10");
+    }
+
+    private static int fieldOffset(String name) throws Exception {
+        return Math.toIntExact(UNSAFE.objectFieldOffset(
+                TestWrapper.Point.class.getDeclaredField(name)));
+    }
+
+    private static void assertScalar(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            int offset, PEATestUtils.DeoptBasicType type, String operandPrefix) {
+        PEATestUtils.VirtualObjectEntry field = descriptor.fields().get(offset);
+        Asserts.assertNotNull(field);
+        Asserts.assertEquals(field.basicType(), type);
+        Asserts.assertEquals(field.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertTrue(field.value().operand().startsWith(operandPrefix));
     }
 
     public static class TestWrapper {
+        private static final long LONG_VALUE = 0x123456789ABCDEF0L;
+        private static final long DOUBLE_BITS = 0x7FF8123456789ABCL;
+        private static final long ESCAPE_MARK = 0x6A09E667F3BCC909L;
+        private static final Method PARTIAL_FALSE_TARGET =
+                target("testPartialFalse");
+        private static final Method PARTIAL_TRUE_TARGET =
+                target("testPartialTrue");
+
+        private static Method deoptTarget;
+        private static Point global;
+
         public static class Point {
             public int x;
-            public long lx;   // touched long field (two-slot emit + parse)
+            public long longValue;
+            public double doubleValue;
         }
 
-        static Point global;   // opaque escape target
+        public static void main(String[] args) throws Exception {
+            new Point();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+            double doubleValue = Double.longBitsToDouble(DOUBLE_BITS);
 
-        // Not inlined (dontinline); passing p here makes it PartiallyEscapes.
-        static void sink(Point p) { global = p; }
-
-        public static void main(String[] args) {
-            new Point();                  // init klass
-            Point some = new Point();
-            some.x = 0;
-            some.lx = 0L;
-            int r = test(some, false);    // compiles + runs (no deopt)
-            System.out.println("TestPartialEscapeDeoptLongField result: " + r);
-            try {
-                test(null, false);         // null-check deopt at other.x; p live
-                Asserts.fail("expected NPE");
-            } catch (NullPointerException e) {
-                System.out.println("TestPartialEscapeDeoptLongField deopt: NPE");
+            global = null;
+            deoptTarget = PARTIAL_FALSE_TARGET;
+            long noEscape =
+                    testPartialFalse(false, LONG_VALUE, doubleValue);
+            if (global != null) {
+                throw new AssertionError("false branch escaped");
             }
-            Asserts.assertEquals(r, 10);
+
+            global = null;
+            deoptTarget = PARTIAL_TRUE_TARGET;
+            long escape =
+                    testPartialTrue(true, LONG_VALUE, doubleValue);
+            if (global == null || escape != (noEscape ^ ESCAPE_MARK)) {
+                throw new AssertionError("true branch did not retain identity");
+            }
+
+            long payload = Long.rotateLeft(noEscape, 23) ^ escape;
+            System.out.println("PEA-RESULT:" + Long.toUnsignedString(payload, 16));
         }
 
-        // Compiled by Jeandle. p (Point with a long field) escapes via
-        // sink(p) on escape==true (PartiallyEscapes), but p is still virtual
-        // at the other.x safepoint, so PEA emits a VO descriptor for it there
-        // carrying the touched long field lx. The escape flag is a parameter
-        // so PEA cannot fold the escape away.
-        public static int test(Point other, boolean escape) {
-            Point p = new Point();
-            p.x = 10;
-            p.lx = MARK;         // touched long field
-            int ox = other.x;    // null-check safepoint; p virtual here
-            if (escape) sink(p); // escape path -> PartiallyEscapes
-            return p.x + ox;     // returns 10 + ox
+        public static long testPartialFalse(
+                boolean escape, long longValue, double doubleValue) {
+            Point point = new Point();
+            point.x = 10;
+            point.longValue = longValue;
+            point.doubleValue = doubleValue;
+
+            requestDeopt();
+            if (escape) {
+                sink(point);
+            }
+
+            if (point.x != 10 || point.longValue != longValue
+                    || Double.doubleToRawLongBits(point.doubleValue)
+                            != Double.doubleToRawLongBits(doubleValue)
+                    || escape != (global == point)) {
+                return Long.MIN_VALUE + 1;
+            }
+            long result = point.longValue
+                    ^ Double.doubleToRawLongBits(point.doubleValue);
+            point.longValue = 0x0FEDCBA987654321L;
+            point.doubleValue =
+                    Double.longBitsToDouble(0xFFF123456789ABCDL);
+            if (point.longValue != 0x0FEDCBA987654321L
+                    || Double.doubleToRawLongBits(point.doubleValue)
+                            != 0xFFF123456789ABCDL
+                    || escape && global != point) {
+                return Long.MIN_VALUE + 2;
+            }
+            result ^= Long.rotateLeft(point.longValue, 11);
+            result ^= Long.rotateRight(
+                    Double.doubleToRawLongBits(point.doubleValue), 7);
+            return result ^ (global == point ? ESCAPE_MARK : 0L);
+        }
+
+        public static long testPartialTrue(
+                boolean escape, long longValue, double doubleValue) {
+            Point point = new Point();
+            point.x = 10;
+            point.longValue = longValue;
+            point.doubleValue = doubleValue;
+
+            requestDeopt();
+            if (escape) {
+                sink(point);
+            }
+
+            if (point.x != 10 || point.longValue != longValue
+                    || Double.doubleToRawLongBits(point.doubleValue)
+                            != Double.doubleToRawLongBits(doubleValue)
+                    || escape != (global == point)) {
+                return Long.MIN_VALUE + 3;
+            }
+            long result = point.longValue
+                    ^ Double.doubleToRawLongBits(point.doubleValue);
+            point.longValue = 0x0FEDCBA987654321L;
+            point.doubleValue =
+                    Double.longBitsToDouble(0xFFF123456789ABCDL);
+            if (point.longValue != 0x0FEDCBA987654321L
+                    || Double.doubleToRawLongBits(point.doubleValue)
+                            != 0xFFF123456789ABCDL
+                    || escape && global != point) {
+                return Long.MIN_VALUE + 4;
+            }
+            result ^= Long.rotateLeft(point.longValue, 11);
+            result ^= Long.rotateRight(
+                    Double.doubleToRawLongBits(point.doubleValue), 7);
+            return result ^ (global == point ? ESCAPE_MARK : 0L);
+        }
+
+        private static void requestDeopt() {
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(deoptTarget, 2);
+            if (!evidence.frameDeoptimized()
+                    || evidence.compilationLevel() != 4
+                    || evidence.markedNMethods() != 1) {
+                throw new AssertionError("exact active-frame deopt evidence");
+            }
+        }
+
+        private static void sink(Point point) {
+            global = point;
+        }
+
+        private static Method target(String name) {
+            try {
+                return TestWrapper.class.getMethod(
+                        name, boolean.class, long.class, double.class);
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
         }
     }
 }

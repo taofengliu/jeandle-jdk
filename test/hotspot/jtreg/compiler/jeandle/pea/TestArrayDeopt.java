@@ -12,99 +12,144 @@
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
  *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this work; if not, write to the Free Software Foundation,
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 /*
  * @test
- * @summary PEA virtual-array deopt: a never-escaping int[] that is scalar-
- *          replaced is described at a deopt safepoint by a T_ARRAY VO
- *          descriptor (all elements, touched + default); HotSpot reallocates
- *          the array (length derived from the element count) and reassigns the
- *          elements. No crash, correct reconstruction.
+ * @summary PEA reconstructs int[4] {7,0,9,0} in a continuing, exactly
+ *          deoptimized level-4 frame and preserves every slot
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
  *      compiler.jeandle.pea.TestArrayDeopt
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Set;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestArrayDeopt {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestArrayDeopt$TestWrapper";
+
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestArrayDeopt$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                wrapper));
+        Method target = TestWrapper.class.getMethod("test");
+        Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+        PEATestUtils.behaviorRun(WRAPPER, target)
+                .dontinline(requestDeopt)
+                .runPEAOnOffEquivalent();
 
-        // arr (int[4]) never escapes -> scalar-replaced and described by a
-        // T_ARRAY VO descriptor. Header (vo_id 0, ScalarValueType, T_ARRAY(13))
-        // = (0<<32)|(4<<16)|13 = 262157. The descriptor carries all 4 elements
-        // (indices 0,2 default; 1,3 touched), so HotSpot derives length 4.
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test", TestWrapper.Holder.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc i32 .*test.*");
-        checker.check("262157");
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, target)
+                .dontinline(requestDeopt)
+                .run()) {
+            PEATestUtils.PEAReport report = run.report(target);
+            report.assertConverged();
+            Asserts.assertEquals(report.round0Before().allocationBCIs().size(), 1,
+                    "one source int[] allocation");
+            PEATestUtils.PEARound firstRound = report.round(0);
+            Asserts.assertEquals(firstRound.neverEscapes(), 1);
+            Asserts.assertEquals(firstRound.partiallyEscapes(), 0);
+            Asserts.assertEquals(firstRound.alwaysEscapes(), 0);
+            Asserts.assertEquals(report.finalAfter().allocationBCIs(), List.of(),
+                    "NeverEscapes array allocation eliminated");
+            Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                    "no lowered array allocation remains");
 
-        // test(holder) returns arr[1] (100) + arr[3] (400) + holder.h (0) = 500.
-        // test(null) null-check deopts at inp.h with arr virtual; deopt
-        // reallocates arr (length 4) and reassigns its elements, then the
-        // interpreter throws NPE. A broken reconstruction (wrong length / bad
-        // elements) crashes or miscomputes.
-        output.shouldContain("TestArrayDeopt result: 500");
-        output.shouldContain("TestArrayDeopt deopt: NPE");
+            String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+            PEATestUtils.DeoptBundle bundle =
+                    report.finalAfter().deoptBundleAtCall(callee, 0);
+            bundle.assertVirtualObjectIds(0);
+            PEATestUtils.VirtualObjectDescriptor array = bundle.virtualObject(0);
+            Asserts.assertEquals(array.kind(), PEATestUtils.DescriptorKind.ARRAY);
+            int base = Unsafe.ARRAY_INT_BASE_OFFSET;
+            int scale = Unsafe.ARRAY_INT_INDEX_SCALE;
+            Asserts.assertEquals(array.elements().keySet(),
+                    Set.of(base, base + scale, base + 2 * scale, base + 3 * scale),
+                    "exact int[4] descriptor offsets");
+            assertIntElement(array, base, "i32 7");
+            assertIntElement(array, base + scale, "i32 0");
+            assertIntElement(array, base + 2 * scale, "i32 9");
+            assertIntElement(array, base + 3 * scale, "i32 0");
+        }
+    }
+
+    private static void assertIntElement(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            int offset, String operand) {
+        PEATestUtils.VirtualObjectEntry element = descriptor.elements().get(offset);
+        Asserts.assertNotNull(element);
+        Asserts.assertEquals(element.basicType(), PEATestUtils.DeoptBasicType.INT);
+        Asserts.assertEquals(element.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertEquals(element.value().operand(), operand);
     }
 
     public static class TestWrapper {
-        public static class Holder { public int h; }
+        private static final Method DEOPT_TARGET = target();
 
-        public static void main(String[] args) {
-            new Holder();
-            Holder holder = new Holder();
-            holder.h = 0;
-            int r = test(holder);   // compiles + runs (no deopt)
-            System.out.println("TestArrayDeopt result: " + r);
-            try {
-                test(null);          // null-check deopt at inp.h; arr virtual
-                Asserts.fail("expected NPE");
-            } catch (NullPointerException e) {
-                System.out.println("TestArrayDeopt deopt: NPE");
+        public static void main(String[] args) throws Exception {
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+            int result = test();
+            if (result != 0x13570BDF) {
+                throw new AssertionError("array result " + result);
             }
-            Asserts.assertEquals(r, 500);
+            System.out.println("PEA-RESULT:" + Integer.toUnsignedString(result, 16));
         }
 
-        // Compiled by Jeandle. arr (int[4]) never escapes and is scalar-replaced;
-        // only indices 1 and 3 are stored. At the inp.h safepoint arr is virtual
-        // and described by a T_ARRAY descriptor with all 4 elements.
-        public static int test(Holder inp) {
-            int[] arr = new int[4];   // NeverEscapes -> vo_id 0
-            arr[1] = 100;
-            arr[3] = 400;
-            int o = inp.h;            // null-check safepoint; arr virtual
-            return arr[1] + arr[3] + o; // 100 + 400 + 0 = 500
+        public static int test() {
+            int[] array = new int[4];
+            array[0] = 7;
+            array[2] = 9;
+
+            requestDeopt();
+
+            int slot0 = array[0];
+            int slot1 = array[1];
+            int slot2 = array[2];
+            int slot3 = array[3];
+            if (array.length != 4 || slot0 != 7 || slot1 != 0
+                    || slot2 != 9 || slot3 != 0) {
+                return Integer.MIN_VALUE + 1;
+            }
+            array[0] = -1;
+            array[1] = 2;
+            array[2] = -3;
+            array[3] = 4;
+            if (array[0] != -1 || array[1] != 2
+                    || array[2] != -3 || array[3] != 4) {
+                return Integer.MIN_VALUE + 2;
+            }
+            return (slot0 << 28) ^ (slot1 << 20)
+                    ^ (slot2 << 12) ^ slot3 ^ 0x63579BDF;
+        }
+
+        private static void requestDeopt() {
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(DEOPT_TARGET, 2);
+            if (!evidence.frameDeoptimized()
+                    || evidence.compilationLevel() != 4
+                    || evidence.markedNMethods() != 1) {
+                throw new AssertionError("exact active-frame deopt evidence");
+            }
+        }
+
+        private static Method target() {
+            try {
+                return TestWrapper.class.getMethod("test");
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
         }
     }
 }
