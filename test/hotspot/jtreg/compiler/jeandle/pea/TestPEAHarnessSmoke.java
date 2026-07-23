@@ -186,6 +186,12 @@ public class TestPEAHarnessSmoke {
                 () -> body.deoptBundleAtCall("exact.site.extra", 0));
         expectFailure("negative exact call occurrence",
                 () -> body.deoptBundleAtCall("exact.site", -1));
+
+        PEATestUtils.IRBody indirect = bodyWithInstructions(id,
+                "call void %fp(ptr @exact.site) [ " + deoptBundle(71) + " ]",
+                "ret i32 1");
+        expectFailure("indirect call argument is not the callee",
+                () -> indirect.deoptBundleAtCall("exact.site", 0));
     }
 
     private static void testMalformedDeoptBundles(Method method) {
@@ -207,6 +213,14 @@ public class TestPEAHarnessSmoke {
         expectDeoptFailure(id, "unknown value encoding",
                 "\"deopt\"(i64 0, i32 1, i32 1, "
                         + typed(0, 2, 10) + ", i32 7)");
+        for (int valueType : List.of(0, 1)) {
+            String section = valueType == 0 ? "local" : "stack";
+            for (int basicType : List.of(14, 16, 17, 18)) {
+                expectDeoptFailure(id, "illegal " + section + " basic type " + basicType,
+                        "\"deopt\"(i64 0, i32 1, i32 1, "
+                                + typed(0, valueType, basicType) + ", i32 0)");
+            }
+        }
         expectDeoptFailure(id, "descriptor after root values",
                 "\"deopt\"(i64 0, i32 1, i32 1, "
                         + typed(0, 0, 10) + ", i32 7, "
@@ -232,6 +246,13 @@ public class TestPEAHarnessSmoke {
                 () -> body.deoptBundleAtAllocation("%missing"));
         expectFailure("allocation result without percent",
                 () -> body.deoptBundleAtAllocation("selected"));
+
+        PEATestUtils.IRBody indirect = bodyWithInstructions(id,
+                "%indirect = call ptr addrspace(1) %allocfp("
+                        + "ptr @jeandle.new_instance) [ " + deoptBundle(23) + " ]",
+                "ret i32 1");
+        expectFailure("indirect allocation argument is not the callee",
+                () -> indirect.deoptBundleAtAllocation("%indirect"));
 
         PEATestUtils.IRBody ambiguous = bodyWithInstructions(id,
                 "%same = invoke ptr addrspace(1) @jeandle.new_instance() [ "

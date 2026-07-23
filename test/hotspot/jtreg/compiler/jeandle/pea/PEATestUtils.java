@@ -1980,6 +1980,19 @@ public final class PEATestUtils {
                             : DeoptValueKind.MATERIALIZED_OOP;
             return new DeoptValue(kind, basicType, operand, -1);
         }
+        boolean validScalar = switch (basicType) {
+            case BOOLEAN, CHAR, BYTE, SHORT, INT ->
+                    operand.matches("i(?:1|8|16|32) .+");
+            case LONG -> operand.startsWith("i64 ");
+            case FLOAT -> operand.startsWith("float ");
+            case DOUBLE -> operand.startsWith("double ");
+            case ILLEGAL -> operand.matches("i(?:32|64) 0");
+            default -> false;
+        };
+        if (!validScalar) {
+            throw invalidDeopt(method, "basic type " + basicType
+                    + " is incompatible with deopt operand " + operand);
+        }
         return new DeoptValue(
                 DeoptValueKind.SCALAR, basicType, operand, -1);
     }
@@ -2226,8 +2239,22 @@ public final class PEATestUtils {
         if (!operation.find()) {
             return null;
         }
-        int at = line.indexOf('@', operation.end());
-        return at < 0 ? null : parseLLVMOperand(line, at).value;
+        for (int at = operation.end(); at < line.length(); at++) {
+            char sigil = line.charAt(at);
+            if (sigil != '@' && sigil != '%') {
+                continue;
+            }
+            ParsedOperand operand = parseLLVMNamedOperand(line, at);
+            int next = operand.end;
+            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
+                next++;
+            }
+            if (next < line.length() && line.charAt(next) == '(') {
+                return sigil == '@' ? operand.value : null;
+            }
+            at = operand.end - 1;
+        }
+        return null;
     }
 
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {
@@ -2491,6 +2518,15 @@ public final class PEATestUtils {
         if (at >= text.length() || text.charAt(at) != '@') {
             throw new IllegalArgumentException("Expected LLVM global operand at " + at + ": " + text);
         }
+        return parseLLVMNamedOperand(text, at);
+    }
+
+    private static ParsedOperand parseLLVMNamedOperand(String text, int at) {
+        if (at >= text.length()
+                || text.charAt(at) != '@' && text.charAt(at) != '%') {
+            throw new IllegalArgumentException("Expected LLVM named operand at "
+                    + at + ": " + text);
+        }
         int index = at + 1;
         if (index < text.length() && text.charAt(index) == '"') {
             index++;
@@ -2524,7 +2560,7 @@ public final class PEATestUtils {
             index++;
         }
         if (index == start) {
-            throw new IllegalArgumentException("Empty LLVM global operand: " + text);
+            throw new IllegalArgumentException("Empty LLVM named operand: " + text);
         }
         return new ParsedOperand(text.substring(start, index), index);
     }
