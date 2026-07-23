@@ -40,11 +40,13 @@ import java.util.Set;
 
 import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
+import jdk.test.whitebox.WhiteBox;
 
 public class TestPEADeoptImplicitTrap {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEADeoptImplicitTrap$TestWrapper";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+    private static final int BOUNDS_TRAP_BCI = 33;
 
     public static void main(String[] args) throws Exception {
         Method nullTrap = TestWrapper.class.getMethod(
@@ -57,9 +59,10 @@ public class TestPEADeoptImplicitTrap {
 
         builder(false, targets).runPEAOnOffEquivalent();
         try (PEATestUtils.RunResult run = builder(true, targets).run()) {
-            assertTrapShape(run, nullTrap, "null", true);
-            assertTrapShape(run, checkcastTrap, "checkcast", false);
-            assertTrapShape(run, boundsTrap, "bounds", false);
+            assertTrapShape(run, nullTrap, "null", true, 1, 0, -1);
+            assertTrapShape(run, checkcastTrap, "checkcast", false, 1, 0, -1);
+            assertTrapShape(run, boundsTrap, "bounds", false, 2, 1,
+                    BOUNDS_TRAP_BCI);
         }
     }
 
@@ -74,7 +77,9 @@ public class TestPEADeoptImplicitTrap {
     }
 
     private static void assertTrapShape(PEATestUtils.RunResult run, Method target,
-                                        String kind, boolean hasMonitor)
+                                        String kind, boolean hasMonitor,
+                                        int expectedTrapCount, int trapOccurrence,
+                                        int expectedBCI)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
         report.assertConverged();
@@ -83,10 +88,12 @@ public class TestPEADeoptImplicitTrap {
 
         Asserts.assertEquals(before.peaAllocCount(), 4,
                 target + ": root, peer, shared child, and object array enter PEA");
-        Asserts.assertEquals(after.occurrenceCount("@llvm.experimental.deoptimize"), 1,
-                target + ": one exact natural " + kind + " trap");
+        assertTrapSelection(before, target, kind, expectedTrapCount, trapOccurrence,
+                expectedBCI);
+        Asserts.assertEquals(after.occurrenceCount("@llvm.experimental.deoptimize"),
+                expectedTrapCount, target + ": exact natural " + kind + " trap count");
         PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(
-                "llvm.experimental.deoptimize", 0);
+                "llvm.experimental.deoptimize", trapOccurrence);
         Asserts.assertEquals(bundle.scopes().size(), 1,
                 target + ": trap has one active Java scope");
         Asserts.assertEquals(bundle.rootScope().duplicateBCI(), bundle.rootScope().bci(),
@@ -94,10 +101,29 @@ public class TestPEADeoptImplicitTrap {
         assertGraph(bundle, target, hasMonitor);
 
         PEATestUtils.IRBlock trapBlock =
-                after.blockContaining("@llvm.experimental.deoptimize", 0);
+                after.blockContaining("@llvm.experimental.deoptimize", trapOccurrence);
         trapBlock.assertAbsent("@jeandle.new_");
         trapBlock.assertAbsent("store atomic i32");
         trapBlock.assertAbsent("store atomic i32 900");
+    }
+
+    private static void assertTrapSelection(PEATestUtils.IRBody before, Method target,
+                                            String kind, int expectedTrapCount,
+                                            int trapOccurrence, int expectedBCI) {
+        Asserts.assertEquals(before.occurrenceCount("@llvm.experimental.deoptimize"),
+                expectedTrapCount, target + ": exact frontend " + kind + " trap count");
+        PEATestUtils.DeoptBundle selected = before.deoptBundleAtCall(
+                "llvm.experimental.deoptimize", trapOccurrence);
+        if (expectedBCI >= 0) {
+            // The frontend emits the array null guard before the bounds guard;
+            // both naturally describe the iaload BCI.
+            PEATestUtils.DeoptBundle first = before.deoptBundleAtCall(
+                    "llvm.experimental.deoptimize", 0);
+            Asserts.assertEquals(first.rootScope().bci(), expectedBCI,
+                    target + ": array null check is first at iaload BCI");
+            Asserts.assertEquals(selected.rootScope().bci(), expectedBCI,
+                    target + ": bounds check is second at the same iaload BCI");
+        }
     }
 
     private static void assertGraph(PEATestUtils.DeoptBundle bundle, Method target,
@@ -171,7 +197,10 @@ public class TestPEADeoptImplicitTrap {
                 target + ": graph node value type");
         Asserts.assertEquals(value.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
                 target + ": graph node value is scalar");
-        return Integer.parseInt(value.value().operand().substring("i32 ".length()));
+        String operand = value.value().operand();
+        Asserts.assertTrue(operand.startsWith("i32 "),
+                target + ": graph node value uses an exact i32 operand");
+        return Integer.parseInt(operand.substring("i32 ".length()));
     }
 
     private static int offset(String name) throws Exception {
@@ -180,6 +209,13 @@ public class TestPEADeoptImplicitTrap {
     }
 
     public static class TestWrapper {
+        private static final int WARMUP_ITERATIONS = 10_000;
+        private static final WhiteBox WB = WhiteBox.getWhiteBox();
+        private static final Method NULL_TARGET = target("nullTrap", External.class, int.class);
+        private static final Method CHECKCAST_TARGET = target("checkcastTrap", Object.class,
+                int.class);
+        private static final Method BOUNDS_TARGET = target("boundsTrap", int[].class,
+                int.class, int.class);
         private static int normalPaths;
         private static int nullCatches;
         private static int checkcastCatches;
@@ -197,7 +233,6 @@ public class TestPEADeoptImplicitTrap {
         }
 
         public static class Accepted {
-            int marker = 11;
         }
 
         public static class Rejected { }
@@ -208,16 +243,21 @@ public class TestPEADeoptImplicitTrap {
             new Accepted();
             new Rejected();
             long digest = 0x6A09E667F3BCC909L;
-            digest = mix(digest, nullTrap(external(7), 1));
-            digest = mix(digest, checkcastTrap(new Accepted(), 2));
-            digest = mix(digest, boundsTrap(new int[] {17, 29, 43}, 1, 3));
-            Asserts.assertEquals(normalPaths, 3, "warm normal paths");
+            warmNormalPaths();
+            Asserts.assertEquals(normalPaths, WARMUP_ITERATIONS * 3,
+                    "repeated warm normal paths");
 
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
+            ColdObservation nullBefore = observeBeforeColdTrap(NULL_TARGET);
             digest = mix(digest, nullTrap(null, 4));
+            assertNaturalDecompile(NULL_TARGET, nullBefore);
+            ColdObservation checkcastBefore = observeBeforeColdTrap(CHECKCAST_TARGET);
             digest = mix(digest, checkcastTrap(new Rejected(), 5));
+            assertNaturalDecompile(CHECKCAST_TARGET, checkcastBefore);
+            ColdObservation boundsBefore = observeBeforeColdTrap(BOUNDS_TARGET);
             digest = mix(digest, boundsTrap(new int[] {17, 29, 43}, 4, 6));
+            assertNaturalDecompile(BOUNDS_TARGET, boundsBefore);
             Asserts.assertEquals(nullCatches, 1, "one natural null catch");
             Asserts.assertEquals(checkcastCatches, 1, "one natural checkcast catch");
             Asserts.assertEquals(boundsCatches, 1, "one natural bounds catch");
@@ -268,7 +308,7 @@ public class TestPEADeoptImplicitTrap {
             Object[] array = graphArray(root, peer, shared);
             try {
                 Accepted accepted = (Accepted) candidate;
-                root.value += accepted.marker;
+                root.value += accepted == candidate ? 11 : 0;
                 peer.value += array.length;
                 normalPaths++;
             } catch (ClassCastException expected) {
@@ -352,5 +392,39 @@ public class TestPEADeoptImplicitTrap {
             return Long.rotateLeft(accumulator ^ value, 13)
                     * 0x9E3779B97F4A7C15L;
         }
+
+        private static void warmNormalPaths() {
+            for (int iteration = 0; iteration < WARMUP_ITERATIONS; iteration++) {
+                nullTrap(external(7), 1);
+                checkcastTrap(new Accepted(), 2);
+                boundsTrap(new int[] {17, 29, 43}, 1, 3);
+            }
+        }
+
+        private static ColdObservation observeBeforeColdTrap(Method target) {
+            boolean compiled = WB.isMethodCompiled(target);
+            int level = WB.getMethodCompilationLevel(target);
+            Asserts.assertTrue(compiled && level == 4,
+                    target + ": level-4 nmethod before natural trap");
+            return new ColdObservation(compiled, level,
+                    WB.getMethodDecompileCount(target));
+        }
+
+        private static void assertNaturalDecompile(Method target, ColdObservation before) {
+            boolean stillCompiled = WB.isMethodCompiled(target);
+            int decompileCount = WB.getMethodDecompileCount(target);
+            Asserts.assertTrue(!stillCompiled || decompileCount > before.decompileCount(),
+                    target + ": natural trap deoptimized its level-4 nmethod");
+        }
+
+        private static Method target(String name, Class<?>... parameterTypes) {
+            try {
+                return TestWrapper.class.getMethod(name, parameterTypes);
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
+        }
+
+        private record ColdObservation(boolean compiled, int level, int decompileCount) { }
     }
 }
