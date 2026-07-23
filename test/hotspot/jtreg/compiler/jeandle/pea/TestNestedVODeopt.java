@@ -12,125 +12,459 @@
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
  *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this work; if not, write to the Free Software Foundation,
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 /*
  * @test
- * @summary PEA transitive VORef field deopt: a never-escaping VO with a
- *          reference field that points at another never-escaping VO. Both are
- *          virtual at a null-check safepoint, so both are described by VO
- *          descriptors and the reference field is encoded as a VORef. At deopt
- *          both are reallocated and outer.inner is re-linked to the
- *          reallocated inner.
+ * @summary PEA preserves nested and shared object state across exact active-frame
+ *          deoptimization and staged materialization
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestNestedVODeopt
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestNestedVODeopt {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestNestedVODeopt$TestWrapper";
+    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestNestedVODeopt$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                wrapper));
+        Method nested = TestWrapper.class.getMethod(
+                "testNestedDeopt", int.class);
+        Method staged = TestWrapper.class.getMethod(
+                "testStagedMaterialization", int.class, int.class);
+        Method nestedDeopt =
+                TestWrapper.class.getDeclaredMethod("requestNestedDeopt");
+        Method stagedDeopt =
+                TestWrapper.class.getDeclaredMethod("requestStagedDeopt");
+        Method consumeInner = TestWrapper.class.getDeclaredMethod(
+                "consumeInner", TestWrapper.Inner.class);
+        Method consumeOuter = TestWrapper.class.getDeclaredMethod(
+                "consumeOuter", TestWrapper.Outer.class);
+        Method[] targets = {nested, staged};
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+        runBuilder(false, targets, nestedDeopt, stagedDeopt,
+                consumeInner, consumeOuter).runPEAOnOffEquivalent();
 
-        // outer (Outer) and inner (Inner) never escape: their fields are
-        // scalar-replaced and both allocations are eliminated. outer's
-        // reference field `inner` resolves to the VO inner, so it is encoded
-        // as a VORef field (value = inner's vo-id) and inner gets its own
-        // descriptor (referenced by id from outer's field) -- the transitive
-        // closure is fully described. The test LOADS THROUGH the reference
-        // field (`Inner tmp = outer.inner`), keeping `tmp` (= inner's
-        // identity) live across the null-check safepoint; the load folds to
-        // inner's identity and PEA keeps both VOs virtual (the deopt bundle's
-        // `tmp` slot is rewritten to a VORef to inner). Verified on the
-        // post-optimization dump.
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test", TestWrapper.Holder.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc i32 .*test.*");
-        // Both allocations eliminated (NeverEscapes): no new_instance remains.
-        checker.checkNot("new_instance");
-        // Both VO descriptors are emitted on the null-check safepoint's deopt
-        // bundle line. outer is vo_id 0 -> header (0<<32)|(4<<16)|T_OBJECT(12)
-        // = 262156; inner is vo_id 1 -> header (1<<32)|(4<<16)|12 = 4295229452.
-        // Two descriptors on one bundle line proves the transitive closure.
-        checker.checkPattern("262156.*4295229452|4295229452.*262156");
-
-        // test(holder) returns 7 (outer.ox) + 5 (inner.ix) + 0 (holder.h) = 12.
-        // test(null) null-check deopts at inp.h; deopt reallocates BOTH outer
-        // and inner and re-links outer.inner to the reallocated inner, then
-        // the interpreter throws NPE on the null inp.h access.
-        output.shouldContain("TestNestedVODeopt result: 12");
-        output.shouldContain("TestNestedVODeopt deopt: NPE");
+        try (PEATestUtils.RunResult run =
+                runBuilder(true, targets, nestedDeopt, stagedDeopt,
+                        consumeInner, consumeOuter).run()) {
+            assertNestedShape(run, nested, nestedDeopt);
+            assertStagedShape(run, staged, stagedDeopt,
+                    consumeInner, consumeOuter);
+        }
     }
 
-    public static class TestWrapper {
-        // Simple null-check vehicle (not a VO).
-        public static class Holder { public int h; }
-        public static class Outer { public Inner inner; public int ox; }
-        public static class Inner { public int ix; }
+    private static PEATestUtils.RunBuilder runBuilder(
+            boolean shape, Method[] targets, Method nestedDeopt,
+            Method stagedDeopt, Method consumeInner, Method consumeOuter) {
+        PEATestUtils.RunBuilder builder = shape
+                ? PEATestUtils.shapeRun(WRAPPER, targets)
+                : PEATestUtils.behaviorRun(WRAPPER, targets);
+        return builder.dontinline(nestedDeopt)
+                .dontinline(stagedDeopt)
+                .dontinline(consumeInner)
+                .dontinline(consumeOuter);
+    }
 
-        public static void main(String[] args) {
-            // Initialize classes so test() compiles a real body (no class-init
-            // trap stubs), with PEA virtualizing outer and inner.
-            new Holder();
-            new Outer();
-            new Inner();
-            Holder holder = new Holder();
-            holder.h = 0;
-            int r = test(holder);   // compiles + runs (no deopt)
-            System.out.println("TestNestedVODeopt result: " + r);
-            try {
-                test(null);          // null-check deopt at inp.h; outer+inner live
-                Asserts.fail("expected NPE");
-            } catch (NullPointerException e) {
-                System.out.println("TestNestedVODeopt deopt: NPE");
+    private static void assertNestedShape(
+            PEATestUtils.RunResult run, Method target, Method requestDeopt)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+        Asserts.assertEquals(allocations.size(), 2,
+                target + ": exact outer and inner source allocations");
+        Asserts.assertEquals(new HashSet<>(before.allocationBCIs()).size(), 2,
+                target + ": outer and inner have distinct source BCIs");
+        Asserts.assertEquals(first.neverEscapes(), 2,
+                target + ": both objects are virtual at every program point");
+        Asserts.assertEquals(first.partiallyEscapes(), 0,
+                target + ": no nested object materializes");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": no nested object escapes");
+        for (int vo = 0; vo < 2; vo++) {
+            Asserts.assertEquals(first.effectCount(
+                    "EliminateAllocation", "[VO=" + vo + "]"), 1L,
+                    target + ": one exact allocation elimination for VO " + vo);
+        }
+        after.assertRetainsExactlyOriginalAllocations(before);
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                target + ": no lowered allocation remains");
+
+        String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        PEATestUtils.DeoptBundle source = before.deoptBundleAtCall(callee, 0);
+        PEATestUtils.DeoptBundle reconstructed = after.deoptBundleAtCall(callee, 0);
+        Asserts.assertEquals(source.virtualObjects().size(), 0,
+                target + ": frontend helper call has no PEA descriptors");
+        Asserts.assertEquals(reconstructed.rootScope().bci(),
+                source.rootScope().bci(),
+                target + ": descriptor rewrite preserves the exact deopt BCI");
+        reconstructed.assertVirtualObjectIds(0, 1);
+        NestedDescriptors graph = identifyNestedDescriptors(reconstructed);
+        assertOuterDescriptor(reconstructed, graph.outer(), graph.inner(),
+                PEATestUtils.DeoptValueKind.VO_REF);
+        assertInnerDescriptor(graph.inner());
+    }
+
+    private static void assertStagedShape(
+            PEATestUtils.RunResult run, Method target, Method requestDeopt,
+            Method consumeInner, Method consumeOuter) throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+
+        Asserts.assertEquals(allocations.size(), 2,
+                target + ": exact outer and inner source allocations");
+        List<PEATestUtils.AllocationKey> keys =
+                allocations.stream().map(PEATestUtils.AllocationSite::key).toList();
+        Asserts.assertEquals(new HashSet<>(keys).size(), 2,
+                target + ": exact typed source allocation identities");
+        Asserts.assertEquals(first.neverEscapes(), 0,
+                target + ": both objects have an escaping execution");
+        Asserts.assertEquals(first.partiallyEscapes(), 2,
+                target + ": both allocations remain virtual on mode zero");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": neither object escapes on every path");
+        for (PEATestUtils.PEARound round : report.rounds()) {
+            Asserts.assertEquals(round.effectCount("Materialize", "[VO=0]"), 1L,
+                    target + ": outer materializes exactly once in round "
+                            + round.iteration());
+            Asserts.assertEquals(round.effectCount("Materialize", "[VO=1]"), 1L,
+                    target + ": inner materializes exactly once in round "
+                            + round.iteration());
+            Asserts.assertEquals(round.effectCount("Materialize"), 2L,
+                    target + ": exact staged materialization count in round "
+                            + round.iteration());
+        }
+        after.assertRetainsExactlyOriginalAllocations(
+                before, keys.toArray(PEATestUtils.AllocationKey[]::new));
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 2,
+                target + ": final code contains only the two OrigAlloc sites");
+
+        String deoptCallee =
+                PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        PEATestUtils.DeoptBundle source =
+                before.deoptBundleAtCall(deoptCallee, 0);
+        PEATestUtils.DeoptBundle bundle =
+                after.deoptBundleAtCall(deoptCallee, 0);
+        Asserts.assertEquals(source.virtualObjects().size(), 0,
+                target + ": frontend staged call has no PEA descriptors");
+        Asserts.assertEquals(bundle.rootScope().bci(), source.rootScope().bci(),
+                target + ": staged descriptor preserves the exact call BCI");
+        bundle.assertVirtualObjectIds(0);
+        PEATestUtils.VirtualObjectDescriptor outer = bundle.virtualObject(0);
+        assertOuterDescriptor(bundle, outer, null,
+                PEATestUtils.DeoptValueKind.MATERIALIZED_OOP);
+        PEATestUtils.VirtualObjectEntry firstChild =
+                outer.fields().get(offset(TestWrapper.Outer.class, "first"));
+        PEATestUtils.VirtualObjectEntry secondChild =
+                outer.fields().get(offset(TestWrapper.Outer.class, "second"));
+        Asserts.assertEquals(firstChild.value().operand(),
+                secondChild.value().operand(),
+                target + ": two fields carry the same materialized child oop");
+
+        String innerCallee =
+                PEATestUtils.MethodId.of(consumeInner).llvmFunctionName();
+        String outerCallee =
+                PEATestUtils.MethodId.of(consumeOuter).llvmFunctionName();
+        PEATestUtils.IRBlock innerBlock = after.blockContaining(innerCallee, 0);
+        PEATestUtils.IRBlock outerBlock = after.blockContaining(outerCallee, 0);
+        innerBlock.assertAbsent("jeandle.new_instance");
+        outerBlock.assertAbsent("jeandle.new_instance");
+        innerBlock.assertBefore("store atomic i32", 0, innerCallee, 0);
+        Asserts.assertTrue(outerBlock.occurrenceCount("store atomic") >= 3,
+                target + ": outer field state is replayed at its later escape");
+        outerBlock.assertBefore("store atomic", 2, outerCallee, 0);
+    }
+
+    private static NestedDescriptors identifyNestedDescriptors(
+            PEATestUtils.DeoptBundle bundle) throws Exception {
+        Set<Integer> outerOffsets = Set.of(
+                offset(TestWrapper.Outer.class, "first"),
+                offset(TestWrapper.Outer.class, "second"),
+                offset(TestWrapper.Outer.class, "marker"));
+        Set<Integer> innerOffsets =
+                Set.of(offset(TestWrapper.Inner.class, "value"));
+        PEATestUtils.VirtualObjectDescriptor outer = null;
+        PEATestUtils.VirtualObjectDescriptor inner = null;
+        for (PEATestUtils.VirtualObjectDescriptor descriptor
+                : bundle.virtualObjects().values()) {
+            Asserts.assertEquals(descriptor.kind(),
+                    PEATestUtils.DescriptorKind.INSTANCE,
+                    "nested graph contains only instance descriptors");
+            if (descriptor.fields().keySet().equals(outerOffsets)) {
+                Asserts.assertNull(outer, "one exact outer descriptor");
+                outer = descriptor;
+            } else if (descriptor.fields().keySet().equals(innerOffsets)) {
+                Asserts.assertNull(inner, "one exact inner descriptor");
+                inner = descriptor;
+            } else {
+                throw new AssertionError(
+                        "unexpected nested descriptor " + descriptor.id());
             }
-            Asserts.assertEquals(r, 12);
+        }
+        Asserts.assertNotNull(outer, "outer descriptor");
+        Asserts.assertNotNull(inner, "inner descriptor");
+        return new NestedDescriptors(outer, inner);
+    }
+
+    private static void assertOuterDescriptor(
+            PEATestUtils.DeoptBundle bundle,
+            PEATestUtils.VirtualObjectDescriptor outer,
+            PEATestUtils.VirtualObjectDescriptor inner,
+            PEATestUtils.DeoptValueKind childKind) throws Exception {
+        Set<Integer> offsets = Set.of(
+                offset(TestWrapper.Outer.class, "first"),
+                offset(TestWrapper.Outer.class, "second"),
+                offset(TestWrapper.Outer.class, "marker"));
+        Asserts.assertEquals(outer.kind(),
+                PEATestUtils.DescriptorKind.INSTANCE,
+                "outer descriptor kind");
+        Asserts.assertEquals(outer.fields().keySet(), offsets,
+                "outer exact touched fields");
+        for (String name : List.of("first", "second")) {
+            int fieldOffset = offset(TestWrapper.Outer.class, name);
+            PEATestUtils.VirtualObjectEntry entry =
+                    outer.fields().get(fieldOffset);
+            Asserts.assertEquals(entry.basicType(),
+                    PEATestUtils.DeoptBasicType.OBJECT,
+                    name + " object basic type");
+            Asserts.assertEquals(entry.value().kind(), childKind,
+                    name + " child representation");
+            if (childKind == PEATestUtils.DeoptValueKind.VO_REF) {
+                bundle.assertVORef(outer.id(), fieldOffset, inner.id());
+            }
+        }
+        PEATestUtils.VirtualObjectEntry marker =
+                outer.fields().get(offset(TestWrapper.Outer.class, "marker"));
+        Asserts.assertEquals(marker.basicType(),
+                PEATestUtils.DeoptBasicType.INT, "outer marker type");
+        Asserts.assertEquals(marker.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR, "outer marker value");
+    }
+
+    private static void assertInnerDescriptor(
+            PEATestUtils.VirtualObjectDescriptor inner) throws Exception {
+        Asserts.assertEquals(inner.kind(),
+                PEATestUtils.DescriptorKind.INSTANCE,
+                "inner descriptor kind");
+        int valueOffset = offset(TestWrapper.Inner.class, "value");
+        Asserts.assertEquals(inner.fields().keySet(), Set.of(valueOffset),
+                "inner exact touched field");
+        PEATestUtils.VirtualObjectEntry value =
+                inner.fields().get(valueOffset);
+        Asserts.assertEquals(value.basicType(),
+                PEATestUtils.DeoptBasicType.INT, "inner value type");
+        Asserts.assertEquals(value.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR, "inner scalar value");
+    }
+
+    private static int offset(Class<?> holder, String name) throws Exception {
+        Field field = holder.getDeclaredField(name);
+        return Math.toIntExact(UNSAFE.objectFieldOffset(field));
+    }
+
+    private record NestedDescriptors(
+            PEATestUtils.VirtualObjectDescriptor outer,
+            PEATestUtils.VirtualObjectDescriptor inner) {}
+
+    public static class TestWrapper {
+        private static final Method NESTED_TARGET =
+                target("testNestedDeopt", int.class);
+        private static final Method STAGED_TARGET =
+                target("testStagedMaterialization", int.class, int.class);
+
+        public static class Outer {
+            Inner first;
+            Inner second;
+            int marker;
         }
 
-        // Compiled by Jeandle. outer (Outer) and inner (Inner) never escape.
-        // outer.inner holds inner, so PEA describes both with a VORef field
-        // linking them. The test loads through the reference field (tmp =
-        // outer.inner) and keeps tmp live across the inp.h safepoint; the load
-        // folds to inner's identity, so tmp's deopt slot becomes a VORef to
-        // inner and both VOs stay virtual.
-        public static int test(Holder inp) {
-            Outer outer = new Outer();   // first alloc -> vo_id 0
-            Inner inner = new Inner();   // second alloc -> vo_id 1
-            inner.ix = 5;
-            outer.inner = inner;         // VORef field
-            outer.ox = 7;
-            Inner tmp = outer.inner;     // load-through-ref; tmp = inner identity
-            int o = inp.h;               // null-check safepoint; outer+tmp live
-            return outer.ox + tmp.ix + o; // 7 + 5 + 0 = 12
+        public static class Inner {
+            int value;
+        }
+
+        private static Outer savedOuter;
+        private static Inner savedInner;
+        private static int nestedDeopts;
+        private static int stagedDeopts;
+
+        public static void main(String[] args) throws Exception {
+            new Outer();
+            new Inner();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+
+            long digest = 0x243F6A8885A308D3L;
+            int nested = testNestedDeopt(17);
+            Asserts.assertEquals(nested, 1056,
+                    "deoptimized nested graph preserves mutation and identity");
+            Asserts.assertEquals(nestedDeopts, 1,
+                    "one nested active-frame deoptimization");
+            digest = mix(digest, nested);
+
+            int noEscape = testStagedMaterialization(23, 0);
+            Asserts.assertEquals(noEscape, 2444,
+                    "non-escaping staged path");
+            digest = mix(digest, noEscape);
+
+            int innerOnly = testStagedMaterialization(29, 1);
+            Asserts.assertEquals(innerOnly, 3668,
+                    "inner materializes while outer remains virtual");
+            Asserts.assertNotNull(savedInner,
+                    "mode one saves the materialized inner");
+            Asserts.assertNull(savedOuter,
+                    "mode one does not materialize the outer");
+            digest = mix(digest, innerOnly);
+
+            int both = testStagedMaterialization(31, 2);
+            Asserts.assertEquals(both, 5504,
+                    "inner then outer staged materialization");
+            Asserts.assertEquals(stagedDeopts, 1,
+                    "one staged active-frame deoptimization");
+            Asserts.assertNotEquals(savedOuter, savedInner,
+                    "saved outer and inner have distinct identities");
+            Asserts.assertSame(savedOuter.first, savedInner,
+                    "saved outer first field identity");
+            Asserts.assertSame(savedOuter.second, savedInner,
+                    "saved outer second field identity");
+            digest = mix(digest, both);
+            digest = mix(digest, nestedDeopts);
+            digest = mix(digest, stagedDeopts);
+
+            System.out.println("PEA-RESULT:"
+                    + Long.toUnsignedString(digest, 16));
+        }
+
+        public static int testNestedDeopt(int seed) {
+            Outer outer = new Outer();
+            Inner inner = new Inner();
+            inner.value = seed + 3;
+            outer.first = inner;
+            outer.second = inner;
+            outer.marker = seed + 5;
+
+            requestNestedDeopt();
+            if (outer.first != inner || outer.second != inner
+                    || outer.first != outer.second
+                    || outer.marker != seed + 5
+                    || inner.value != seed + 3) {
+                return -1;
+            }
+            outer.marker += 11;
+            outer.first.value += 13;
+            if (outer.second.value != seed + 16
+                    || outer.first != outer.second) {
+                return -2;
+            }
+            return outer.marker * 31 + outer.second.value;
+        }
+
+        public static int testStagedMaterialization(int seed, int mode) {
+            Outer outer = new Outer();
+            Inner inner = new Inner();
+            inner.value = seed + 7;
+            outer.first = inner;
+            outer.second = inner;
+            outer.marker = seed + 11;
+
+            if (mode == 0) {
+                return outer.marker * 71 + outer.first.value;
+            }
+
+            int first = consumeInner(inner);
+            if (mode == 1) {
+                return outer.marker * 89 + first;
+            }
+
+            requestStagedDeopt();
+            if (outer.first != inner || outer.second != inner
+                    || outer.first != outer.second
+                    || inner.value != seed + 7) {
+                return -3;
+            }
+            outer.marker += 13;
+            outer.second.value += 17;
+            int second = consumeOuter(outer);
+            if (savedOuter != outer || savedInner != inner
+                    || savedOuter.first != savedInner
+                    || savedOuter.second != savedInner) {
+                return -4;
+            }
+            return first + second;
+        }
+
+        private static int consumeInner(Inner inner) {
+            savedInner = inner;
+            return inner.value * 3;
+        }
+
+        private static int consumeOuter(Outer outer) {
+            savedOuter = outer;
+            return outer.marker * 97 + outer.first.value;
+        }
+
+        private static void requestNestedDeopt() {
+            nestedDeopts++;
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(NESTED_TARGET, 2);
+            assertEvidence(evidence, "nested");
+        }
+
+        private static void requestStagedDeopt() {
+            stagedDeopts++;
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(STAGED_TARGET, 2);
+            assertEvidence(evidence, "staged");
+        }
+
+        private static void assertEvidence(
+                PEATestUtils.ActiveFrameDeoptEvidence evidence,
+                String context) {
+            if (!evidence.frameDeoptimized()
+                    || evidence.compilationLevel() != 4
+                    || evidence.markedNMethods() != 1) {
+                throw new AssertionError(
+                        context + " exact active-frame deopt evidence");
+            }
+        }
+
+        private static Method target(String name, Class<?>... parameters) {
+            try {
+                return TestWrapper.class.getMethod(name, parameters);
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
+        }
+
+        private static long mix(long accumulator, long value) {
+            return Long.rotateLeft(accumulator ^ value, 17)
+                    * 0x9E3779B97F4A7C15L;
         }
     }
 }
