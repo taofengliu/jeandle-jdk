@@ -190,11 +190,11 @@ public class TestPEACyclicObjectGraph {
 
         String helperName = PEATestUtils.MethodId.of(helper).llvmFunctionName();
         PEATestUtils.DeoptBundle beforeBundle =
-                report.round0Before().deoptBundleAtCall(helperName, 0);
+                exactDeoptBundleAtCall(report.round0Before(), helperName);
         PEATestUtils.DeoptBundle round0Bundle =
-                report.round(0).after().deoptBundleAtCall(helperName, 0);
+                exactDeoptBundleAtCall(report.round(0).after(), helperName);
         PEATestUtils.DeoptBundle finalBundle =
-                report.finalAfter().deoptBundleAtCall(helperName, 0);
+                exactDeoptBundleAtCall(report.finalAfter(), helperName);
         int sourceBCI = beforeBundle.rootScope().bci();
         Asserts.assertEquals(beforeBundle.rootScope().duplicateBCI(), sourceBCI,
                 target + ": frontend helper call has duplicated BCI");
@@ -210,6 +210,13 @@ public class TestPEACyclicObjectGraph {
                 target + ": frontend call has no PEA descriptors");
         assertSixNodeCycleDescriptors(round0Bundle, target);
         assertSixNodeCycleDescriptors(finalBundle, target);
+    }
+
+    private static PEATestUtils.DeoptBundle exactDeoptBundleAtCall(
+            PEATestUtils.IRBody body, String callee) {
+        Asserts.assertEquals(body.occurrenceCount("@\"" + callee + "\"("), 1,
+                body.methodId() + ": exact helper safepoint call");
+        return body.deoptBundleAtCall(callee, 0);
     }
 
     private static void assertSixNodeCycleDescriptors(

@@ -385,22 +385,34 @@ public class TestPEADeoptReconstructIdentityGraph {
                 Node diamondRoot, Node diamondLeft, Node diamondRight,
                 Node shared, Node equalOne, Node equalTwo) {
             return self.left == self
+                    && self.right == null
                     && pairA != pairB
                     && pairA.left == pairB && pairB.left == pairA
+                    && pairA.right == null && pairB.right == null
                     && threeA != threeB && threeA != threeC && threeB != threeC
                     && threeA.left == threeB
                     && threeB.left == threeC
                     && threeC.left == threeA
+                    && threeA.right == null
+                    && threeB.right == null
+                    && threeC.right == null
                     && diamondRoot.left == diamondLeft
                     && diamondRoot.right == diamondRight
                     && diamondLeft != diamondRight
                     && diamondLeft.left == shared
+                    && diamondLeft.right == null
+                    && diamondRight.left == null
                     && diamondRight.right == shared
                     && diamondLeft.left == diamondRight.right
+                    && shared.left == null
+                    && shared.right == null
                     && equalOne != equalTwo
-                    && equalOne.payload == equalTwo.payload
+                    && equalOne.payload == 55
+                    && equalTwo.payload == 55
                     && equalOne.left == shared
                     && equalTwo.left == shared
+                    && equalOne.right == null
+                    && equalTwo.right == null
                     && self.payload == 11
                     && pairA.payload == 21 && pairB.payload == 22
                     && threeA.payload == 31
