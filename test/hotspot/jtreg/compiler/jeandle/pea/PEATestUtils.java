@@ -112,6 +112,17 @@ public final class PEATestUtils {
                     + " source=([0-9]+) receiver_vo=([0-9]+)"
                     + " depth=([0-9]+) ordinal=([0-9]+)$"
     );
+    private static final String LLVM_LOCAL_NAME =
+            "%(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
+    private static final Pattern CALL_OR_INVOKE_OPCODE = Pattern.compile(
+            "^(?:" + LLVM_LOCAL_NAME + "\\s*=\\s*)?"
+                    + "(?:(?:musttail|notail|tail)\\s+)?(call|invoke)\\b");
+    private static final Pattern ASSIGNED_INSTRUCTION = Pattern.compile(
+            "^" + LLVM_LOCAL_NAME + "\\s*=");
+    private static final Pattern UNASSIGNED_INSTRUCTION = Pattern.compile(
+            "^(?:(?:musttail|notail|tail)\\s+call|call|invoke|callbr|ret|br|switch|"
+                    + "indirectbr|resume|catchswitch|catchret|cleanupret|unreachable|"
+                    + "store|fence)\\b");
 
     private PEATestUtils() {}
 
@@ -1654,12 +1665,15 @@ public final class PEATestUtils {
         public List<AllocationSite> allocations() {
             ArrayList<AllocationSite> result = new ArrayList<>();
             for (int i = 0; i < lines.size(); i++) {
-                String callee = calledFunctionName(lines.get(i));
+                if (!containsCallOrInvoke(lines.get(i))) {
+                    continue;
+                }
+                String instruction = instructionStartingAt(i);
+                String callee = calledFunctionName(instruction);
                 AllocationKind kind = allocationKind(callee);
                 if (kind == null) {
                     continue;
                 }
-                String instruction = instructionStartingAt(i);
                 int assignment = lines.get(i).indexOf(" = ");
                 if (assignment <= 1 || lines.get(i).charAt(0) != '%') {
                     throw new AssertionError(method
@@ -1773,17 +1787,9 @@ public final class PEATestUtils {
                         "Allocation result must be an exact SSA name beginning with '%'");
             }
             ArrayList<String> matches = new ArrayList<>();
-            String assignment = allocationResult + " = ";
-            for (int i = 0; i < lines.size(); i++) {
-                String line = lines.get(i);
-                if (!line.startsWith(assignment)) {
-                    continue;
-                }
-                String instruction = instructionStartingAt(i);
-                String callee = calledFunctionName(instruction);
-                if ("jeandle.new_instance".equals(callee)
-                        || "jeandle.new_array".equals(callee)) {
-                    matches.add(instruction);
+            for (AllocationSite site : allocations()) {
+                if (allocationResult.equals(site.result())) {
+                    matches.add(site.instruction());
                 }
             }
             if (matches.isEmpty()) {
@@ -1799,10 +1805,9 @@ public final class PEATestUtils {
 
         private String instructionStartingAt(int startLine) {
             StringBuilder instruction = new StringBuilder(lines.get(startLine));
-            boolean invoke = instruction.indexOf("invoke") >= 0;
             int i = startLine + 1;
             while (i < lines.size()
-                    && instructionNeedsContinuation(instruction.toString(), invoke, lines.get(i))) {
+                    && instructionNeedsContinuation(instruction.toString(), lines.get(i))) {
                 instruction.append(' ').append(lines.get(i));
                 i++;
             }
@@ -2440,7 +2445,7 @@ public final class PEATestUtils {
     }
 
     private static String calledFunctionName(String line) {
-        Matcher operation = Pattern.compile("\\b(?:call|invoke)\\b").matcher(line);
+        Matcher operation = CALL_OR_INVOKE_OPCODE.matcher(line);
         if (!operation.find()) {
             return null;
         }
@@ -2463,21 +2468,25 @@ public final class PEATestUtils {
     }
 
     private static boolean containsCallOrInvoke(String line) {
-        return Pattern.compile("\\b(?:call|invoke)\\b").matcher(line).find();
+        return CALL_OR_INVOKE_OPCODE.matcher(line).find();
     }
 
     private static boolean instructionNeedsContinuation(
-            String instruction, boolean invoke, String nextLine) {
+            String instruction, String nextLine) {
         if (hasUnbalancedInstructionDelimiters(instruction)) {
             return true;
         }
         if (!hasCallCalleeOperand(instruction)) {
             return true;
         }
-        String continuation = nextLine.trim();
-        return continuation.startsWith("[") || continuation.startsWith(", !")
-                || invoke && (continuation.startsWith("to label ")
-                        || continuation.startsWith("unwind label "));
+        return !isDefiniteInstructionBoundary(nextLine);
+    }
+
+    private static boolean isDefiniteInstructionBoundary(String line) {
+        String folded = fold(line);
+        return folded.equals("}") || IRBody.BLOCK_LABEL.matcher(folded).matches()
+                || ASSIGNED_INSTRUCTION.matcher(folded).find()
+                || UNASSIGNED_INSTRUCTION.matcher(folded).find();
     }
 
     private static boolean hasUnbalancedInstructionDelimiters(String instruction) {
@@ -2517,7 +2526,7 @@ public final class PEATestUtils {
     }
 
     private static boolean hasCallCalleeOperand(String line) {
-        Matcher operation = Pattern.compile("\\b(?:call|invoke)\\b").matcher(line);
+        Matcher operation = CALL_OR_INVOKE_OPCODE.matcher(line);
         if (!operation.find()) {
             return false;
         }

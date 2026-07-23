@@ -61,6 +61,7 @@ public class TestPEAHarnessSmoke {
         testExactAllocationSelection(noArgs);
         testTypedAllocationSitesAndRetention(noArgs);
         testMultilineCallAndInvokeParsing(noArgs);
+        testCompleteCallInstructionCollection(noArgs);
         testBlockLocalExactAssertions(noArgs);
         testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
@@ -333,6 +334,36 @@ public class TestPEAHarnessSmoke {
         Asserts.assertEquals(body.deoptBundleAtCall("multiline.invoke", 0).rootScope().bci(), 43);
         Asserts.assertEquals(body.callOccurrencesAtBCI("multiline.call", 41), List.of(0));
         Asserts.assertEquals(body.callOccurrencesAtBCI("multiline.invoke", 43), List.of(0));
+    }
+
+    private static void testCompleteCallInstructionCollection(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "%split = invoke ptr addrspace(1)\n"
+                        + "  @jeandle.new_instance(\n"
+                        + "  )\n"
+                        + "  #7 nounwind\n"
+                        + "  [ " + deoptBundle(51) + " ]\n"
+                        + "  to label %next unwind label %fail",
+                "next:",
+                "%attr = call i32 @attributes.site(\n"
+                        + "  i32 3)\n"
+                        + "  #8 noinline\n"
+                        + "  [ " + deoptBundle(53) + " ]\n"
+                        + "  , !dbg !7",
+                "%adjacent = add i32 %attr, 1",
+                "ret i32 %adjacent",
+                "fail:",
+                "ret i32 0");
+
+        List<PEATestUtils.AllocationSite> allocations = body.allocations();
+        Asserts.assertEquals(allocations.size(), 1);
+        Asserts.assertEquals(allocations.get(0).key(), new PEATestUtils.AllocationKey(
+                PEATestUtils.AllocationKind.INSTANCE, 51));
+        Asserts.assertFalse(allocations.get(0).instruction().contains("%adjacent"),
+                "the collector must stop before the adjacent instruction");
+        Asserts.assertEquals(body.deoptBundleAtAllocation("%split").rootScope().bci(), 51);
+        Asserts.assertEquals(body.deoptBundleAtCall("attributes.site", 0).rootScope().bci(), 53);
     }
 
     private static void testBlockLocalExactAssertions(Method method) {
@@ -738,16 +769,16 @@ public class TestPEAHarnessSmoke {
         Constructor<TestWrapper> constructor = TestWrapper.class.getConstructor();
         Executable executableConstructor = constructor;
         PEATestUtils.PEAOnOffResult comparison = PEATestUtils.behaviorRun(WRAPPER, target)
-                .compileOnly(executableConstructor)
-                .dontinline(executableConstructor)
+                .compileonly(executableConstructor)
+                .inline(executableConstructor)
                 .maxArrayLength(128)
                 .runPEAOnOffEquivalentWithCommands();
         String constructorPattern = WRAPPER + "::<init>()V";
         String compileOnly = "-XX:CompileCommand=compileonly," + constructorPattern;
-        String dontinline = "-XX:CompileCommand=dontinline," + constructorPattern;
+        String inline = "-XX:CompileCommand=inline," + constructorPattern;
         for (List<String> command : List.of(comparison.onCommand(), comparison.offCommand())) {
             Asserts.assertEquals(command.stream().filter(compileOnly::equals).count(), 1L);
-            Asserts.assertEquals(command.stream().filter(dontinline::equals).count(), 1L);
+            Asserts.assertEquals(command.stream().filter(inline::equals).count(), 1L);
             Asserts.assertTrue(command.stream().anyMatch(option -> option.contains(
                     "-jeandle-pea-max-array-length=128")));
         }
