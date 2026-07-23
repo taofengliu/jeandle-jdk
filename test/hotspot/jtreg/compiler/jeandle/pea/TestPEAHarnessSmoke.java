@@ -54,11 +54,16 @@ public class TestPEAHarnessSmoke {
 
         testMethodIds(noArgs, complex, decoy);
         testSyntheticParser(noArgs, complex, decoy);
+        testTypedDeoptParser(noArgs);
+        testMalformedDeoptBundles(noArgs);
+        testExactAllocationSelection(noArgs);
         testLockReplayParser(noArgs, complex);
         testMalformedTranscripts(noArgs);
         testMalformedLockReplays(noArgs);
         testManagedOptionRejection(noArgs);
         testLockingModes(noArgs);
+        testInlineCommandHandling(noArgs, decoy);
+        testActiveFrameArgumentChecks(decoy);
         testNotCompilableFailsFast();
         testDumpPairing(noArgs, complex);
         testRealShapeRun(noArgs, complex, decoy);
@@ -89,6 +94,153 @@ public class TestPEAHarnessSmoke {
                 "__jeandle_osr." + first.llvmFunctionName());
         Asserts.assertNotEquals(first.llvmFunctionName(), overloaded.llvmFunctionName());
         Asserts.assertNotEquals(first.dumpStem(), extra.dumpStem());
+    }
+
+    private static void testTypedDeoptParser(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        String simple = deoptBundle(11,
+                typed(0, 0, 10), "i32 1");
+        String rich = "\"deopt\"("
+                + "i64 0, i32 44, i32 44, "
+                // Emit the array descriptor first to prove topology is independent
+                // of descriptor order and supports forward references.
+                + typed(1, 4, 13) + ", i64 2000, i32 2, "
+                + typed(20, 0, 12) + ", ptr addrspace(1) null, "
+                + typed(16, 8, 12) + ", i32 0, "
+                + typed(0, 4, 12) + ", i64 1000, i32 2, "
+                + typed(16, 0, 10) + ", i32 %scalar, "
+                + typed(8, 8, 12) + ", i32 1, "
+                + typed(0, 8, 12) + ", i32 0, "
+                + typed(1, 0, 10) + ", i32 %local, "
+                + typed(2, 0, 12) + ", ptr addrspace(1) null, "
+                + typed(3, 0, 12) + ", ptr addrspace(1) %external, "
+                + typed(0, 9, 12) + ", i32 1, "
+                + typed(1, 3, 12) + ", i32 0, ptr %rootLock, "
+                + typed(0, 5, 15) + ", ptr %origPc, "
+                + typed(0, 6, 17) + ", i64 777, "
+                + "i64 1, i32 55, i32 55, "
+                + typed(0, 0, 12) + ", ptr addrspace(1) %inlineExternal, "
+                + typed(0, 1, 10) + ", i32 9, "
+                + typed(0, 3, 12) + ", ptr addrspace(1) null, ptr %inlineLock)";
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "call void @exact.site() [ " + simple + " ]",
+                "call void @exact.site() [ " + rich + " ]",
+                "ret i32 1");
+
+        PEATestUtils.DeoptBundle bundle = body.deoptBundleAtCall("exact.site", 1);
+        Asserts.assertEquals(bundle.rootScope().bci(), 44);
+        Asserts.assertEquals(bundle.rootScope().duplicateBCI(), 44);
+        Asserts.assertFalse(bundle.rootScope().shouldReexecute());
+        Asserts.assertEquals(bundle.inlineScopes().size(), 1);
+        PEATestUtils.DeoptScope inline = bundle.inlineScopes().get(0);
+        Asserts.assertEquals(inline.methodOperand(), "i64 777");
+        Asserts.assertTrue(inline.shouldReexecute());
+        Asserts.assertEquals(inline.bci(), 55);
+        Asserts.assertEquals(bundle.scopes(),
+                List.of(bundle.rootScope(), bundle.inlineScopes().get(0)));
+
+        Asserts.assertEquals(bundle.rootScope().locals().get(0).kind(),
+                PEATestUtils.DeoptValueKind.VO_REF);
+        Asserts.assertEquals(bundle.rootScope().locals().get(0).virtualObjectId(), 0);
+        Asserts.assertEquals(bundle.rootScope().locals().get(1).kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertEquals(bundle.rootScope().locals().get(2).kind(),
+                PEATestUtils.DeoptValueKind.NULL);
+        Asserts.assertEquals(bundle.rootScope().locals().get(3).kind(),
+                PEATestUtils.DeoptValueKind.MATERIALIZED_OOP);
+        Asserts.assertEquals(bundle.rootScope().stack().get(0).kind(),
+                PEATestUtils.DeoptValueKind.VO_REF);
+        Asserts.assertThrows(UnsupportedOperationException.class,
+                () -> bundle.rootScope().locals().put(9,
+                        bundle.rootScope().locals().get(0)));
+
+        Asserts.assertEquals(bundle.virtualObjects().size(), 2);
+        PEATestUtils.VirtualObjectDescriptor instance = bundle.virtualObject(0);
+        PEATestUtils.VirtualObjectDescriptor array = bundle.virtualObject(1);
+        Asserts.assertEquals(instance.kind(), PEATestUtils.DescriptorKind.INSTANCE);
+        Asserts.assertEquals(array.kind(), PEATestUtils.DescriptorKind.ARRAY);
+        Asserts.assertEquals(instance.klassOperand(), "i64 1000");
+        Asserts.assertEquals(array.klassOperand(), "i64 2000");
+        Asserts.assertEquals(instance.fields().get(16).value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertEquals(array.elements().get(20).value().kind(),
+                PEATestUtils.DeoptValueKind.NULL);
+        bundle.assertVORef(0, 8, 1);
+        bundle.assertVORef(1, 16, 0);
+        bundle.assertVirtualObjectIds(0, 1);
+
+        PEATestUtils.DeoptMonitor eliminated = bundle.rootScope().monitors().get(0);
+        Asserts.assertTrue(eliminated.eliminated());
+        Asserts.assertEquals(eliminated.depth(), 0);
+        Asserts.assertEquals(eliminated.owner().kind(),
+                PEATestUtils.DeoptValueKind.VO_REF);
+        Asserts.assertEquals(eliminated.owner().virtualObjectId(), 0);
+        Asserts.assertEquals(eliminated.lockOperand(), "ptr %rootLock");
+        PEATestUtils.DeoptMonitor real = inline.monitors().get(0);
+        Asserts.assertFalse(real.eliminated());
+        Asserts.assertEquals(real.owner().kind(), PEATestUtils.DeoptValueKind.NULL);
+
+        Asserts.assertEquals(body.deoptBundleAtCall("exact.site", 0)
+                .rootScope().bci(), 11);
+        expectFailure("missing exact callee",
+                () -> body.deoptBundleAtCall("exact.site.extra", 0));
+        expectFailure("negative exact call occurrence",
+                () -> body.deoptBundleAtCall("exact.site", -1));
+    }
+
+    private static void testMalformedDeoptBundles(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        expectDeoptFailure(id, "mismatched duplicated BCI",
+                "\"deopt\"(i64 0, i32 1, i32 2)");
+        expectDeoptFailure(id, "duplicate virtual-object id",
+                "\"deopt\"(i64 0, i32 1, i32 1, "
+                        + typed(0, 4, 12) + ", i64 10, i32 0, "
+                        + typed(0, 4, 12) + ", i64 11, i32 0)");
+        expectDeoptFailure(id, "duplicate descriptor offset",
+                "\"deopt\"(i64 0, i32 1, i32 1, "
+                        + typed(0, 4, 12) + ", i64 10, i32 2, "
+                        + typed(8, 0, 10) + ", i32 1, "
+                        + typed(8, 0, 10) + ", i32 2)");
+        expectDeoptFailure(id, "dangling VORef",
+                "\"deopt\"(i64 0, i32 1, i32 1, "
+                        + typed(0, 8, 12) + ", i32 7)");
+        expectDeoptFailure(id, "unknown value encoding",
+                "\"deopt\"(i64 0, i32 1, i32 1, "
+                        + typed(0, 2, 10) + ", i32 7)");
+        expectDeoptFailure(id, "descriptor after root values",
+                "\"deopt\"(i64 0, i32 1, i32 1, "
+                        + typed(0, 0, 10) + ", i32 7, "
+                        + typed(0, 4, 12) + ", i64 10, i32 0)");
+        expectDeoptFailure(id, "duplicate deopt bundle",
+                "\"deopt\"(i64 0, i32 1, i32 1) ] [ "
+                        + "\"deopt\"(i64 0, i32 2, i32 2)");
+    }
+
+    private static void testExactAllocationSelection(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "%first = invoke ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(7) + " ] to label %next unwind label %fail",
+                "%selected = invoke ptr addrspace(1) @jeandle.new_array() [ "
+                        + deoptBundle(19) + " ] to label %next unwind label %fail",
+                "ret i32 1");
+        Asserts.assertEquals(body.deoptBundleAtAllocation("%selected")
+                .rootScope().bci(), 19);
+        Asserts.assertEquals(body.deoptBundleAtAllocation("%first")
+                .rootScope().bci(), 7);
+        expectFailure("missing allocation SSA",
+                () -> body.deoptBundleAtAllocation("%missing"));
+        expectFailure("allocation result without percent",
+                () -> body.deoptBundleAtAllocation("selected"));
+
+        PEATestUtils.IRBody ambiguous = bodyWithInstructions(id,
+                "%same = invoke ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(7) + " ] to label %next unwind label %fail",
+                "%same = invoke ptr addrspace(1) @jeandle.new_array() [ "
+                        + deoptBundle(8) + " ] to label %next unwind label %fail",
+                "ret i32 1");
+        expectFailure("ambiguous allocation SSA",
+                () -> ambiguous.deoptBundleAtAllocation("%same"));
     }
 
     private static void testSyntheticParser(Method noArgs, Method complex, Method decoy) {
@@ -435,6 +587,28 @@ public class TestPEAHarnessSmoke {
                 WRAPPER, target).extraFlags("-XX:LockingMode=2"));
     }
 
+    private static void testInlineCommandHandling(Method target, Method helper) {
+        PEATestUtils.RunBuilder builder = PEATestUtils.behaviorRun(WRAPPER, target);
+        builder.inline(helper);
+        expectFailure("duplicate inline command", () -> builder.inline(helper));
+        expectFailure("inline/dontinline conflict", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).inline(helper).dontinline(helper));
+        expectFailure("dontinline/inline conflict", () -> PEATestUtils.behaviorRun(
+                WRAPPER, target).dontinline(helper).inline(helper));
+    }
+
+    private static void testActiveFrameArgumentChecks(Method uncompiled) {
+        Asserts.assertTrue(PEATestUtils.ActiveFrameDeoptEvidence.class.isRecord());
+        Asserts.assertThrows(NullPointerException.class,
+                () -> PEATestUtils.deoptimizeActiveFrame(null, 1));
+        Asserts.assertThrows(IllegalArgumentException.class,
+                () -> PEATestUtils.deoptimizeActiveFrame(uncompiled, -1));
+        RuntimeException failure = Asserts.assertThrows(RuntimeException.class,
+                () -> PEATestUtils.deoptimizeActiveFrame(uncompiled, 1));
+        Asserts.assertTrue(failure.getMessage().contains("compiled at level 4"),
+                "active-frame precondition reports exact compilation state");
+    }
+
     private static void testRealShapeRun(Method noArgs, Method complex, Method decoy)
             throws Exception {
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, noArgs, complex)
@@ -527,9 +701,19 @@ public class TestPEAHarnessSmoke {
                 .lockingMode(2)
                 .peaIterations(4)
                 .dontinline(helper)
+                .inline(target)
                 .runPEAOnOffEquivalentWithCommands();
         assertLockingModeCommand(comparison.onCommand(), 2);
         assertLockingModeCommand(comparison.offCommand(), 2);
+        String inline = "-XX:CompileCommand=inline,"
+                + PEATestUtils.MethodId.of(target).compileCommandPattern();
+        Asserts.assertEquals(comparison.onCommand().stream().filter(inline::equals).count(), 1L);
+        Asserts.assertEquals(comparison.offCommand().stream().filter(inline::equals).count(), 1L);
+        String dontinline = "-XX:CompileCommand=dontinline,"
+                + PEATestUtils.MethodId.of(helper).compileCommandPattern();
+        Asserts.assertTrue(comparison.onCommand().indexOf(inline)
+                < comparison.onCommand().indexOf(dontinline),
+                "inline commands must precede dontinline commands");
         Asserts.assertThrows(UnsupportedOperationException.class,
                 () -> comparison.onCommand().add("-version"));
     }
@@ -593,6 +777,33 @@ public class TestPEAHarnessSmoke {
     private static String function(PEATestUtils.MethodId id, String... instructions) {
         return "define hotspotcc i32 @\"" + id.llvmFunctionName() + "\"() {\nentry:\n  "
                 + String.join("\n  ", instructions) + "\n}";
+    }
+
+    private static PEATestUtils.IRBody bodyWithInstructions(
+            PEATestUtils.MethodId id, String... instructions) {
+        String body = function(id, instructions);
+        String transcript = String.join("\n",
+                before(id, 0), body, stats(id, 0, 0, 0),
+                after(id, 0), body);
+        return PEATestUtils.PEAReport.parse(transcript, id).report(id).round0Before();
+    }
+
+    private static void expectDeoptFailure(
+            PEATestUtils.MethodId id, String label, String bundle) {
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "call void @malformed.site() [ " + bundle + " ]",
+                "ret i32 1");
+        expectFailure(label, () -> body.deoptBundleAtCall("malformed.site", 0));
+    }
+
+    private static String deoptBundle(int bci, String... values) {
+        String suffix = values.length == 0 ? "" : ", " + String.join(", ", values);
+        return "\"deopt\"(i64 0, i32 " + bci + ", i32 " + bci + suffix + ")";
+    }
+
+    private static String typed(int index, int valueType, int basicType) {
+        long encoded = ((long) index << 32) | ((long) valueType << 16) | basicType;
+        return "i64 " + Long.toUnsignedString(encoded);
     }
 
     private static void writePair(Path dir, String stem, String timestamp,
