@@ -48,7 +48,9 @@ public class TestPEANonVirtualizableInstances {
     public static void main(String[] args) throws Exception {
         Method volatileOnly = TestWrapper.class.getMethod("testVolatileOnly", int.class, int.class);
         Method finalizable = TestWrapper.class.getMethod("testFinalizable", int.class);
-        Method thread = TestWrapper.class.getMethod("testThreadLifecycle", int.class);
+        Method threadConstruction = TestWrapper.class.getMethod(
+                "testThreadConstructionOnly", int.class);
+        Method threadLifecycle = TestWrapper.class.getMethod("testThreadLifecycle", int.class);
         Method weakCaller = TestWrapper.class.getMethod("testWeakReference", Object.class);
         Method weakFactory = TestWrapper.class.getMethod("makeWeakReference", Object.class);
         Method identity = TestWrapper.class.getMethod("testIdentitySensitive", int.class);
@@ -67,8 +69,8 @@ public class TestPEANonVirtualizableInstances {
                 TestWrapper.TinyThread.class.getDeclaredConstructor(int.class);
         Constructor<TestWrapper.ThrowingBox> throwingCtor =
                 TestWrapper.ThrowingBox.class.getDeclaredConstructor(int.class);
-        Method[] targets = {volatileOnly, finalizable, thread, weakCaller, weakFactory,
-                identity, unknown, valueBased, throwing};
+        Method[] targets = {volatileOnly, finalizable, threadConstruction, threadLifecycle,
+                weakCaller, weakFactory, identity, unknown, valueBased, throwing};
 
         behaviorBuilder(targets, unknownConsumer, threadRunner, weakFactory, identityHash,
                 finalizableCtor, threadCtor, throwingCtor)
@@ -78,7 +80,8 @@ public class TestPEANonVirtualizableInstances {
                         finalizableCtor, threadCtor, throwingCtor).run()) {
             assertVolatileVirtualized(run, volatileOnly);
             assertFinalizableRefused(run, finalizable);
-            assertTinyThreadRetained(run, thread);
+            assertTinyThreadConstructionRefused(run, threadConstruction);
+            assertTinyThreadRetained(run, threadLifecycle);
             assertWeakReferenceRetainedByDeoptimization(run, weakFactory);
             assertWeakReferenceCallerFlow(run, weakCaller, weakFactory);
             assertIdentityMaterialized(run, identity, identityHash);
@@ -207,6 +210,49 @@ public class TestPEANonVirtualizableInstances {
                             .anyMatch(retained.key()::equals),
                     target + ": PEA may retain only source allocations: " + retained.key());
         }
+    }
+
+    private static void assertTinyThreadConstructionRefused(PEATestUtils.RunResult run,
+                                                             Method target) throws Exception {
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        PEATestUtils.IRBody before = first.before();
+        PEATestUtils.AllocationKey tinyThread = new PEATestUtils.AllocationKey(
+                PEATestUtils.AllocationKind.INSTANCE, 0);
+        List<PEATestUtils.AllocationSite> sourceMatches = before.allocations().stream()
+                .filter(site -> site.key().equals(tinyThread)).toList();
+        Asserts.assertEquals(sourceMatches.size(), 1,
+                target + ": exactly one construction-only TinyThread allocation at bci 0");
+        PEATestUtils.AllocationSite source = sourceMatches.get(0);
+
+        PEATestUtils.IRBody after = run.report(target).finalAfter();
+        long retainedMatches = after.allocations().stream()
+                .filter(site -> site.key().equals(tinyThread)).count();
+        Asserts.assertEquals(retainedMatches, 1L,
+                target + ": construction-only TinyThread allocation is retained exactly once");
+        for (PEATestUtils.AllocationSite retained : after.allocations()) {
+            Asserts.assertTrue(before.allocations().stream()
+                            .map(PEATestUtils.AllocationSite::key)
+                            .anyMatch(retained.key()::equals),
+                    target + ": PEA may retain only source allocations: " + retained.key());
+        }
+
+        List<PEATestUtils.PEAEffect> attributedEffects = first.effects().stream()
+                .filter(effect -> {
+                    int targetAt = effect.detail().indexOf(" target=");
+                    if (targetAt < 0) {
+                        return false;
+                    }
+                    String targetInstruction = effect.detail()
+                            .substring(targetAt + " target=".length()).stripLeading();
+                    return targetInstruction.startsWith(source.result() + " =");
+                }).toList();
+        Asserts.assertEquals(attributedEffects, List.of(),
+                target + ": eligibility-refused TinyThread has no attributable VO effects");
+        Asserts.assertEquals(first.effectCount(
+                        "EliminateAllocation", source.instruction()), 0L,
+                target + ": TinyThread allocation never enters virtual state");
+        Asserts.assertEquals(first.effectCount("Materialize", source.instruction()), 0L,
+                target + ": TinyThread allocation is not virtualized then materialized");
     }
 
     private static void assertWeakReferenceRetainedByDeoptimization(PEATestUtils.RunResult run,
@@ -464,6 +510,11 @@ public class TestPEANonVirtualizableInstances {
                         "finalizable object state");
                 digest = mix(digest, finalizableResult);
 
+                int constructionResult = testThreadConstructionOnly(value);
+                Asserts.assertEquals(constructionResult, value * 7 + 5,
+                        "construction-only Thread subclass state");
+                digest = mix(digest, constructionResult);
+
                 int threadResult = testThreadLifecycle(value);
                 Asserts.assertEquals(threadResult, value * 5 + 3,
                         "Thread start/join lifecycle");
@@ -536,6 +587,11 @@ public class TestPEANonVirtualizableInstances {
             threadValue = 0;
             TinyThread thread = new TinyThread(value);
             return startAndJoin(thread);
+        }
+
+        public static int testThreadConstructionOnly(int value) {
+            TinyThread thread = new TinyThread(value);
+            return thread.value * 7 + 5;
         }
 
         public static int startAndJoin(TinyThread thread) throws InterruptedException {
