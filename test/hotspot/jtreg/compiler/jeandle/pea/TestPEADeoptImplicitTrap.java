@@ -45,40 +45,72 @@ import jdk.test.whitebox.WhiteBox;
 public class TestPEADeoptImplicitTrap {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEADeoptImplicitTrap$TestWrapper";
+    private static final String SCENARIO_PROPERTY =
+            "compiler.jeandle.pea.implicitTrapScenario";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+    private static final int NULL_TRAP_BCI = 35;
+    private static final int CHECKCAST_TRAP_BCI = 25;
     private static final int BOUNDS_TRAP_BCI = 33;
     private static final int DIVIDE_TRAP_BCI = 38;
     private static final int UNCOMMON_TRAP_BCI = 30;
 
-    public static void main(String[] args) throws Exception {
-        Method nullTrap = TestWrapper.class.getMethod(
-                "nullTrap", TestWrapper.External.class, int.class);
-        Method checkcastTrap = TestWrapper.class.getMethod(
-                "checkcastTrap", Object.class, int.class);
-        Method boundsTrap = TestWrapper.class.getMethod(
-                "boundsTrap", int[].class, int.class, int.class);
-        Method divideTrap = TestWrapper.class.getMethod("divideTrap", int.class, int.class);
-        Method uncommonTrap = TestWrapper.class.getMethod("uncommonTrap", int.class, int.class);
-        Method[] targets = {nullTrap, checkcastTrap, boundsTrap, divideTrap, uncommonTrap};
+    private enum Scenario {
+        NULL("null", true, 1, 0, NULL_TRAP_BCI),
+        CHECKCAST("checkcast", false, 1, 0, CHECKCAST_TRAP_BCI),
+        BOUNDS("bounds", false, 2, 1, BOUNDS_TRAP_BCI),
+        DIVIDE("divide-zero", true, 1, 0, DIVIDE_TRAP_BCI),
+        UNCOMMON("uncommon branch", true, 1, 0, UNCOMMON_TRAP_BCI);
 
-        builder(false, targets).runPEAOnOffEquivalent();
-        try (PEATestUtils.RunResult run = builder(true, targets).run()) {
-            assertTrapShape(run, nullTrap, "null", true, 1, 0, -1);
-            assertTrapShape(run, checkcastTrap, "checkcast", false, 1, 0, -1);
-            assertTrapShape(run, boundsTrap, "bounds", false, 2, 1,
-                    BOUNDS_TRAP_BCI);
-            assertTrapShape(run, divideTrap, "divide-zero", true, 1, 0,
-                    DIVIDE_TRAP_BCI);
-            assertTrapShape(run, uncommonTrap, "uncommon branch", true, 1, 0,
-                    UNCOMMON_TRAP_BCI);
+        private final String kind;
+        private final boolean hasMonitor;
+        private final int trapCount;
+        private final int trapOccurrence;
+        private final int trapBCI;
+
+        Scenario(String kind, boolean hasMonitor, int trapCount, int trapOccurrence,
+                 int trapBCI) {
+            this.kind = kind;
+            this.hasMonitor = hasMonitor;
+            this.trapCount = trapCount;
+            this.trapOccurrence = trapOccurrence;
+            this.trapBCI = trapBCI;
         }
     }
 
-    private static PEATestUtils.RunBuilder builder(boolean shape, Method[] targets)
+    public static void main(String[] args) throws Exception {
+        for (Scenario scenario : Scenario.values()) {
+            runScenario(scenario);
+        }
+    }
+
+    private static void runScenario(Scenario scenario) throws Exception {
+        Method target = targetFor(scenario);
+        builder(false, target, scenario).runPEAOnOffEquivalent();
+        try (PEATestUtils.RunResult run = builder(true, target, scenario).run()) {
+            assertTrapShape(run, target, scenario);
+        }
+    }
+
+    private static Method targetFor(Scenario scenario) throws ReflectiveOperationException {
+        return switch (scenario) {
+            case NULL -> TestWrapper.class.getMethod(
+                    "nullTrap", TestWrapper.External.class, int.class);
+            case CHECKCAST -> TestWrapper.class.getMethod("checkcastTrap", Object.class,
+                    int.class);
+            case BOUNDS -> TestWrapper.class.getMethod("boundsTrap", int[].class,
+                    int.class, int.class);
+            case DIVIDE -> TestWrapper.class.getMethod("divideTrap", int.class, int.class);
+            case UNCOMMON -> TestWrapper.class.getMethod("uncommonTrap", int.class, int.class);
+        };
+    }
+
+    private static PEATestUtils.RunBuilder builder(boolean shape, Method target,
+                                                    Scenario scenario)
             throws ReflectiveOperationException {
-        PEATestUtils.RunBuilder builder = shape ? PEATestUtils.shapeRun(WRAPPER, targets)
-                : PEATestUtils.behaviorRun(WRAPPER, targets);
-        return builder.extraFlags("-XX:+JeandleUseProfile", "-XX:CompileThreshold=20000")
+        PEATestUtils.RunBuilder builder = shape ? PEATestUtils.shapeRun(WRAPPER, target)
+                : PEATestUtils.behaviorRun(WRAPPER, target);
+        return builder.extraFlags("-D" + SCENARIO_PROPERTY + "=" + scenario.name(),
+                        "-XX:+JeandleUseProfile", "-XX:CompileThreshold=20000")
                 .inline(TestWrapper.class.getDeclaredMethod("graphRoot"))
                 .inline(TestWrapper.class.getDeclaredMethod(
                         "graphArray", TestWrapper.Node.class,
@@ -86,9 +118,7 @@ public class TestPEADeoptImplicitTrap {
     }
 
     private static void assertTrapShape(PEATestUtils.RunResult run, Method target,
-                                        String kind, boolean hasMonitor,
-                                        int expectedTrapCount, int trapOccurrence,
-                                        int expectedBCI)
+                                        Scenario scenario)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
         report.assertConverged();
@@ -97,46 +127,60 @@ public class TestPEADeoptImplicitTrap {
 
         Asserts.assertEquals(before.peaAllocCount(), 4,
                 target + ": root, peer, shared child, and object array enter PEA");
-        assertTrapSelection(before, target, kind, expectedTrapCount, trapOccurrence,
-                expectedBCI);
+        assertTrapSelection(before, target, scenario, "frontend");
         Asserts.assertEquals(after.occurrenceCount("@llvm.experimental.deoptimize"),
-                expectedTrapCount, target + ": exact natural " + kind + " trap count");
+                scenario.trapCount, target + ": exact natural " + scenario.kind + " trap count");
+        assertTrapSelection(after, target, scenario, "final");
         PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(
-                "llvm.experimental.deoptimize", trapOccurrence);
+                "llvm.experimental.deoptimize", scenario.trapOccurrence);
         Asserts.assertEquals(bundle.scopes().size(), 1,
                 target + ": trap has one active Java scope");
         Asserts.assertEquals(bundle.rootScope().duplicateBCI(), bundle.rootScope().bci(),
                 target + ": trap BCI is duplicated exactly");
-        assertGraph(bundle, target, hasMonitor);
+        assertGraph(bundle, target, scenario.hasMonitor);
 
         PEATestUtils.IRBlock trapBlock =
-                after.blockContaining("@llvm.experimental.deoptimize", trapOccurrence);
+                after.blockContaining("@llvm.experimental.deoptimize", scenario.trapOccurrence);
         trapBlock.assertAbsent("@jeandle.new_");
         trapBlock.assertAbsent("store atomic i32");
         trapBlock.assertAbsent("store atomic i32 900");
     }
 
-    private static void assertTrapSelection(PEATestUtils.IRBody before, Method target,
-                                            String kind, int expectedTrapCount,
-                                            int trapOccurrence, int expectedBCI) {
-        Asserts.assertEquals(before.occurrenceCount("@llvm.experimental.deoptimize"),
-                expectedTrapCount, target + ": exact frontend " + kind + " trap count");
-        PEATestUtils.DeoptBundle selected = before.deoptBundleAtCall(
-                "llvm.experimental.deoptimize", trapOccurrence);
-        if (expectedBCI >= 0) {
-            Asserts.assertEquals(selected.rootScope().bci(), expectedBCI,
-                    target + ": selected " + kind + " trap BCI");
-        }
-        if (expectedTrapCount > 1) {
+    private static void assertTrapSelection(PEATestUtils.IRBody body, Method target,
+                                            Scenario scenario, String phase) {
+        Asserts.assertEquals(body.occurrenceCount("@llvm.experimental.deoptimize"),
+                scenario.trapCount, target + ": exact " + phase + " " + scenario.kind
+                        + " trap count");
+        PEATestUtils.DeoptBundle selected = body.deoptBundleAtCall(
+                "llvm.experimental.deoptimize", scenario.trapOccurrence);
+        Asserts.assertEquals(selected.rootScope().bci(), scenario.trapBCI,
+                target + ": selected " + phase + " " + scenario.kind + " trap BCI");
+        if (scenario == Scenario.BOUNDS) {
             // The frontend emits the array null guard before the bounds guard;
-            // both naturally describe the iaload BCI.
-            PEATestUtils.DeoptBundle first = before.deoptBundleAtCall(
+            // both naturally describe the iaload BCI but use distinct fail blocks.
+            PEATestUtils.DeoptBundle first = body.deoptBundleAtCall(
                     "llvm.experimental.deoptimize", 0);
-            Asserts.assertEquals(first.rootScope().bci(), expectedBCI,
-                    target + ": array null check is first at iaload BCI");
-            Asserts.assertEquals(selected.rootScope().bci(), expectedBCI,
-                    target + ": bounds check is second at the same iaload BCI");
+            Asserts.assertEquals(first.rootScope().bci(), scenario.trapBCI,
+                    target + ": first " + phase + " bounds-method trap BCI");
+            if (phase.equals("frontend")) {
+                assertBoundsFailBlocks(body, target);
+            }
         }
+    }
+
+    private static void assertBoundsFailBlocks(PEATestUtils.IRBody body, Method target) {
+        PEATestUtils.IRBlock nullFail = body.blockContaining(
+                "@llvm.experimental.deoptimize", 0);
+        Asserts.assertEquals(nullFail.occurrenceCount("bci_33_null_check_fail:"), 1,
+                target + ": first bounds-method trap is the null-check fail block");
+        PEATestUtils.IRBlock rangeFail = body.blockContaining(
+                "@llvm.experimental.deoptimize", 1);
+        Asserts.assertEquals(rangeFail.occurrenceCount("bci_33_boundary_check_fail:"), 1,
+                target + ": second bounds-method trap is the range-check fail block");
+        body.assertBefore("label %bci_33_null_check_fail", 0,
+                "bci_33_null_check_fail:", 0);
+        body.assertBefore("label %bci_33_boundary_check_fail", 0,
+                "bci_33_boundary_check_fail:", 0);
     }
 
     private static void assertGraph(PEATestUtils.DeoptBundle bundle, Method target,
@@ -224,13 +268,6 @@ public class TestPEADeoptImplicitTrap {
     public static class TestWrapper {
         private static final int WARMUP_ITERATIONS = 10_000;
         private static final WhiteBox WB = WhiteBox.getWhiteBox();
-        private static final Method NULL_TARGET = target("nullTrap", External.class, int.class);
-        private static final Method CHECKCAST_TARGET = target("checkcastTrap", Object.class,
-                int.class);
-        private static final Method BOUNDS_TARGET = target("boundsTrap", int[].class,
-                int.class, int.class);
-        private static final Method DIVIDE_TARGET = target("divideTrap", int.class, int.class);
-        private static final Method UNCOMMON_TARGET = target("uncommonTrap", int.class, int.class);
         private static int normalPaths;
         private static int nullCatches;
         private static int checkcastCatches;
@@ -255,39 +292,23 @@ public class TestPEADeoptImplicitTrap {
         public static class Rejected { }
 
         public static void main(String[] args) throws Exception {
+            Scenario scenario = selectedScenario();
             new Node();
             new External();
             new Accepted();
             new Rejected();
             long digest = 0x6A09E667F3BCC909L;
-            warmNormalPaths();
-            Asserts.assertEquals(normalPaths, WARMUP_ITERATIONS * 5,
-                    "repeated warm normal paths");
+            warmNormalPath(scenario);
+            Asserts.assertEquals(normalPaths, WARMUP_ITERATIONS,
+                    scenario + ": repeated warm normal path");
 
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
-            ColdObservation nullBefore = observeBeforeColdTrap(NULL_TARGET);
-            digest = mix(digest, nullTrap(null, 4));
-            assertNaturalDecompile(NULL_TARGET, nullBefore);
-            ColdObservation checkcastBefore = observeBeforeColdTrap(CHECKCAST_TARGET);
-            digest = mix(digest, checkcastTrap(new Rejected(), 5));
-            assertNaturalDecompile(CHECKCAST_TARGET, checkcastBefore);
-            ColdObservation boundsBefore = observeBeforeColdTrap(BOUNDS_TARGET);
-            digest = mix(digest, boundsTrap(new int[] {17, 29, 43}, 4, 6));
-            assertNaturalDecompile(BOUNDS_TARGET, boundsBefore);
-            ColdObservation divideBefore = observeBeforeColdTrap(DIVIDE_TARGET);
-            digest = mix(digest, divideTrap(0, 7));
-            assertNaturalDecompile(DIVIDE_TARGET, divideBefore);
-            ColdObservation uncommonBefore = observeBeforeColdTrap(UNCOMMON_TARGET);
-            digest = mix(digest, uncommonTrap(-17, 8));
-            assertNaturalDecompile(UNCOMMON_TARGET, uncommonBefore);
-            Asserts.assertEquals(nullCatches, 1, "one natural null catch");
-            Asserts.assertEquals(checkcastCatches, 1, "one natural checkcast catch");
-            Asserts.assertEquals(boundsCatches, 1, "one natural bounds catch");
-            Asserts.assertEquals(divideCatches, 1, "one natural divide-zero catch");
-            Asserts.assertEquals(uncommonBranches, 1, "one natural uncommon branch");
-            Asserts.assertEquals(monitorReacquires, 1,
-                    "null trap exits and reacquires its monitor once");
+            Method target = targetFor(scenario);
+            ColdObservation before = observeBeforeColdTrap(target);
+            digest = mix(digest, triggerColdPath(scenario));
+            assertNaturalDecompile(target, before);
+            assertColdOutcome(scenario);
             digest = mix(digest, normalPaths);
             digest = mix(digest, nullCatches);
             digest = mix(digest, checkcastCatches);
@@ -298,8 +319,8 @@ public class TestPEADeoptImplicitTrap {
             System.out.println("PEA-RESULT:" + Long.toUnsignedString(digest, 16));
         }
 
-        // Add future trap categories here only with a natural trigger, behavior path,
-        // and exact typed bundle assertion like the three cases below.
+        // Add future trap categories only with a natural trigger, behavior path,
+        // and exact typed bundle assertion like the five cases below.
         public static int nullTrap(External external, int seed) {
             Node root = graphRoot();
             Node peer = root.left;
@@ -457,14 +478,54 @@ public class TestPEADeoptImplicitTrap {
                     * 0x9E3779B97F4A7C15L;
         }
 
-        private static void warmNormalPaths() {
-            for (int iteration = 0; iteration < WARMUP_ITERATIONS; iteration++) {
-                nullTrap(external(7), 1);
-                checkcastTrap(new Accepted(), 2);
-                boundsTrap(new int[] {17, 29, 43}, 1, 3);
-                divideTrap(9, 4);
-                uncommonTrap(17, 5);
+        private static Scenario selectedScenario() {
+            String configured = System.getProperty(SCENARIO_PROPERTY);
+            if (configured == null || configured.isEmpty()) {
+                throw new IllegalStateException("No implicit-trap scenario configured");
             }
+            try {
+                return Scenario.valueOf(configured);
+            } catch (IllegalArgumentException failure) {
+                throw new IllegalStateException("Unknown implicit-trap scenario " + configured,
+                        failure);
+            }
+        }
+
+        private static void warmNormalPath(Scenario scenario) {
+            for (int iteration = 0; iteration < WARMUP_ITERATIONS; iteration++) {
+                switch (scenario) {
+                    case NULL -> nullTrap(external(7), 1);
+                    case CHECKCAST -> checkcastTrap(new Accepted(), 2);
+                    case BOUNDS -> boundsTrap(new int[] {17, 29, 43}, 1, 3);
+                    case DIVIDE -> divideTrap(9, 4);
+                    case UNCOMMON -> uncommonTrap(17, 5);
+                }
+            }
+        }
+
+        private static int triggerColdPath(Scenario scenario) {
+            return switch (scenario) {
+                case NULL -> nullTrap(null, 4);
+                case CHECKCAST -> checkcastTrap(new Rejected(), 5);
+                case BOUNDS -> boundsTrap(new int[] {17, 29, 43}, 4, 6);
+                case DIVIDE -> divideTrap(0, 7);
+                case UNCOMMON -> uncommonTrap(-17, 8);
+            };
+        }
+
+        private static void assertColdOutcome(Scenario scenario) {
+            Asserts.assertEquals(nullCatches, scenario == Scenario.NULL ? 1 : 0,
+                    scenario + ": natural null catches");
+            Asserts.assertEquals(checkcastCatches, scenario == Scenario.CHECKCAST ? 1 : 0,
+                    scenario + ": natural checkcast catches");
+            Asserts.assertEquals(boundsCatches, scenario == Scenario.BOUNDS ? 1 : 0,
+                    scenario + ": natural bounds catches");
+            Asserts.assertEquals(divideCatches, scenario == Scenario.DIVIDE ? 1 : 0,
+                    scenario + ": natural divide-zero catches");
+            Asserts.assertEquals(uncommonBranches, scenario == Scenario.UNCOMMON ? 1 : 0,
+                    scenario + ": natural uncommon branches");
+            Asserts.assertEquals(monitorReacquires, scenario == Scenario.NULL ? 1 : 0,
+                    scenario + ": null monitor reacquires");
         }
 
         private static ColdObservation observeBeforeColdTrap(Method target) {
@@ -481,14 +542,6 @@ public class TestPEADeoptImplicitTrap {
             int decompileCount = WB.getMethodDecompileCount(target);
             Asserts.assertTrue(!stillCompiled || decompileCount > before.decompileCount(),
                     target + ": natural trap deoptimized its level-4 nmethod");
-        }
-
-        private static Method target(String name, Class<?>... parameterTypes) {
-            try {
-                return TestWrapper.class.getMethod(name, parameterTypes);
-            } catch (ReflectiveOperationException failure) {
-                throw new ExceptionInInitializerError(failure);
-            }
         }
 
         private record ColdObservation(boolean compiled, int level, int decompileCount) { }
