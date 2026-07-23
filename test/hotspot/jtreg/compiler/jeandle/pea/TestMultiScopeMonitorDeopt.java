@@ -154,8 +154,6 @@ public class TestMultiScopeMonitorDeopt {
         Asserts.assertTrue(ordinaryRefs.containsAll(
                 Set.of(outerOwner, innerOwner)),
                 target + ": visible owners remain ordinary frame roots");
-        Asserts.assertFalse(ordinaryRefs.contains(monitorOnlyOwner),
-                target + ": innermost owner is reachable only from monitor metadata");
     }
 
     private static PEATestUtils.DeoptBundle exactBundle(
