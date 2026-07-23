@@ -38,8 +38,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import jdk.test.lib.Asserts;
 import jdk.test.whitebox.WhiteBox;
@@ -49,19 +47,6 @@ public class TestPEACyclicObjectGraph {
             "compiler.jeandle.pea.TestPEACyclicObjectGraph$TestWrapper";
     private static final String JEANDLE_NEW_INSTANCE = "@jeandle.new_instance";
     private static final String LOWERED_NEW_INSTANCE = "@new_instance";
-    private static final Pattern DEOPT_BCI = Pattern.compile(
-            "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1,");
-    private static final Pattern DESCRIPTOR = Pattern.compile(
-            "i64 (-?\\d+), i64 (-?\\d+), i32 (\\d+), "
-                    + "i64 (-?\\d+), i32 (-?\\d+), "
-                    + "i64 (-?\\d+), i32 (-?\\d+)");
-    private static final Pattern BASIC_BLOCK_LABEL = Pattern.compile(
-            "^([^\\s:]+):(?:\\s*;.*)?$");
-    private static final long VALUE_TYPE_MASK = 0xffffL;
-    private static final int SCALAR_VALUE_TYPE = 4;
-    private static final int VO_REF_LOCAL_TYPE = 8;
-    private static final int T_INT = 10;
-    private static final int T_OBJECT = 12;
 
     public static void main(String[] args) throws Exception {
         Method self = TestWrapper.class.getMethod("testSelfCycleReadOnly");
@@ -204,31 +189,68 @@ public class TestPEACyclicObjectGraph {
                 target + ": no allocation in lowered final dump");
 
         String helperName = PEATestUtils.MethodId.of(helper).llvmFunctionName();
-        String beforeCall = exactCallLine(report.round0Before(), helperName);
-        String round0Call = exactCallLine(report.round(0).after(), helperName);
-        String finalCall = exactCallLine(report.finalAfter(), helperName);
-        int sourceBCI = deoptBCI(beforeCall, target);
-        Asserts.assertEquals(deoptBCI(round0Call, target), sourceBCI,
+        PEATestUtils.DeoptBundle beforeBundle =
+                report.round0Before().deoptBundleAtCall(helperName, 0);
+        PEATestUtils.DeoptBundle round0Bundle =
+                report.round(0).after().deoptBundleAtCall(helperName, 0);
+        PEATestUtils.DeoptBundle finalBundle =
+                report.finalAfter().deoptBundleAtCall(helperName, 0);
+        int sourceBCI = beforeBundle.rootScope().bci();
+        Asserts.assertEquals(beforeBundle.rootScope().duplicateBCI(), sourceBCI,
+                target + ": frontend helper call has duplicated BCI");
+        Asserts.assertEquals(round0Bundle.rootScope().bci(), sourceBCI,
                 target + ": descriptor rewrite preserves helper-call BCI");
-        Asserts.assertEquals(deoptBCI(finalCall, target), sourceBCI,
+        Asserts.assertEquals(round0Bundle.rootScope().duplicateBCI(), sourceBCI,
+                target + ": descriptor rewrite preserves duplicate helper-call BCI");
+        Asserts.assertEquals(finalBundle.rootScope().bci(), sourceBCI,
                 target + ": final PEA helper-call BCI");
-        Asserts.assertEquals(parseDescriptors(beforeCall).size(), 0,
+        Asserts.assertEquals(finalBundle.rootScope().duplicateBCI(), sourceBCI,
+                target + ": final duplicate PEA helper-call BCI");
+        Asserts.assertEquals(beforeBundle.virtualObjects().size(), 0,
                 target + ": frontend call has no PEA descriptors");
-        assertSixNodeCycleDescriptors(parseDescriptors(round0Call), target);
-        assertSixNodeCycleDescriptors(parseDescriptors(finalCall), target);
+        assertSixNodeCycleDescriptors(round0Bundle, target);
+        assertSixNodeCycleDescriptors(finalBundle, target);
     }
 
-    private static void assertSixNodeCycleDescriptors(List<Descriptor> descriptors,
-                                                       Method target) {
-        Asserts.assertEquals(descriptors.size(), 6,
+    private static void assertSixNodeCycleDescriptors(
+            PEATestUtils.DeoptBundle bundle, Method target) {
+        Asserts.assertEquals(bundle.virtualObjects().size(), 6,
                 target + ": six virtual-object descriptors at helper safepoint");
         Set<Integer> ids = new HashSet<>();
         Map<Integer, Descriptor> byPayload = new HashMap<>();
-        for (Descriptor descriptor : descriptors) {
-            Asserts.assertTrue(ids.add(descriptor.id),
-                    target + ": duplicate descriptor id " + descriptor.id);
-            Asserts.assertEquals(descriptor.fieldCount, 2,
+        for (PEATestUtils.VirtualObjectDescriptor typed
+                : bundle.virtualObjects().values()) {
+            Asserts.assertEquals(typed.kind(), PEATestUtils.DescriptorKind.INSTANCE,
+                    target + ": Node descriptor kind");
+            Asserts.assertTrue(ids.add(typed.id()),
+                    target + ": duplicate descriptor id " + typed.id());
+            Asserts.assertEquals(typed.fields().size(), 2,
                     target + ": Node descriptor field count");
+            Integer payload = null;
+            Integer referenceId = null;
+            for (PEATestUtils.VirtualObjectEntry field : typed.fields().values()) {
+                if (field.basicType() == PEATestUtils.DeoptBasicType.INT
+                        && field.value().kind()
+                                == PEATestUtils.DeoptValueKind.SCALAR) {
+                    String operand = field.value().operand();
+                    Asserts.assertTrue(operand.startsWith("i32 "),
+                            target + ": typed Node payload operand");
+                    payload = Integer.parseInt(operand.substring("i32 ".length()));
+                } else if (field.basicType() == PEATestUtils.DeoptBasicType.OBJECT
+                        && field.value().kind()
+                                == PEATestUtils.DeoptValueKind.VO_REF) {
+                    referenceId = field.value().virtualObjectId();
+                } else {
+                    throw new AssertionError(target
+                            + ": unexpected typed Node descriptor entry");
+                }
+            }
+            Asserts.assertNotNull(payload,
+                    target + ": descriptor " + typed.id() + " missing int payload");
+            Asserts.assertNotNull(referenceId,
+                    target + ": descriptor " + typed.id() + " missing VORef edge");
+            Descriptor descriptor =
+                    new Descriptor(typed.id(), payload, referenceId);
             Asserts.assertTrue(byPayload.put(descriptor.payload, descriptor) == null,
                     target + ": duplicate descriptor payload " + descriptor.payload);
         }
@@ -250,74 +272,6 @@ public class TestPEACyclicObjectGraph {
         Asserts.assertNotNull(to, target + ": missing payload descriptor " + toPayload);
         Asserts.assertEquals(from.referenceId, to.id,
                 target + ": descriptor edge " + fromPayload + " -> " + toPayload);
-    }
-
-    private static List<Descriptor> parseDescriptors(String callLine) {
-        ArrayList<Descriptor> descriptors = new ArrayList<>();
-        Matcher matcher = DESCRIPTOR.matcher(callLine);
-        while (matcher.find()) {
-            long header = parseI64Constant(matcher.group(1));
-            if (valueType(header) != SCALAR_VALUE_TYPE || basicType(header) != T_OBJECT) {
-                continue;
-            }
-            int id = index(header);
-            int fieldCount = Integer.parseInt(matcher.group(3));
-            long firstEncoding = parseI64Constant(matcher.group(4));
-            int firstValue = Integer.parseInt(matcher.group(5));
-            long secondEncoding = parseI64Constant(matcher.group(6));
-            int secondValue = Integer.parseInt(matcher.group(7));
-
-            int payload = Integer.MIN_VALUE;
-            int referenceId = -1;
-            for (int i = 0; i < 2; i++) {
-                long encoding = i == 0 ? firstEncoding : secondEncoding;
-                int value = i == 0 ? firstValue : secondValue;
-                if (valueType(encoding) == 0 && basicType(encoding) == T_INT) {
-                    payload = value;
-                } else if (valueType(encoding) == VO_REF_LOCAL_TYPE
-                        && basicType(encoding) == T_OBJECT) {
-                    referenceId = value;
-                }
-            }
-            Asserts.assertTrue(payload != Integer.MIN_VALUE,
-                    "descriptor " + id + " missing int payload");
-            Asserts.assertTrue(referenceId >= 0,
-                    "descriptor " + id + " missing VORef edge");
-            descriptors.add(new Descriptor(id, fieldCount, payload, referenceId));
-        }
-        return List.copyOf(descriptors);
-    }
-
-    private static long parseI64Constant(String value) {
-        return Long.parseLong(value);
-    }
-
-    private static int valueType(long encoding) {
-        return (int) ((encoding >>> 16) & VALUE_TYPE_MASK);
-    }
-
-    private static int basicType(long encoding) {
-        return (int) (encoding & VALUE_TYPE_MASK);
-    }
-
-    private static int index(long encoding) {
-        return (int) (encoding >>> 32);
-    }
-
-    private static String exactCallLine(PEATestUtils.IRBody body, String functionName) {
-        List<String> lines = body.lines().stream()
-                .filter(line -> line.contains(functionName))
-                .filter(line -> line.contains("\"deopt\"("))
-                .toList();
-        Asserts.assertEquals(lines.size(), 1,
-                body.methodId() + ": exact helper safepoint call");
-        return lines.get(0);
-    }
-
-    private static int deoptBCI(String callLine, Method target) {
-        Matcher matcher = DEOPT_BCI.matcher(callLine);
-        Asserts.assertTrue(matcher.find(), target + ": helper call lacks duplicated BCI");
-        return Integer.parseInt(matcher.group(1));
     }
 
     private static void assertOrigAllocationsRetained(PEATestUtils.IRBody before,
@@ -344,16 +298,15 @@ public class TestPEACyclicObjectGraph {
 
     private static List<Integer> allocationBCIs(PEATestUtils.IRBody body, String callee) {
         ArrayList<Integer> result = new ArrayList<>();
-        for (String line : body.lines()) {
-            if (!line.contains(callee)) {
-                continue;
-            }
-            Matcher matcher = DEOPT_BCI.matcher(line);
-            if (!matcher.find()) {
-                throw new AssertionError(body.methodId() + ": allocation lacks source BCI: "
-                        + line);
-            }
-            result.add(Integer.parseInt(matcher.group(1)));
+        int count = callee.equals(JEANDLE_NEW_INSTANCE)
+                ? body.peaAllocCount() : body.loweredAllocCount();
+        String exactCallee = callee.substring(1);
+        for (int occurrence = 0; occurrence < count; occurrence++) {
+            PEATestUtils.DeoptScope root =
+                    body.deoptBundleAtCall(exactCallee, occurrence).rootScope();
+            Asserts.assertEquals(root.duplicateBCI(), root.bci(),
+                    body.methodId() + ": allocation carries duplicate source BCI");
+            result.add(root.bci());
         }
         return List.copyOf(result);
     }
@@ -383,9 +336,11 @@ public class TestPEACyclicObjectGraph {
     private static String containingBlock(PEATestUtils.IRBody body, String line) {
         int linePosition = position(body, line);
         for (int i = linePosition - 1; i >= 0; i--) {
-            Matcher matcher = BASIC_BLOCK_LABEL.matcher(body.lines().get(i).trim());
-            if (matcher.matches()) {
-                return matcher.group(1);
+            String candidate = body.lines().get(i).trim();
+            int colon = candidate.indexOf(':');
+            if (colon > 0 && candidate.substring(0, colon).chars()
+                    .noneMatch(Character::isWhitespace)) {
+                return candidate.substring(0, colon);
             }
         }
         throw new AssertionError(body.methodId() + ": instruction has no containing block: "
@@ -466,13 +421,11 @@ public class TestPEACyclicObjectGraph {
 
     private static final class Descriptor {
         final int id;
-        final int fieldCount;
         final int payload;
         final int referenceId;
 
-        Descriptor(int id, int fieldCount, int payload, int referenceId) {
+        Descriptor(int id, int payload, int referenceId) {
             this.id = id;
-            this.fieldCount = fieldCount;
             this.payload = payload;
             this.referenceId = referenceId;
         }
