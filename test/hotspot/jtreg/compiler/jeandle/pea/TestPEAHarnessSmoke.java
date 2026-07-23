@@ -55,6 +55,7 @@ public class TestPEAHarnessSmoke {
         Method decoy = TestWrapper.class.getMethod("testExtra");
 
         testMethodIds(noArgs, complex, decoy);
+        testCallableOperandBoundaries(noArgs);
         testSyntheticParser(noArgs, complex, decoy);
         testTypedDeoptParser(noArgs);
         testMalformedDeoptBundles(noArgs);
@@ -65,6 +66,7 @@ public class TestPEAHarnessSmoke {
         testFlexibleAllocationResultsAndBoundaries(noArgs);
         testCommentCannotSupplyDeoptBundle(noArgs);
         testBlockLocalExactAssertions(noArgs);
+        testExactControlFlowBlocks(noArgs);
         testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
         testMalformedTranscripts(noArgs);
@@ -338,6 +340,43 @@ public class TestPEAHarnessSmoke {
         Asserts.assertEquals(body.callOccurrencesAtBCI("multiline.invoke", 43), List.of(0));
     }
 
+    private static void testCallableOperandBoundaries(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody complete = bodyWithInstructions(id,
+                "call void @direct() memory(none) [ \"tag\"(i32 1) ]",
+                "call void %indirect() allocsize(0)",
+                "call void inttoptr (i64 139956031309536 to ptr)() memory(none)",
+                "call void select (i1 true, ptr @left, ptr @right)() memory(none)",
+                "call void blockaddress(@function, %block)() allocsize(0)",
+                "call void getelementptr inbounds (i8, ptr @base, i64 1)()",
+                "call void asm sideeffect \"\", \"\"() [ \"tag\"() ]",
+                "call noundef nonnull ptr @return.attributes() memory(read)",
+                "call <4 x i32> @vector.return()",
+                "call %ReturnType ()* @typed.direct() [ " + deoptBundle(49) + " ]",
+                "ret i32 1");
+        Asserts.assertEquals(complete.peaAllocCount(), 0);
+        Asserts.assertEquals(
+                complete.deoptBundleAtCall("typed.direct", 0).rootScope().bci(), 49);
+
+        PEATestUtils.IRBody truncatedExpression = bodyWithInstructions(id,
+                "call void inttoptr (i64 139956031309536 to ptr) memory(none)",
+                "ret i32 1");
+        expectFailure("post-call memory attribute cannot complete a truncated inttoptr call",
+                truncatedExpression::peaAllocCount);
+
+        PEATestUtils.IRBody truncatedAsm = bodyWithInstructions(id,
+                "call void asm sideeffect \"\", \"\" memory(none)",
+                "ret i32 1");
+        expectFailure("post-call memory attribute cannot complete truncated inline asm",
+                truncatedAsm::peaAllocCount);
+
+        PEATestUtils.IRBody truncatedAngle = bodyWithInstructions(id,
+                "call <4 x i32 @vector.return()",
+                "ret i32 1");
+        expectFailure("unterminated angle delimiter",
+                truncatedAngle::peaAllocCount);
+    }
+
     private static void testCompleteCallInstructionCollection(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
         PEATestUtils.IRBody body = bodyWithInstructions(id,
@@ -445,6 +484,47 @@ public class TestPEAHarnessSmoke {
         expectAssertionFailure("block-local interval count rejects a false negative",
                 () -> entry.assertOccurrenceCountBetween("%first", 0, "add i32", "%last", 0,
                         1));
+    }
+
+    private static void testExactControlFlowBlocks(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "br i1 %ok, label %success, label %\"fallback.block\", !prof !1",
+                "success:",
+                "ret i32 1",
+                "forward:",
+                "br label %success",
+                "\"fallback.block\":",
+                "ret i32 0");
+        PEATestUtils.IRBlock entry = body.blockByLabel("entry");
+        Asserts.assertEquals(entry.label(), "entry");
+        Asserts.assertEquals(entry.conditionalBranchTargets(),
+                List.of("success", "fallback.block"));
+        Asserts.assertEquals(body.blockByLabel("%success").label(), "success");
+        Asserts.assertEquals(body.blockByLabel("%\"fallback.block\"").label(),
+                "fallback.block");
+        Asserts.assertEquals(body.blockByLabel("forward").unconditionalBranchTarget(),
+                "success");
+        expectFailure("unknown exact block label",
+                () -> body.blockByLabel("missing"));
+
+        PEATestUtils.IRBody ambiguous = bodyWithInstructions(id,
+                "same:",
+                "br label %\"same\"",
+                "\"same\":",
+                "ret i32 0");
+        expectFailure("quoted and unquoted labels normalize before uniqueness checks",
+                () -> ambiguous.blockByLabel("same"));
+
+        PEATestUtils.IRBody twoTerminators = bodyWithInstructions(id,
+                "br i1 %first, label %left, label %right",
+                "br i1 %second, label %left, label %right",
+                "left:",
+                "ret i32 1",
+                "right:",
+                "ret i32 0");
+        expectFailure("conditional branch must be the exact single terminator",
+                () -> twoTerminators.blockByLabel("entry").conditionalBranchTargets());
     }
 
     private static void testLoweredAllocationCounting(Method method) {

@@ -70,6 +70,7 @@ public class TestPEAPrimitiveArrayScalarReplacement {
                 .dontinline(booleanChecksum)
                 .run()) {
             for (Method target : targets) {
+                run.report(target).assertConverged();
                 assertPrimitiveArrayScalarReplacement(run, target);
             }
         }

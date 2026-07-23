@@ -31,6 +31,7 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
 
 import jdk.test.lib.Asserts;
@@ -53,6 +54,8 @@ public class TestPEAArrayLengthBoundsAndTypes {
         Method length127 = TestWrapper.class.getMethod("testLength127");
         Method length128 = TestWrapper.class.getMethod("testLength128");
         Method length129 = TestWrapper.class.getMethod("testLength129");
+        Method lengthPhi = TestWrapper.class.getMethod(
+                "testArrayLengthPhi", boolean.class);
         Method dynamicLength = TestWrapper.class.getMethod(
                 "testDynamicLength", int.class);
         Method negative = TestWrapper.class.getMethod("testNegativeConstantLength");
@@ -69,7 +72,7 @@ public class TestPEAArrayLengthBoundsAndTypes {
         Method objectTypes = TestWrapper.class.getMethod(
                 "testObjectArrayTypes", String.class);
         Method failedCheckcast = TestWrapper.class.getMethod("testFailedArrayCheckcast");
-        Method[] targets = {length0, length1, length127, length128, length129,
+        Method[] targets = {length0, length1, length127, length128, length129, lengthPhi,
                 dynamicLength, negative, multi, constantBounds,
                 constantLowerOutOfBounds, constantUpperOutOfBounds, dynamicBounds,
                 primitiveTypes, objectTypes, failedCheckcast};
@@ -81,11 +84,15 @@ public class TestPEAArrayLengthBoundsAndTypes {
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, targets)
                 .maxArrayLength(ARRAY_CAP)
                 .run()) {
+            for (Method target : targets) {
+                run.report(target).assertConverged();
+            }
             for (Method target : new Method[] {
                     length0, length1, length127, length128, constantBounds,
                     primitiveTypes, objectTypes}) {
                 assertNeverEscapeArray(run, target);
             }
+            assertArrayLengthPhi(run, lengthPhi);
             for (Method target : new Method[] {
                     length129, dynamicLength, negative, dynamicBounds}) {
                 assertOriginalArrayRetained(run, target);
@@ -125,6 +132,30 @@ public class TestPEAArrayLengthBoundsAndTypes {
                 target + ": no lowered cap-eligible allocation");
         after.assertAbsent(DEOPTIMIZE);
         run.finalIR(target).assertAbsent(LOWERED_DEOPTIMIZE);
+    }
+
+    private static void assertArrayLengthPhi(
+            PEATestUtils.RunResult run, Method target) throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = first.before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        Asserts.assertEquals(before.allocations().size(), 1,
+                target + ": one source array feeds the nullable length phi");
+        int sourceLengths = before.lineCount(ARRAY_LENGTH);
+        Asserts.assertTrue(sourceLengths > 0,
+                target + ": source retains an explicit arraylength call into PEA");
+        Asserts.assertEquals(first.effectCount("ReplaceCall", ARRAY_LENGTH),
+                (long) sourceLengths,
+                target + ": every source arraylength call is replaced");
+        Asserts.assertEquals(first.neverEscapes(), 1,
+                target + ": the non-null phi input remains virtual");
+        Asserts.assertEquals(first.effectCount("EliminateAllocation"), 1L,
+                target + ": the phi input allocation is eliminated");
+        after.assertRetainsExactlyOriginalAllocations(before);
+        after.assertAbsent(ARRAY_LENGTH);
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                target + ": no phi input allocation reaches lowering");
     }
 
     private static void assertOriginalArrayRetained(PEATestUtils.RunResult run, Method target)
@@ -201,11 +232,17 @@ public class TestPEAArrayLengthBoundsAndTypes {
     private static void assertDynamicBoundsFallbacks(
             PEATestUtils.RunResult run, Method target) throws Exception {
         PEATestUtils.IRBody after = run.report(target).finalAfter();
-        assertConditionalBoundsFallback(after, 0, 26);
-        assertConditionalBoundsFallback(after, 1, 32);
+        PEATestUtils.IRBlock firstSuccess =
+                after.blockContaining(BOUNDS_COMPARE, 1);
+        PEATestUtils.IRBlock secondSuccess =
+                after.blockContaining("_arrayChecksum", 0);
+        assertConditionalBoundsFallback(after, 0, 26, firstSuccess);
+        assertConditionalBoundsFallback(after, 1, 32, secondSuccess);
         PEATestUtils.IRBody finalIR = run.finalIR(target);
-        assertConditionalBoundsStructure(finalIR, 0);
-        assertConditionalBoundsStructure(finalIR, 1);
+        assertFinalConditionalBoundsFallback(finalIR, 0,
+                finalIR.blockContaining(BOUNDS_COMPARE, 1));
+        assertFinalConditionalBoundsFallback(finalIR, 1,
+                finalIR.blockContaining("_arrayChecksum", 0));
         assertLoweredFallback(finalIR, 2);
 
         PEATestUtils.DeoptBundle first =
@@ -219,10 +256,8 @@ public class TestPEAArrayLengthBoundsAndTypes {
         Asserts.assertEquals(second.virtualObjects().size(), 0,
                 target + ": second bounds fallback uses the first access materialization");
 
-        PEATestUtils.IRBlock firstSuccess = after.blockContaining("load atomic i32", 0);
         firstSuccess.assertAbsent(DEOPTIMIZE);
         firstSuccess.assertOccurrenceCount("store atomic i32", 4);
-        PEATestUtils.IRBlock secondSuccess = after.blockContaining("store atomic i32", 4);
         secondSuccess.assertAbsent(DEOPTIMIZE);
         secondSuccess.assertOccurrenceCount("store atomic i32", 1);
     }
@@ -279,8 +314,8 @@ public class TestPEAArrayLengthBoundsAndTypes {
     }
 
     private static void assertConditionalBoundsFallback(
-            PEATestUtils.IRBody body, int compareOccurrence, int expectedBCI) {
-        assertConditionalBoundsStructure(body, compareOccurrence);
+            PEATestUtils.IRBody body, int compareOccurrence, int expectedBCI,
+            PEATestUtils.IRBlock success) {
         Asserts.assertEquals(body.callOccurrencesAtBCI(DEOPTIMIZE_I64, expectedBCI).size(),
                 1, body.methodId() + ": exact conditional bounds fallback BCI");
         int deoptOccurrence = body.callOccurrencesAtBCI(
@@ -291,16 +326,47 @@ public class TestPEAArrayLengthBoundsAndTypes {
         fallback.assertOccurrenceCount("ret i64", 1);
         fallback.assertAbsent("store atomic");
         fallback.assertAbsent("load atomic");
+        assertConditionalBoundsStructure(body, compareOccurrence, success, fallback);
     }
 
     private static void assertConditionalBoundsStructure(
-            PEATestUtils.IRBody body, int compareOccurrence) {
+            PEATestUtils.IRBody body, int compareOccurrence,
+            PEATestUtils.IRBlock success, PEATestUtils.IRBlock fallback) {
         PEATestUtils.IRBlock bounds =
                 body.blockContaining(BOUNDS_COMPARE, compareOccurrence);
         bounds.assertOccurrenceCount(BOUNDS_COMPARE, 1);
         bounds.assertOccurrenceCount("br i1", 1);
         bounds.assertAbsent(DEOPTIMIZE);
         bounds.assertAbsent(LOWERED_DEOPTIMIZE);
+        List<String> targets = bounds.conditionalBranchTargets();
+        Asserts.assertNotEquals(targets.get(0), targets.get(1),
+                body.methodId() + ": success and fallback edges are distinct");
+        assertForwardingEdgeReaches(body, targets.get(0), success,
+                "true bounds edge reaches the success block");
+        assertForwardingEdgeReaches(body, targets.get(1), fallback,
+                "false bounds edge reaches the exact fallback");
+    }
+
+    private static void assertForwardingEdgeReaches(
+            PEATestUtils.IRBody body, String start,
+            PEATestUtils.IRBlock expected, String detail) {
+        HashSet<String> visited = new HashSet<>();
+        String label = start;
+        while (visited.add(label)) {
+            PEATestUtils.IRBlock block = body.blockByLabel(label);
+            if (block.label().equals(expected.label())) {
+                return;
+            }
+            label = block.unconditionalBranchTarget();
+        }
+        throw new AssertionError(body.methodId() + ": cyclic forwarding edge: " + detail);
+    }
+
+    private static void assertFinalConditionalBoundsFallback(
+            PEATestUtils.IRBody body, int occurrence, PEATestUtils.IRBlock success) {
+        PEATestUtils.IRBlock fallback =
+                body.blockContaining(LOWERED_DEOPTIMIZE, occurrence);
+        assertConditionalBoundsStructure(body, occurrence, success, fallback);
     }
 
     private static void assertLoweredFallback(
@@ -328,6 +394,10 @@ public class TestPEAArrayLengthBoundsAndTypes {
                     "length 128");
             digest = check(digest, testLength129(), lengthResult(129, 128, 0x129),
                     "length 129");
+            digest = check(digest, testArrayLengthPhi(true),
+                    lengthResult(3, 11, 0), "length phi true");
+            digest = check(digest, testArrayLengthPhi(false),
+                    0x4E554C4CL, "length phi false");
 
             for (int length : new int[] {0, 1, 127, 128, 129, -1, Integer.MIN_VALUE}) {
                 long actual = testDynamicLength(length);
@@ -402,6 +472,17 @@ public class TestPEAArrayLengthBoundsAndTypes {
             int[] array = new int[129];
             array[128] = 0x129;
             return lengthResult(array.length, 128, array[128]);
+        }
+
+        public static long testArrayLengthPhi(boolean choose) {
+            int[] array = new int[3];
+            array[0] = 11;
+            int[] selected = choose ? array : null;
+            try {
+                return lengthResult(selected.length, array[0], 0);
+            } catch (NullPointerException expected) {
+                return 0x4E554C4CL;
+            }
         }
 
         public static long testDynamicLength(int length) {

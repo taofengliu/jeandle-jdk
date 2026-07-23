@@ -31,6 +31,7 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
 
 import jdk.test.lib.Asserts;
@@ -60,6 +61,9 @@ public class TestSymbolicIndexStorePEA {
         PEATestUtils.behaviorRun(WRAPPER, targets).runPEAOnOffEquivalent();
 
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, targets).run()) {
+            for (Method target : targets) {
+                run.report(target).assertConverged();
+            }
             assertSymbolicStore(run, store);
             assertSymbolicLoad(run, load);
             assertLoadThenStore(run, loadThenStore);
@@ -72,9 +76,11 @@ public class TestSymbolicIndexStorePEA {
             throws Exception {
         PEATestUtils.PEAReport report = assertOriginalMaterialization(run, target, 1);
         PEATestUtils.IRBody after = report.finalAfter();
-        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 27), target);
-        assertFinalBoundsFallback(run.finalIR(target), 1);
-        PEATestUtils.IRBlock consumer = after.blockContaining("store atomic", 0);
+        PEATestUtils.IRBlock consumer = after.blockContaining("_checksumValues", 0);
+        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 27, consumer), target);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertFinalBoundsFallback(finalIR,
+                List.of(finalIR.blockContaining("_checksumValues", 0)));
         consumer.assertOccurrenceCount("store atomic", 5);
         for (int replay = 0; replay < 4; replay++) {
             consumer.assertBefore("store atomic", replay, "store atomic", 4);
@@ -87,9 +93,11 @@ public class TestSymbolicIndexStorePEA {
             throws Exception {
         PEATestUtils.PEAReport report = assertOriginalMaterialization(run, target, 1);
         PEATestUtils.IRBody after = report.finalAfter();
-        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 26), target);
-        assertFinalBoundsFallback(run.finalIR(target), 1);
-        PEATestUtils.IRBlock consumer = after.blockContaining("load atomic", 0);
+        PEATestUtils.IRBlock consumer = after.blockContaining("_checksumValues", 0);
+        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 26, consumer), target);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertFinalBoundsFallback(finalIR,
+                List.of(finalIR.blockContaining("_checksumValues", 0)));
         consumer.assertOccurrenceCount("store atomic", 4);
         for (int replay = 0; replay < 4; replay++) {
             consumer.assertBefore("store atomic", replay, "load atomic", 0);
@@ -102,9 +110,12 @@ public class TestSymbolicIndexStorePEA {
             throws Exception {
         PEATestUtils.PEAReport report = assertOriginalMaterialization(run, target, 1);
         PEATestUtils.IRBody after = report.finalAfter();
-        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 26), target);
-        assertFinalBoundsFallback(run.finalIR(target), 1);
-        PEATestUtils.IRBlock firstConsumer = after.blockContaining("load atomic", 0);
+        PEATestUtils.IRBlock firstConsumer = after.blockContaining("_checksumValues", 0);
+        assertIntArrayDescriptor(
+                assertBoundsFallback(after, 0, 26, firstConsumer), target);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertFinalBoundsFallback(finalIR,
+                List.of(finalIR.blockContaining("_checksumValues", 0)));
         firstConsumer.assertOccurrenceCount("store atomic", 5);
         for (int replay = 0; replay < 4; replay++) {
             firstConsumer.assertBefore("store atomic", replay, "load atomic", 0);
@@ -118,14 +129,21 @@ public class TestSymbolicIndexStorePEA {
             throws Exception {
         PEATestUtils.PEAReport report = assertOriginalMaterialization(run, target, 1);
         PEATestUtils.IRBody after = report.finalAfter();
-        assertIntArrayDescriptor(assertBoundsFallback(after, 0, 26), target);
+        PEATestUtils.IRBlock loadConsumer =
+                after.blockContaining(BOUNDS_COMPARE, 1);
+        PEATestUtils.IRBlock storeConsumer =
+                after.blockContaining("_checksumValues", 0);
+        assertIntArrayDescriptor(
+                assertBoundsFallback(after, 0, 26, loadConsumer), target);
         PEATestUtils.DeoptBundle secondFallback =
-                assertBoundsFallback(after, 1, 32);
+                assertBoundsFallback(after, 1, 32, storeConsumer);
         Asserts.assertEquals(secondFallback.virtualObjects().size(), 0,
                 target + ": second bounds fallback uses the first materialization");
-        assertFinalBoundsFallback(run.finalIR(target), 2);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertFinalBoundsFallback(finalIR,
+                List.of(finalIR.blockContaining(BOUNDS_COMPARE, 1),
+                        finalIR.blockContaining("_checksumValues", 0)));
 
-        PEATestUtils.IRBlock loadConsumer = after.blockContaining("load atomic", 0);
         loadConsumer.assertOccurrenceCount("store atomic", 4);
         for (int replay = 0; replay < 4; replay++) {
             loadConsumer.assertBefore("store atomic", replay, "load atomic", 0);
@@ -138,12 +156,10 @@ public class TestSymbolicIndexStorePEA {
             secondBounds.assertBefore("store atomic", replay, BOUNDS_COMPARE, 0);
         }
         secondBounds.assertAbsent("@jeandle.new_array");
-        PEATestUtils.IRBlock storeConsumer = after.blockContaining("store atomic", 4);
         storeConsumer.assertOccurrenceCount("store atomic", 1);
         assertNoAllocationAtConsumer(storeConsumer);
         loadConsumer.assertAbsent(DEOPTIMIZE);
         storeConsumer.assertAbsent(DEOPTIMIZE);
-        PEATestUtils.IRBody finalIR = run.finalIR(target);
         finalIR.blockContaining("store atomic", 0).assertAbsent(LOWERED_DEOPTIMIZE);
         finalIR.blockContaining("store atomic", 4).assertAbsent(LOWERED_DEOPTIMIZE);
         after.assertBefore("load atomic", 0, BOUNDS_COMPARE, 1);
@@ -163,7 +179,11 @@ public class TestSymbolicIndexStorePEA {
                         .filter(site -> site.key().kind()
                                 == PEATestUtils.AllocationKind.ARRAY).count(),
                 1L, target + ": one nested array source allocation");
-        PEATestUtils.DeoptBundle fallback = assertBoundsFallback(after, 0, 25);
+        PEATestUtils.IRBlock consumer =
+                after.blockContaining(
+                        "%array_element_address2 = getelementptr", 0);
+        PEATestUtils.DeoptBundle fallback =
+                assertBoundsFallback(after, 0, 25, consumer);
         fallback.assertVirtualObjectIds(0, 1);
         Asserts.assertEquals(fallback.virtualObject(0).kind(),
                 PEATestUtils.DescriptorKind.ARRAY,
@@ -172,8 +192,10 @@ public class TestSymbolicIndexStorePEA {
                 PEATestUtils.DescriptorKind.INSTANCE,
                 target + ": bounds fallback carries the nested child");
         fallback.assertVORef(0, 24, 1);
-        assertFinalBoundsFallback(run.finalIR(target), 1);
-        PEATestUtils.IRBlock consumer = after.blockContaining("store atomic", 0);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertFinalBoundsFallbackDirect(finalIR,
+                finalIR.blockContaining(
+                        "%array_element_address2 = getelementptr", 0));
         consumer.assertOccurrenceCount("store atomic", 3);
         consumer.assertBefore("store atomic", 0, "store atomic", 2);
         consumer.assertBefore("store atomic", 1, "store atomic", 2);
@@ -204,7 +226,8 @@ public class TestSymbolicIndexStorePEA {
     }
 
     private static PEATestUtils.DeoptBundle assertBoundsFallback(
-            PEATestUtils.IRBody after, int compareOccurrence, int expectedBCI) {
+            PEATestUtils.IRBody after, int compareOccurrence, int expectedBCI,
+            PEATestUtils.IRBlock success) {
         PEATestUtils.IRBlock bounds =
                 after.blockContaining(BOUNDS_COMPARE, compareOccurrence);
         bounds.assertOccurrenceCount(BOUNDS_COMPARE, 1);
@@ -226,6 +249,7 @@ public class TestSymbolicIndexStorePEA {
         fallback.assertOccurrenceCount("ret i64", 1);
         fallback.assertAbsent("store atomic");
         fallback.assertAbsent("load atomic");
+        assertConditionalTargets(after, bounds, success, fallback);
         after.assertBefore(
                 BOUNDS_COMPARE, compareOccurrence, DEOPTIMIZE_I64_CALL, occurrence);
         if (compareOccurrence == 0) {
@@ -235,7 +259,8 @@ public class TestSymbolicIndexStorePEA {
     }
 
     private static void assertFinalBoundsFallback(
-            PEATestUtils.IRBody finalIR, int expectedCount) {
+            PEATestUtils.IRBody finalIR, List<PEATestUtils.IRBlock> successes) {
+        int expectedCount = successes.size();
         finalIR.assertOccurrenceCount(BOUNDS_COMPARE, expectedCount);
         finalIR.assertOccurrenceCount(LOWERED_DEOPTIMIZE, expectedCount);
         for (int occurrence = 0; occurrence < expectedCount; occurrence++) {
@@ -250,9 +275,54 @@ public class TestSymbolicIndexStorePEA {
             fallback.assertOccurrenceCount(LOWERED_DEOPTIMIZE, 1);
             fallback.assertAbsent("store atomic");
             fallback.assertAbsent("load atomic");
+            assertConditionalTargets(
+                    finalIR, bounds, successes.get(occurrence), fallback);
             finalIR.assertBefore(
                     BOUNDS_COMPARE, occurrence, LOWERED_DEOPTIMIZE, occurrence);
         }
+    }
+
+    private static void assertFinalBoundsFallbackDirect(
+            PEATestUtils.IRBody finalIR, PEATestUtils.IRBlock success) {
+        finalIR.assertOccurrenceCount(BOUNDS_COMPARE, 1);
+        finalIR.assertOccurrenceCount(LOWERED_DEOPTIMIZE, 1);
+        PEATestUtils.IRBlock bounds = finalIR.blockContaining(BOUNDS_COMPARE, 0);
+        PEATestUtils.IRBlock fallback =
+                finalIR.blockContaining(LOWERED_DEOPTIMIZE, 0);
+        List<String> targets = bounds.conditionalBranchTargets();
+        Asserts.assertEquals(targets.get(0), success.label(),
+                finalIR.methodId() + ": final true edge reaches the nested consumer");
+        Asserts.assertEquals(targets.get(1), fallback.label(),
+                finalIR.methodId() + ": final false edge reaches the bounds fallback");
+        Asserts.assertNotEquals(targets.get(0), targets.get(1),
+                finalIR.methodId() + ": final bounds targets are distinct");
+    }
+
+    private static void assertConditionalTargets(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock bounds,
+            PEATestUtils.IRBlock success, PEATestUtils.IRBlock fallback) {
+        List<String> targets = bounds.conditionalBranchTargets();
+        Asserts.assertNotEquals(targets.get(0), targets.get(1),
+                body.methodId() + ": success and fallback edges are distinct");
+        assertForwardingEdgeReaches(body, targets.get(0), success,
+                "true bounds edge reaches the success block");
+        assertForwardingEdgeReaches(body, targets.get(1), fallback,
+                "false bounds edge reaches the exact fallback");
+    }
+
+    private static void assertForwardingEdgeReaches(
+            PEATestUtils.IRBody body, String start,
+            PEATestUtils.IRBlock expected, String detail) {
+        HashSet<String> visited = new HashSet<>();
+        String label = start;
+        while (visited.add(label)) {
+            PEATestUtils.IRBlock block = body.blockByLabel(label);
+            if (block.label().equals(expected.label())) {
+                return;
+            }
+            label = block.unconditionalBranchTarget();
+        }
+        throw new AssertionError(body.methodId() + ": cyclic forwarding edge: " + detail);
     }
 
     private static void assertIntArrayDescriptor(

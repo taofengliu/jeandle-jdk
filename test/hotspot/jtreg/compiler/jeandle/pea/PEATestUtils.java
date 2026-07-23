@@ -117,6 +117,9 @@ public final class PEATestUtils {
     private static final Pattern CALL_OR_INVOKE_OPCODE = Pattern.compile(
             "^(?:" + LLVM_LOCAL_NAME + "\\s*=\\s*)?"
                     + "(?:(?:musttail|notail|tail)\\s+)?(call|invoke)\\b");
+    private static final Pattern INLINE_ASM_CALLEE = Pattern.compile("\\basm\\b");
+    private static final Pattern CONSTANT_CALLEE = Pattern.compile(
+            "\\b(?:null|undef|poison|zeroinitializer)\\s*\\(");
     private static final Pattern ASSIGNED_INSTRUCTION = Pattern.compile(
             "^(" + LLVM_LOCAL_NAME + ")\\s*=");
     private static final Pattern ASSIGNMENT_ONLY = Pattern.compile(
@@ -1894,6 +1897,30 @@ public final class PEATestUtils {
             return new IRBlock(method, lines.subList(blockStart, blockEnd));
         }
 
+        public IRBlock blockByLabel(String exactLabel) {
+            String normalized = normalizeBlockLabel(exactLabel);
+            ArrayList<Integer> matches = new ArrayList<>();
+            for (int i = 0; i < lines.size(); i++) {
+                Matcher label = BLOCK_LABEL.matcher(lines.get(i));
+                if (label.matches()
+                        && normalized.equals(normalizeBlockLabel(label.group(1)))) {
+                    matches.add(i);
+                }
+            }
+            if (matches.size() != 1) {
+                throw new IllegalStateException(method + ": expected one exact block label '"
+                        + normalized + "', got " + matches.size());
+            }
+            int blockStart = matches.get(0);
+            int blockEnd = blockStart + 1;
+            while (blockEnd < lines.size()
+                    && !BLOCK_LABEL.matcher(lines.get(blockEnd)).matches()
+                    && !lines.get(blockEnd).equals("}")) {
+                blockEnd++;
+            }
+            return new IRBlock(method, lines.subList(blockStart, blockEnd));
+        }
+
         public int lineCount(String substring) {
             String needle = fold(substring);
             return (int) lines.stream().filter(l -> l.contains(needle)).count();
@@ -2491,17 +2518,17 @@ public final class PEATestUtils {
         if (!operation.find()) {
             return null;
         }
+        int arguments = callableArgumentListStart(line, operation.end());
+        if (arguments < 0) {
+            return null;
+        }
         for (int at = operation.end(); at < line.length(); at++) {
             char sigil = line.charAt(at);
             if (sigil != '@' && sigil != '%') {
                 continue;
             }
             ParsedOperand operand = parseLLVMNamedOperand(line, at);
-            int next = operand.end;
-            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
-                next++;
-            }
-            if (next < line.length() && line.charAt(next) == '(') {
+            if (skipWhitespace(line, operand.end) == arguments) {
                 return sigil == '@' ? operand.value : null;
             }
             at = operand.end - 1;
@@ -2533,6 +2560,7 @@ public final class PEATestUtils {
         int parentheses = 0;
         int brackets = 0;
         int braces = 0;
+        int angles = 0;
         boolean quoted = false;
         for (int i = 0; i < instruction.length(); i++) {
             char ch = instruction.charAt(i);
@@ -2555,14 +2583,16 @@ public final class PEATestUtils {
                 case ']' -> brackets--;
                 case '{' -> braces++;
                 case '}' -> braces--;
+                case '<' -> angles++;
+                case '>' -> angles--;
                 default -> { }
             }
-            if (parentheses < 0 || brackets < 0 || braces < 0) {
+            if (parentheses < 0 || brackets < 0 || braces < 0 || angles < 0) {
                 throw new IllegalStateException("Unbalanced LLVM instruction delimiters: "
                         + instruction);
             }
         }
-        return quoted || parentheses != 0 || brackets != 0 || braces != 0;
+        return quoted || parentheses != 0 || brackets != 0 || braces != 0 || angles != 0;
     }
 
     private static boolean hasCompleteCallableOperand(String line) {
@@ -2570,17 +2600,113 @@ public final class PEATestUtils {
         if (!operation.find()) {
             return false;
         }
+        int arguments = callableArgumentListStart(line, operation.end());
+        return arguments >= 0 && matchingDelimiter(line, arguments, '(', ')') >= 0;
+    }
 
-        int argumentListStart = -1;
+    private static int callableArgumentListStart(String line, int operationEnd) {
         int parentheses = 0;
         int brackets = 0;
         int braces = 0;
+        int angles = 0;
         boolean quoted = false;
-        for (int i = operation.end(); i < line.length(); i++) {
-            char ch = line.charAt(i);
+        for (int at = operationEnd; at < line.length(); at++) {
+            char ch = line.charAt(at);
             if (quoted) {
                 if (ch == '\\') {
-                    i++;
+                    at++;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+                continue;
+            }
+            if (ch == '(') {
+                parentheses++;
+                continue;
+            }
+            if (ch == ')') {
+                parentheses--;
+                continue;
+            }
+            if (ch == '[') {
+                brackets++;
+                continue;
+            }
+            if (ch == ']') {
+                brackets--;
+                continue;
+            }
+            if (ch == '{') {
+                braces++;
+                continue;
+            }
+            if (ch == '}') {
+                braces--;
+                continue;
+            }
+            if (ch == '<') {
+                angles++;
+                continue;
+            }
+            if (ch == '>') {
+                angles--;
+                continue;
+            }
+            if (parentheses != 0 || brackets != 0 || braces != 0 || angles != 0) {
+                continue;
+            }
+            char sigil = line.charAt(at);
+            if (sigil != '@' && sigil != '%') {
+                continue;
+            }
+            ParsedOperand operand = parseLLVMNamedOperand(line, at);
+            int next = skipWhitespace(line, operand.end);
+            if (next < line.length() && line.charAt(next) == '('
+                    && hasCallableSuffix(line, next)) {
+                return next;
+            }
+            at = operand.end - 1;
+        }
+
+        int expressionArguments =
+                parenthesizedCallableArgumentListStart(line, operationEnd);
+        if (expressionArguments >= 0) {
+            return expressionArguments;
+        }
+
+        Matcher asm = INLINE_ASM_CALLEE.matcher(line);
+        if (asm.find(operationEnd)) {
+            int afterConstraints = afterQuotedStrings(line, asm.end(), 2);
+            if (afterConstraints < 0) {
+                return -1;
+            }
+            int arguments = skipWhitespace(line, afterConstraints);
+            return arguments < line.length() && line.charAt(arguments) == '('
+                    ? arguments : -1;
+        }
+
+        Matcher constant = CONSTANT_CALLEE.matcher(line);
+        if (constant.find(operationEnd)) {
+            return line.indexOf('(', constant.start());
+        }
+        return -1;
+    }
+
+    private static int parenthesizedCallableArgumentListStart(
+            String line, int operationEnd) {
+        int brackets = 0;
+        int braces = 0;
+        int angles = 0;
+        boolean quoted = false;
+        for (int at = operationEnd; at < line.length(); at++) {
+            char ch = line.charAt(at);
+            if (quoted) {
+                if (ch == '\\') {
+                    at++;
                 } else if (ch == '"') {
                     quoted = false;
                 }
@@ -2591,69 +2717,82 @@ public final class PEATestUtils {
             } else if (ch == '[') {
                 brackets++;
             } else if (ch == ']') {
-                if (--brackets < 0) {
-                    return false;
-                }
+                brackets--;
             } else if (ch == '{') {
                 braces++;
             } else if (ch == '}') {
-                if (--braces < 0) {
-                    return false;
+                braces--;
+            } else if (ch == '<') {
+                angles++;
+            } else if (ch == '>') {
+                angles--;
+            } else if (ch == '(' && brackets == 0 && braces == 0 && angles == 0) {
+                int expressionClose = matchingDelimiter(line, at, '(', ')');
+                if (expressionClose < 0) {
+                    return -1;
                 }
-            } else if (ch == '(') {
-                if (parentheses++ == 0 && brackets == 0 && braces == 0) {
-                    argumentListStart = i;
+                int arguments = skipWhitespace(line, expressionClose + 1);
+                if (arguments < line.length() && line.charAt(arguments) == '('
+                        && hasCallableSuffix(line, arguments)) {
+                    return arguments;
                 }
-            } else if (ch == ')' && --parentheses < 0) {
-                return false;
+                at = expressionClose;
             }
         }
-        if (quoted || parentheses != 0 || brackets != 0 || braces != 0
-                || argumentListStart < 0) {
+        return -1;
+    }
+
+    private static boolean hasCallableSuffix(String line, int arguments) {
+        int close = matchingDelimiter(line, arguments, '(', ')');
+        if (close < 0) {
             return false;
         }
+        int suffix = skipWhitespace(line, close + 1);
+        return suffix >= line.length()
+                || line.charAt(suffix) != '*'
+                && line.charAt(suffix) != '@'
+                && line.charAt(suffix) != '%';
+    }
 
-        int operandEnd = argumentListStart;
-        while (operandEnd > operation.end()
-                && Character.isWhitespace(line.charAt(operandEnd - 1))) {
-            operandEnd--;
+    private static int skipWhitespace(String text, int at) {
+        while (at < text.length() && Character.isWhitespace(text.charAt(at))) {
+            at++;
         }
-        if (operandEnd == operation.end()) {
-            return false;
-        }
+        return at;
+    }
 
-        for (int at = operation.end(); at < line.length(); at++) {
-            char sigil = line.charAt(at);
-            if (sigil != '@' && sigil != '%') {
+    private static int afterQuotedStrings(String text, int at, int count) {
+        int completed = 0;
+        boolean quoted = false;
+        for (int i = at; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (!quoted) {
+                if (ch == '"') {
+                    quoted = true;
+                }
                 continue;
             }
-            ParsedOperand operand = parseLLVMNamedOperand(line, at);
-            if (operand.end == operandEnd) {
-                return true;
+            if (ch == '\\') {
+                i++;
+            } else if (ch == '"') {
+                quoted = false;
+                if (++completed == count) {
+                    return i + 1;
+                }
             }
-            at = operand.end - 1;
         }
+        return -1;
+    }
 
-        char last = line.charAt(operandEnd - 1);
-        if (last == ')') {
-            return true;
+    private static String normalizeBlockLabel(String label) {
+        Objects.requireNonNull(label);
+        String operand = label.startsWith("%") ? label : "%" + label;
+        ParsedOperand parsed = parseLLVMNamedOperand(operand, 0);
+        if (parsed.end != operand.length()) {
+            throw new IllegalArgumentException("Trailing characters in LLVM block label "
+                    + label);
         }
-
-        String prefix = line.substring(operation.end(), operandEnd);
-        if (prefix.matches("(?s).*\\basm\\b.*")) {
-            return true;
-        }
-
-        int tokenStart = operandEnd;
-        while (tokenStart > operation.end()
-                && Character.isJavaIdentifierPart(line.charAt(tokenStart - 1))) {
-            tokenStart--;
-        }
-        String constantCallee = line.substring(tokenStart, operandEnd);
-        return constantCallee.equals("null")
-                || constantCallee.equals("undef")
-                || constantCallee.equals("poison")
-                || constantCallee.equals("zeroinitializer");
+        return parsed.value;
     }
 
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {
@@ -2663,12 +2802,60 @@ public final class PEATestUtils {
 
     /** One labeled LLVM basic block with occurrence-aware assertions. */
     public static final class IRBlock {
+        private static final Pattern CONDITIONAL_BRANCH = Pattern.compile(
+                "^br i1 [^,]+, label (" + LLVM_LOCAL_NAME + "), label ("
+                        + LLVM_LOCAL_NAME + ")"
+                        + "(?:, ![-A-Za-z$._0-9]+ ![^,\\s]+)*$");
+        private static final Pattern UNCONDITIONAL_BRANCH = Pattern.compile(
+                "^br label (" + LLVM_LOCAL_NAME + ")"
+                        + "(?:, ![-A-Za-z$._0-9]+ ![^,\\s]+)*$");
         private final MethodId method;
+        private final List<String> lines;
         private final String text;
 
         private IRBlock(MethodId method, List<String> lines) {
             this.method = method;
-            this.text = String.join("\n", List.copyOf(lines));
+            this.lines = List.copyOf(lines);
+            this.text = String.join("\n", this.lines);
+        }
+
+        public String label() {
+            Matcher label = IRBody.BLOCK_LABEL.matcher(lines.get(0));
+            if (!label.matches()) {
+                throw new IllegalStateException(method + ": block lacks a label: " + text);
+            }
+            return normalizeBlockLabel(label.group(1));
+        }
+
+        public List<String> conditionalBranchTargets() {
+            List<String> branches = lines.stream()
+                    .filter(line -> line.startsWith("br i1 ")).toList();
+            if (branches.size() != 1 || !branches.get(0).equals(lines.get(lines.size() - 1))) {
+                throw new IllegalStateException(method + ": block " + label()
+                        + " must end in exactly one conditional branch");
+            }
+            Matcher branch = CONDITIONAL_BRANCH.matcher(branches.get(0));
+            if (!branch.matches()) {
+                throw new IllegalStateException(method + ": malformed conditional branch in "
+                        + label() + ": " + branches.get(0));
+            }
+            return List.of(normalizeBlockLabel(branch.group(1)),
+                    normalizeBlockLabel(branch.group(2)));
+        }
+
+        public String unconditionalBranchTarget() {
+            List<String> branches = lines.stream()
+                    .filter(line -> line.startsWith("br label ")).toList();
+            if (branches.size() != 1 || !branches.get(0).equals(lines.get(lines.size() - 1))) {
+                throw new IllegalStateException(method + ": block " + label()
+                        + " must end in exactly one unconditional branch");
+            }
+            Matcher branch = UNCONDITIONAL_BRANCH.matcher(branches.get(0));
+            if (!branch.matches()) {
+                throw new IllegalStateException(method + ": malformed unconditional branch in "
+                        + label() + ": " + branches.get(0));
+            }
+            return normalizeBlockLabel(branch.group(1));
         }
 
         public int occurrenceCount(String substring) {
