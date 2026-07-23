@@ -32,9 +32,11 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
@@ -113,12 +115,14 @@ public class TestPEADeoptAtAllocation {
                 target + ": final code retains exactly the source OrigAllocs");
 
         switch (scenario) {
-            case INSTANCE, PARTIAL_FIRST -> assertInstance(bundle, target);
+            case INSTANCE -> assertInstance(bundle, target, 17);
             case PRIMITIVE_ARRAY -> assertPrimitiveArray(bundle, target);
             case OBJECT_ARRAY -> assertObjectArray(bundle, target);
             case NESTED_GRAPH -> assertNestedGraph(bundle, target);
+            case PARTIAL_FIRST -> assertInstance(bundle, target, 61);
             case LOCK_OWNER -> assertLockOwner(bundle, target);
         }
+        assertRootClosure(bundle, target, scenario);
     }
 
     private static String exactAllocationResult(
@@ -140,18 +144,21 @@ public class TestPEADeoptAtAllocation {
                 target + ": exact selected allocation callee is jeandle.new_instance");
     }
 
-    private static void assertInstance(PEATestUtils.DeoptBundle bundle, Method target)
+    private static void assertInstance(
+            PEATestUtils.DeoptBundle bundle, Method target, int expectedValue)
             throws Exception {
         bundle.assertVirtualObjectIds(0);
         PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(0);
         Asserts.assertEquals(descriptor.kind(), PEATestUtils.DescriptorKind.INSTANCE,
                 target + ": first object is an instance descriptor");
-        PEATestUtils.VirtualObjectEntry value = descriptor.fields().get(
-                offset(TestWrapper.Cell.class, "value"));
+        int valueOffset = offset(TestWrapper.Cell.class, "value");
+        Asserts.assertEquals(descriptor.fields().keySet(), Set.of(valueOffset),
+                target + ": instance descriptor has one exact field");
+        PEATestUtils.VirtualObjectEntry value = descriptor.fields().get(valueOffset);
         Asserts.assertNotNull(value, target + ": instance value is in closure");
         Asserts.assertEquals(value.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
                 target + ": instance value is scalar");
-        Asserts.assertEquals(value.value().operand(), "i32 17",
+        Asserts.assertEquals(value.value().operand(), "i32 " + expectedValue,
                 target + ": instance value is exact");
     }
 
@@ -160,14 +167,14 @@ public class TestPEADeoptAtAllocation {
         PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(0);
         Asserts.assertEquals(descriptor.kind(), PEATestUtils.DescriptorKind.ARRAY,
                 target + ": first object is a primitive-array descriptor");
-        Asserts.assertEquals(descriptor.elements().size(), 2,
-                target + ": both initialized primitive elements are live");
-        for (PEATestUtils.VirtualObjectEntry entry : descriptor.elements().values()) {
-            Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.INT,
-                    target + ": primitive array element type");
-            Asserts.assertEquals(entry.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
-                    target + ": primitive array element kind");
-        }
+        int base = Unsafe.ARRAY_INT_BASE_OFFSET;
+        int second = base + Unsafe.ARRAY_INT_INDEX_SCALE;
+        Asserts.assertEquals(descriptor.elements().keySet(), Set.of(base, second),
+                target + ": primitive array has exact initialized byte offsets");
+        assertScalar(descriptor.elements().get(base), 31,
+                target + ": primitive element zero");
+        assertScalar(descriptor.elements().get(second), 37,
+                target + ": primitive element one");
     }
 
     private static void assertObjectArray(PEATestUtils.DeoptBundle bundle, Method target) {
@@ -175,30 +182,40 @@ public class TestPEADeoptAtAllocation {
         PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(0);
         Asserts.assertEquals(descriptor.kind(), PEATestUtils.DescriptorKind.ARRAY,
                 target + ": first object is an object-array descriptor");
-        Asserts.assertEquals(descriptor.elements().size(), 1,
-                target + ": external array element is live");
-        PEATestUtils.VirtualObjectEntry entry = descriptor.elements().values().iterator().next();
+        int base = Unsafe.ARRAY_OBJECT_BASE_OFFSET;
+        Asserts.assertEquals(descriptor.elements().keySet(), Set.of(base),
+                target + ": object array has one exact initialized byte offset");
+        PEATestUtils.VirtualObjectEntry entry = descriptor.elements().get(base);
         Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.OBJECT,
                 target + ": object array element type");
         Asserts.assertEquals(entry.value().kind(), PEATestUtils.DeoptValueKind.MATERIALIZED_OOP,
                 target + ": external array element remains materialized");
+        PEATestUtils.DeoptValue external = bundle.rootScope().locals().get(0);
+        Asserts.assertNotNull(external, target + ": external argument root local");
+        Asserts.assertEquals(external.kind(), PEATestUtils.DeoptValueKind.MATERIALIZED_OOP,
+                target + ": external argument root kind");
+        Asserts.assertEquals(entry.value().operand(), external.operand(),
+                target + ": object-array element points to the external root");
     }
 
     private static void assertNestedGraph(PEATestUtils.DeoptBundle bundle, Method target)
             throws Exception {
         bundle.assertVirtualObjectIds(0, 1);
         int nextOffset = offset(TestWrapper.Node.class, "next");
-        boolean linked = false;
-        for (PEATestUtils.VirtualObjectDescriptor descriptor : bundle.virtualObjects().values()) {
-            Asserts.assertEquals(descriptor.kind(), PEATestUtils.DescriptorKind.INSTANCE,
-                    target + ": nested graph uses instance descriptors");
-            PEATestUtils.VirtualObjectEntry next = descriptor.fields().get(nextOffset);
-            if (next != null && next.value().kind() == PEATestUtils.DeoptValueKind.VO_REF) {
-                bundle.assertVORef(descriptor.id(), nextOffset, next.value().virtualObjectId());
-                linked = true;
-            }
-        }
-        Asserts.assertTrue(linked, target + ": descriptor closure retains the graph edge");
+        int valueOffset = offset(TestWrapper.Node.class, "value");
+        PEATestUtils.VirtualObjectDescriptor root = bundle.virtualObject(0);
+        PEATestUtils.VirtualObjectDescriptor child = bundle.virtualObject(1);
+        Asserts.assertEquals(root.kind(), PEATestUtils.DescriptorKind.INSTANCE,
+                target + ": root descriptor kind");
+        Asserts.assertEquals(root.fields().keySet(), Set.of(valueOffset, nextOffset),
+                target + ": root field offsets");
+        assertScalar(root.fields().get(valueOffset), 47, target + ": root value");
+        bundle.assertVORef(root.id(), nextOffset, child.id());
+        Asserts.assertEquals(child.kind(), PEATestUtils.DescriptorKind.INSTANCE,
+                target + ": child descriptor kind");
+        Asserts.assertEquals(child.fields().keySet(), Set.of(valueOffset),
+                target + ": child field offsets");
+        assertScalar(child.fields().get(valueOffset), 53, target + ": child value");
     }
 
     private static void assertLockOwner(PEATestUtils.DeoptBundle bundle, Method target)
@@ -207,8 +224,11 @@ public class TestPEADeoptAtAllocation {
         PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(0);
         Asserts.assertEquals(descriptor.kind(), PEATestUtils.DescriptorKind.INSTANCE,
                 target + ": virtual lock owner descriptor kind");
-        Asserts.assertNotNull(descriptor.fields().get(offset(TestWrapper.LockState.class, "value")),
-                target + ": virtual lock owner field is live");
+        int valueOffset = offset(TestWrapper.LockState.class, "value");
+        Asserts.assertEquals(descriptor.fields().keySet(), Set.of(valueOffset),
+                target + ": virtual lock owner field offsets");
+        assertScalar(descriptor.fields().get(valueOffset), 71,
+                target + ": virtual lock owner value");
         Asserts.assertEquals(bundle.rootScope().monitors().size(), 1,
                 target + ": one virtual monitor is live at the second allocation");
         PEATestUtils.DeoptMonitor monitor = bundle.rootScope().monitors().get(0);
@@ -217,6 +237,65 @@ public class TestPEADeoptAtAllocation {
                 target + ": monitor owner is a virtual-object reference");
         Asserts.assertEquals(monitor.owner().virtualObjectId(), descriptor.id(),
                 target + ": monitor owner is within descriptor closure");
+    }
+
+    private static void assertRootClosure(
+            PEATestUtils.DeoptBundle bundle, Method target, Scenario scenario) {
+        Map<Integer, Integer> expectedLocals = switch (scenario) {
+            case INSTANCE, PRIMITIVE_ARRAY, OBJECT_ARRAY, PARTIAL_FIRST -> Map.of(1, 0);
+            case NESTED_GRAPH -> Map.of(1, 0, 2, 1);
+            case LOCK_OWNER -> Map.of(1, 0, 2, 0);
+        };
+        Map<Integer, Integer> expectedMonitors = scenario == Scenario.LOCK_OWNER
+                ? Map.of(0, 0) : Map.of();
+        assertRootVORefs(bundle.rootScope().locals(), expectedLocals,
+                target + ": root local VORefs");
+        assertRootVORefs(bundle.rootScope().stack(), Map.of(),
+                target + ": root stack VORefs");
+        Map<Integer, Integer> actualMonitors = bundle.rootScope().monitors().stream()
+                .filter(monitor -> monitor.owner().kind() == PEATestUtils.DeoptValueKind.VO_REF)
+                .collect(java.util.stream.Collectors.toMap(
+                        PEATestUtils.DeoptMonitor::depth,
+                        monitor -> monitor.owner().virtualObjectId()));
+        Asserts.assertEquals(actualMonitors, expectedMonitors,
+                target + ": root monitor VORefs");
+
+        Set<Integer> reached = new HashSet<>();
+        List<Integer> work = new ArrayList<>();
+        expectedLocals.values().forEach(id -> { if (reached.add(id)) work.add(id); });
+        expectedMonitors.values().forEach(id -> { if (reached.add(id)) work.add(id); });
+        for (int at = 0; at < work.size(); at++) {
+            PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(work.get(at));
+            for (PEATestUtils.VirtualObjectEntry entry : descriptor.entries().values()) {
+                if (entry.value().kind() == PEATestUtils.DeoptValueKind.VO_REF
+                        && reached.add(entry.value().virtualObjectId())) {
+                    work.add(entry.value().virtualObjectId());
+                }
+            }
+        }
+        Asserts.assertEquals(reached, bundle.virtualObjects().keySet(),
+                target + ": every descriptor is transitively rooted by the allocation state");
+    }
+
+    private static void assertRootVORefs(
+            Map<Integer, PEATestUtils.DeoptValue> values, Map<Integer, Integer> expected,
+            String message) {
+        Map<Integer, Integer> actual = values.entrySet().stream()
+                .filter(entry -> entry.getValue().kind() == PEATestUtils.DeoptValueKind.VO_REF)
+                .collect(java.util.stream.Collectors.toMap(
+                        Map.Entry::getKey, entry -> entry.getValue().virtualObjectId()));
+        Asserts.assertEquals(actual, expected, message);
+    }
+
+    private static void assertScalar(
+            PEATestUtils.VirtualObjectEntry entry, int expected, String message) {
+        Asserts.assertNotNull(entry, message + " exists");
+        Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.INT,
+                message + " type");
+        Asserts.assertEquals(entry.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
+                message + " kind");
+        Asserts.assertEquals(entry.value().operand(), "i32 " + expected,
+                message + " value");
     }
 
     private static int offset(Class<?> holder, String field) throws Exception {

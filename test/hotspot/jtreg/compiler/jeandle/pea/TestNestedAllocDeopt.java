@@ -35,9 +35,11 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
@@ -94,6 +96,7 @@ public class TestNestedAllocDeopt {
                 target + ": first object field is scalar");
         Asserts.assertEquals(value.value().operand(), "i32 10",
                 target + ": first object field value");
+        assertRootClosure(bundle, target);
         Asserts.assertEquals(after.allocationBCIs(), List.of(secondBCI),
                 target + ": first NeverEscapes allocation is eliminated");
         Asserts.assertEquals(after.peaAllocCount(), 1,
@@ -110,6 +113,41 @@ public class TestNestedAllocDeopt {
         Asserts.assertEquals(matches.size(), 1,
                 target + ": exact SSA result for second allocation BCI " + bci);
         return matches.get(0);
+    }
+
+    private static void assertRootClosure(PEATestUtils.DeoptBundle bundle, Method target) {
+        Map<Integer, Integer> expectedLocals = Map.of(1, 0);
+        assertRootVORefs(bundle.rootScope().locals(), expectedLocals,
+                target + ": root local VORefs");
+        assertRootVORefs(bundle.rootScope().stack(), Map.of(),
+                target + ": root stack VORefs");
+        Asserts.assertEquals(bundle.rootScope().monitors().size(), 0,
+                target + ": root has no monitor VORefs");
+
+        Set<Integer> reached = new HashSet<>();
+        List<Integer> work = new ArrayList<>();
+        expectedLocals.values().forEach(id -> { if (reached.add(id)) work.add(id); });
+        for (int at = 0; at < work.size(); at++) {
+            PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(work.get(at));
+            for (PEATestUtils.VirtualObjectEntry entry : descriptor.entries().values()) {
+                if (entry.value().kind() == PEATestUtils.DeoptValueKind.VO_REF
+                        && reached.add(entry.value().virtualObjectId())) {
+                    work.add(entry.value().virtualObjectId());
+                }
+            }
+        }
+        Asserts.assertEquals(reached, bundle.virtualObjects().keySet(),
+                target + ": every descriptor is transitively rooted by the allocation state");
+    }
+
+    private static void assertRootVORefs(
+            Map<Integer, PEATestUtils.DeoptValue> values, Map<Integer, Integer> expected,
+            String message) {
+        Map<Integer, Integer> actual = values.entrySet().stream()
+                .filter(entry -> entry.getValue().kind() == PEATestUtils.DeoptValueKind.VO_REF)
+                .collect(java.util.stream.Collectors.toMap(
+                        Map.Entry::getKey, entry -> entry.getValue().virtualObjectId()));
+        Asserts.assertEquals(actual, expected, message);
     }
 
     public static class TestWrapper {
