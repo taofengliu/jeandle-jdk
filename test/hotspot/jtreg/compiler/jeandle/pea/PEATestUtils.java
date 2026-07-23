@@ -106,7 +106,7 @@ public final class PEATestUtils {
     private static final Pattern LOCK_REPLAY = Pattern.compile(
             "^PEA: LockReplay function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
                     + "|[-A-Za-z$._0-9]+)) logical_escape=([0-9]+) batch=([0-9]+)"
-                    + " emit_site=([0-9]+) source=([0-9]+) receiver_vo=([0-9]+)"
+                    + " source=([0-9]+) receiver_vo=([0-9]+)"
                     + " depth=([0-9]+) ordinal=([0-9]+)$"
     );
 
@@ -626,37 +626,37 @@ public final class PEATestUtils {
     }
 
     /** Exact typed values from one LockReplay diagnostic. */
-    public record PEALockReplay(int logicalEscape, int batch, int emitSite, int source,
+    public record PEALockReplay(int logicalEscape, int batch, int source,
                                 int receiverVO, int depth, int ordinal) {
         public PEALockReplay {
-            if (logicalEscape < 0 || batch < 0 || emitSite < 0 || source < 0
+            if (logicalEscape < 0 || batch < 0 || source < 0
                     || receiverVO < 0 || depth < 0 || ordinal < 0) {
                 throw new IllegalArgumentException("LockReplay values must be non-negative");
             }
         }
 
         public PEALockReplayGroup group() {
-            return new PEALockReplayGroup(logicalEscape, batch, emitSite, source);
+            return new PEALockReplayGroup(logicalEscape, batch, source);
         }
 
         public PEALockReplayPhysicalGroup physicalGroup() {
-            return new PEALockReplayPhysicalGroup(batch, emitSite, source);
+            return new PEALockReplayPhysicalGroup(batch, source);
         }
     }
 
     /** One logical consumer's associations within a physical replay batch/path. */
-    public record PEALockReplayGroup(int logicalEscape, int batch, int emitSite, int source) {
+    public record PEALockReplayGroup(int logicalEscape, int batch, int source) {
         public PEALockReplayGroup {
-            if (logicalEscape < 0 || batch < 0 || emitSite < 0 || source < 0) {
+            if (logicalEscape < 0 || batch < 0 || source < 0) {
                 throw new IllegalArgumentException("LockReplay group values must be non-negative");
             }
         }
     }
 
     /** One transform-consumed physical replay batch/path. */
-    public record PEALockReplayPhysicalGroup(int batch, int emitSite, int source) {
+    public record PEALockReplayPhysicalGroup(int batch, int source) {
         public PEALockReplayPhysicalGroup {
-            if (batch < 0 || emitSite < 0 || source < 0) {
+            if (batch < 0 || source < 0) {
                 throw new IllegalArgumentException(
                         "Physical LockReplay group values must be non-negative");
             }
@@ -1072,11 +1072,10 @@ public final class PEATestUtils {
                     current.lockReplays.add(new PEALockReplay(
                             lockReplayInt(method, "logical_escape", lockReplay.group(2)),
                             lockReplayInt(method, "batch", lockReplay.group(3)),
-                            lockReplayInt(method, "emit_site", lockReplay.group(4)),
-                            lockReplayInt(method, "source", lockReplay.group(5)),
-                            lockReplayInt(method, "receiver_vo", lockReplay.group(6)),
-                            lockReplayInt(method, "depth", lockReplay.group(7)),
-                            lockReplayInt(method, "ordinal", lockReplay.group(8))));
+                            lockReplayInt(method, "source", lockReplay.group(4)),
+                            lockReplayInt(method, "receiver_vo", lockReplay.group(5)),
+                            lockReplayInt(method, "depth", lockReplay.group(6)),
+                            lockReplayInt(method, "ordinal", lockReplay.group(7))));
                     continue;
                 }
                 if (effect.matches()) {

@@ -190,7 +190,7 @@ public class TestPEALockReplayAcrossPredecessors {
                 : round.lockReplayGroups().keySet()) {
             byLogical.computeIfAbsent(group.logicalEscape(), ignored -> new ArrayList<>())
                     .add(new PEATestUtils.PEALockReplayPhysicalGroup(
-                            group.batch(), group.emitSite(), group.source()));
+                            group.batch(), group.source()));
         }
 
         List<Integer> matchingLogical = new ArrayList<>();

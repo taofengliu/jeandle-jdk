@@ -183,23 +183,23 @@ public class TestPEAHarnessSmoke {
         PEATestUtils.MethodId first = PEATestUtils.MethodId.of(noArgs);
         PEATestUtils.MethodId overloaded = PEATestUtils.MethodId.of(complex);
         PEATestUtils.PEALockReplay firstDepth =
-                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 17, 1, 0);
+                new PEATestUtils.PEALockReplay(7, 3, 13, 17, 1, 0);
         PEATestUtils.PEALockReplay secondReceiver =
-                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 18, 2, 1);
+                new PEATestUtils.PEALockReplay(7, 3, 13, 18, 2, 1);
         PEATestUtils.PEALockReplay secondReceiverAlias =
-                new PEATestUtils.PEALockReplay(8, 3, 11, 13, 18, 2, 1);
+                new PEATestUtils.PEALockReplay(8, 3, 13, 18, 2, 1);
         PEATestUtils.PEALockReplay tenthDepth =
-                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 17, 10, 2);
+                new PEATestUtils.PEALockReplay(7, 3, 13, 17, 10, 2);
         PEATestUtils.PEALockReplay thirdReceiver =
-                new PEATestUtils.PEALockReplay(7, 3, 11, 13, 19, 11, 3);
+                new PEATestUtils.PEALockReplay(7, 3, 13, 19, 11, 3);
         PEATestUtils.PEALockReplay thirdReceiverAlias =
-                new PEATestUtils.PEALockReplay(8, 3, 11, 13, 19, 11, 3);
+                new PEATestUtils.PEALockReplay(8, 3, 13, 19, 11, 3);
         PEATestUtils.PEALockReplay otherSource =
-                new PEATestUtils.PEALockReplay(7, 4, 12, 14, 18, 4, 0);
+                new PEATestUtils.PEALockReplay(7, 4, 14, 18, 4, 0);
         PEATestUtils.PEALockReplay laterRound =
-                new PEATestUtils.PEALockReplay(8, 5, 15, 16, 19, 3, 0);
+                new PEATestUtils.PEALockReplay(8, 5, 16, 19, 3, 0);
         PEATestUtils.PEALockReplay otherFunction =
-                new PEATestUtils.PEALockReplay(9, 6, 20, 21, 22, 4, 0);
+                new PEATestUtils.PEALockReplay(9, 6, 21, 22, 4, 0);
 
         String transcript = String.join("\n",
                 before(first, 0),
@@ -242,11 +242,11 @@ public class TestPEAHarnessSmoke {
                 "LockReplay diagnostics are typed separately from general effects");
 
         PEATestUtils.PEALockReplayGroup primary =
-                new PEATestUtils.PEALockReplayGroup(7, 3, 11, 13);
+                new PEATestUtils.PEALockReplayGroup(7, 3, 13);
         PEATestUtils.PEALockReplayGroup alternate =
-                new PEATestUtils.PEALockReplayGroup(7, 4, 12, 14);
+                new PEATestUtils.PEALockReplayGroup(7, 4, 14);
         PEATestUtils.PEALockReplayGroup aliasedConsumer =
-                new PEATestUtils.PEALockReplayGroup(8, 3, 11, 13);
+                new PEATestUtils.PEALockReplayGroup(8, 3, 13);
         Asserts.assertEquals(firstRound.lockReplayGroups().size(), 3);
         Asserts.assertEquals(firstRound.lockReplayGroups().get(primary),
                 List.of(firstDepth, secondReceiver, tenthDepth, thirdReceiver));
@@ -255,9 +255,9 @@ public class TestPEAHarnessSmoke {
         Asserts.assertEquals(firstRound.lockReplayGroups().get(alternate),
                 List.of(otherSource));
         PEATestUtils.PEALockReplayPhysicalGroup physicalPrimary =
-                new PEATestUtils.PEALockReplayPhysicalGroup(3, 11, 13);
+                new PEATestUtils.PEALockReplayPhysicalGroup(3, 13);
         PEATestUtils.PEALockReplayPhysicalGroup physicalAlternate =
-                new PEATestUtils.PEALockReplayPhysicalGroup(4, 12, 14);
+                new PEATestUtils.PEALockReplayPhysicalGroup(4, 14);
         Asserts.assertEquals(firstRound.lockReplayPhysicalGroups().size(), 2);
         Asserts.assertEquals(firstRound.lockReplayPhysicalGroups().get(physicalPrimary),
                 List.of(firstDepth, secondReceiver, secondReceiverAlias, tenthDepth,
@@ -272,11 +272,11 @@ public class TestPEAHarnessSmoke {
     private static void testMalformedLockReplays(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
         String prefix = "PEA: LockReplay function=@\"" + id.llvmFunctionName() + "\" ";
-        String valid = prefix + "logical_escape=1 batch=2 emit_site=3 source=4"
+        String valid = prefix + "logical_escape=1 batch=2 source=4"
                 + " receiver_vo=5 depth=6 ordinal=0";
 
         expectFailure("LockReplay missing key", () -> parseLockTranscript(id,
-                prefix + "logical_escape=1 batch=2 emit_site=3 source=4"
+                prefix + "logical_escape=1 batch=2 source=4"
                         + " receiver_vo=5 depth=6"));
         expectFailure("LockReplay extra key", () -> parseLockTranscript(id,
                 valid + " extra=7"));
@@ -291,7 +291,7 @@ public class TestPEAHarnessSmoke {
         expectFailure("LockReplay wrong key", () -> parseLockTranscript(id,
                 valid.replace("receiver_vo=5", "receiverVo=5")));
         expectFailure("LockReplay wrong order", () -> parseLockTranscript(id,
-                prefix + "batch=2 logical_escape=1 emit_site=3 source=4"
+                prefix + "batch=2 logical_escape=1 source=4"
                         + " receiver_vo=5 depth=6 ordinal=0"));
         expectFailure("duplicate LockReplay entry", () -> parseLockTranscript(id,
                 valid, valid));
@@ -312,8 +312,7 @@ public class TestPEAHarnessSmoke {
         expectFailure("reused LockReplay batch with different identity", () ->
                 parseLockTranscript(id, valid,
                         valid.replace("logical_escape=1", "logical_escape=2")
-                                .replace("emit_site=3 source=4",
-                                        "emit_site=8 source=9")));
+                                .replace("source=4", "source=9")));
     }
 
     private static void parseLockTranscript(PEATestUtils.MethodId id, String... replays) {
@@ -585,7 +584,6 @@ public class TestPEAHarnessSmoke {
         return "PEA: LockReplay function=@\"" + id.llvmFunctionName() + "\""
                 + " logical_escape=" + replay.logicalEscape()
                 + " batch=" + replay.batch()
-                + " emit_site=" + replay.emitSite()
                 + " source=" + replay.source()
                 + " receiver_vo=" + replay.receiverVO()
                 + " depth=" + replay.depth()
