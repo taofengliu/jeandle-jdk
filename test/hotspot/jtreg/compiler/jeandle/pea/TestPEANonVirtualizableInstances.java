@@ -214,7 +214,8 @@ public class TestPEANonVirtualizableInstances {
 
     private static void assertTinyThreadConstructionRefused(PEATestUtils.RunResult run,
                                                              Method target) throws Exception {
-        PEATestUtils.PEARound first = run.report(target).round(0);
+        PEATestUtils.PEAReport report = run.report(target);
+        PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = first.before();
         PEATestUtils.AllocationKey tinyThread = new PEATestUtils.AllocationKey(
                 PEATestUtils.AllocationKind.INSTANCE, 0);
@@ -222,7 +223,6 @@ public class TestPEANonVirtualizableInstances {
                 .filter(site -> site.key().equals(tinyThread)).toList();
         Asserts.assertEquals(sourceMatches.size(), 1,
                 target + ": exactly one construction-only TinyThread allocation at bci 0");
-        PEATestUtils.AllocationSite source = sourceMatches.get(0);
 
         PEATestUtils.IRBody after = run.report(target).finalAfter();
         long retainedMatches = after.allocations().stream()
@@ -236,23 +236,37 @@ public class TestPEANonVirtualizableInstances {
                     target + ": PEA may retain only source allocations: " + retained.key());
         }
 
-        List<PEATestUtils.PEAEffect> attributedEffects = first.effects().stream()
-                .filter(effect -> {
-                    int targetAt = effect.detail().indexOf(" target=");
-                    if (targetAt < 0) {
-                        return false;
-                    }
-                    String targetInstruction = effect.detail()
-                            .substring(targetAt + " target=".length()).stripLeading();
-                    return targetInstruction.startsWith(source.result() + " =");
-                }).toList();
-        Asserts.assertEquals(attributedEffects, List.of(),
-                target + ": eligibility-refused TinyThread has no attributable VO effects");
-        Asserts.assertEquals(first.effectCount(
-                        "EliminateAllocation", source.instruction()), 0L,
-                target + ": TinyThread allocation never enters virtual state");
-        Asserts.assertEquals(first.effectCount("Materialize", source.instruction()), 0L,
-                target + ": TinyThread allocation is not virtualized then materialized");
+        for (PEATestUtils.PEARound round : report.rounds()) {
+            List<PEATestUtils.AllocationSite> roundMatches = round.before().allocations().stream()
+                    .filter(site -> site.key().equals(tinyThread)).toList();
+            if (roundMatches.isEmpty()) {
+                continue;
+            }
+            Asserts.assertEquals(roundMatches.size(), 1,
+                    target + ": exact TinyThread allocation in round " + round.iteration());
+            PEATestUtils.AllocationSite roundSource = roundMatches.get(0);
+            List<PEATestUtils.PEAEffect> attributedEffects = round.effects().stream()
+                    .filter(effect -> {
+                        int targetAt = effect.detail().indexOf(" target=");
+                        if (targetAt < 0) {
+                            return false;
+                        }
+                        String targetInstruction = effect.detail()
+                                .substring(targetAt + " target=".length()).stripLeading();
+                        return targetInstruction.startsWith(roundSource.result() + " =");
+                    }).toList();
+            Asserts.assertEquals(attributedEffects, List.of(),
+                    target + ": eligibility-refused TinyThread has no VO effects in round "
+                            + round.iteration());
+            Asserts.assertEquals(round.effectCount(
+                            "EliminateAllocation", roundSource.instruction()), 0L,
+                    target + ": TinyThread never enters virtual state in round "
+                            + round.iteration());
+            Asserts.assertEquals(round.effectCount(
+                            "Materialize", roundSource.instruction()), 0L,
+                    target + ": TinyThread is not materialized in round "
+                            + round.iteration());
+        }
     }
 
     private static void assertWeakReferenceRetainedByDeoptimization(PEATestUtils.RunResult run,
