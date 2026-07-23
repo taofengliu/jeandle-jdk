@@ -2571,24 +2571,10 @@ public final class PEATestUtils {
             return false;
         }
 
-        for (int at = operation.end(); at < line.length(); at++) {
-            char sigil = line.charAt(at);
-            if (sigil != '@' && sigil != '%') {
-                continue;
-            }
-            ParsedOperand operand = parseLLVMNamedOperand(line, at);
-            int next = operand.end;
-            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
-                next++;
-            }
-            if (next < line.length() && line.charAt(next) == '(') {
-                return true;
-            }
-            at = operand.end - 1;
-        }
-
-        int topLevelParenthesisGroups = 0;
-        int depth = 0;
+        int argumentListStart = -1;
+        int parentheses = 0;
+        int brackets = 0;
+        int braces = 0;
         boolean quoted = false;
         for (int i = operation.end(); i < line.length(); i++) {
             char ch = line.charAt(i);
@@ -2602,22 +2588,72 @@ public final class PEATestUtils {
             }
             if (ch == '"') {
                 quoted = true;
-            } else if (ch == '(') {
-                if (depth++ == 0) {
-                    topLevelParenthesisGroups++;
+            } else if (ch == '[') {
+                brackets++;
+            } else if (ch == ']') {
+                if (--brackets < 0) {
+                    return false;
                 }
-            } else if (ch == ')') {
-                depth--;
+            } else if (ch == '{') {
+                braces++;
+            } else if (ch == '}') {
+                if (--braces < 0) {
+                    return false;
+                }
+            } else if (ch == '(') {
+                if (parentheses++ == 0 && brackets == 0 && braces == 0) {
+                    argumentListStart = i;
+                }
+            } else if (ch == ')' && --parentheses < 0) {
+                return false;
             }
         }
+        if (quoted || parentheses != 0 || brackets != 0 || braces != 0
+                || argumentListStart < 0) {
+            return false;
+        }
 
-        // Constant-expression callees have their own parenthesized operands
-        // followed by the call argument list. Inline asm has no separate
-        // named callee, so its single parenthesized call-argument list is
-        // sufficient.
-        return line.substring(operation.end()).matches("(?s).*\\basm\\b.*")
-                ? topLevelParenthesisGroups >= 1
-                : topLevelParenthesisGroups >= 2;
+        int operandEnd = argumentListStart;
+        while (operandEnd > operation.end()
+                && Character.isWhitespace(line.charAt(operandEnd - 1))) {
+            operandEnd--;
+        }
+        if (operandEnd == operation.end()) {
+            return false;
+        }
+
+        for (int at = operation.end(); at < line.length(); at++) {
+            char sigil = line.charAt(at);
+            if (sigil != '@' && sigil != '%') {
+                continue;
+            }
+            ParsedOperand operand = parseLLVMNamedOperand(line, at);
+            if (operand.end == operandEnd) {
+                return true;
+            }
+            at = operand.end - 1;
+        }
+
+        char last = line.charAt(operandEnd - 1);
+        if (last == ')') {
+            return true;
+        }
+
+        String prefix = line.substring(operation.end(), operandEnd);
+        if (prefix.matches("(?s).*\\basm\\b.*")) {
+            return true;
+        }
+
+        int tokenStart = operandEnd;
+        while (tokenStart > operation.end()
+                && Character.isJavaIdentifierPart(line.charAt(tokenStart - 1))) {
+            tokenStart--;
+        }
+        String constantCallee = line.substring(tokenStart, operandEnd);
+        return constantCallee.equals("null")
+                || constantCallee.equals("undef")
+                || constantCallee.equals("poison")
+                || constantCallee.equals("zeroinitializer");
     }
 
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {

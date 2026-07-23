@@ -467,7 +467,10 @@ public class TestPEAHarnessSmoke {
                 "call void %fp(ptr @new_array)",
                 "call void inttoptr (i64 139956031309536 to ptr)\n"
                         + "  (ptr addrspace(1) %object, ptr %card)",
+                "call dereferenceable(8) ptr "
+                        + "inttoptr (i64 139956031309536 to ptr)()",
                 "call void asm sideeffect \"\", \"\"()",
+                "call void null()",
                 "store i32 1, ptr %out",
                 "call void @resultless.lowered.neighbor()",
                 "ret i32 1");
@@ -476,10 +479,11 @@ public class TestPEAHarnessSmoke {
                         + " while constant-expression indirect calls are skipped");
 
         PEATestUtils.IRBody truncatedIndirect = bodyWithInstructions(id,
-                "call void inttoptr (i64 139956031309536 to ptr)",
+                "call dereferenceable(8) ptr "
+                        + "inttoptr (i64 139956031309536 to ptr)",
                 "%later = call ptr addrspace(1) @new_instance(ptr %klass, ptr %thread)",
                 "ret i32 1");
-        expectFailure("balanced indirect call without a call argument list",
+        expectFailure("return attribute plus balanced indirect callee without arguments",
                 truncatedIndirect::loweredAllocCount);
 
         PEATestUtils.IRBody unterminatedIndirect = bodyWithInstructions(id,
