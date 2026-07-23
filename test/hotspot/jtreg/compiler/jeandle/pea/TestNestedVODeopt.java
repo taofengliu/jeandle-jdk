@@ -37,6 +37,8 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
@@ -45,6 +47,8 @@ public class TestNestedVODeopt {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestNestedVODeopt$TestWrapper";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+    private static final Pattern JAVA_KLASS =
+            Pattern.compile("\"java-klass\"=\"([0-9]+)\"");
 
     public static void main(String[] args) throws Exception {
         Method nested = TestWrapper.class.getMethod(
@@ -115,6 +119,7 @@ public class TestNestedVODeopt {
                 target + ": no lowered allocation remains");
 
         String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        assertUniqueCall(before, after, callee, target);
         PEATestUtils.DeoptBundle source = before.deoptBundleAtCall(callee, 0);
         PEATestUtils.DeoptBundle reconstructed = after.deoptBundleAtCall(callee, 0);
         Asserts.assertEquals(source.virtualObjects().size(), 0,
@@ -124,6 +129,8 @@ public class TestNestedVODeopt {
                 target + ": descriptor rewrite preserves the exact deopt BCI");
         reconstructed.assertVirtualObjectIds(0, 1);
         NestedDescriptors graph = identifyNestedDescriptors(reconstructed);
+        assertDescriptorKlass(graph.outer(), allocations.get(0), target);
+        assertDescriptorKlass(graph.inner(), allocations.get(1), target);
         assertOuterDescriptor(reconstructed, graph.outer(), graph.inner(),
                 PEATestUtils.DeoptValueKind.VO_REF);
         assertInnerDescriptor(graph.inner());
@@ -169,6 +176,7 @@ public class TestNestedVODeopt {
 
         String deoptCallee =
                 PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        assertUniqueCall(before, after, deoptCallee, target);
         PEATestUtils.DeoptBundle source =
                 before.deoptBundleAtCall(deoptCallee, 0);
         PEATestUtils.DeoptBundle bundle =
@@ -179,6 +187,7 @@ public class TestNestedVODeopt {
                 target + ": staged descriptor preserves the exact call BCI");
         bundle.assertVirtualObjectIds(0);
         PEATestUtils.VirtualObjectDescriptor outer = bundle.virtualObject(0);
+        assertDescriptorKlass(outer, allocations.get(0), target);
         assertOuterDescriptor(bundle, outer, null,
                 PEATestUtils.DeoptValueKind.MATERIALIZED_OOP);
         PEATestUtils.VirtualObjectEntry firstChild =
@@ -195,12 +204,35 @@ public class TestNestedVODeopt {
                 PEATestUtils.MethodId.of(consumeOuter).llvmFunctionName();
         PEATestUtils.IRBlock innerBlock = after.blockContaining(innerCallee, 0);
         PEATestUtils.IRBlock outerBlock = after.blockContaining(outerCallee, 0);
+        List<PEATestUtils.AllocationSite> finalAllocations =
+                after.allocations();
+        Asserts.assertEquals(finalAllocations.size(), 2,
+                target + ": final IR retains exactly the outer and inner allocations");
+        String outerResult = finalAllocations.get(0).result();
+        String innerResult = finalAllocations.get(1).result();
         innerBlock.assertAbsent("jeandle.new_instance");
         outerBlock.assertAbsent("jeandle.new_instance");
-        innerBlock.assertBefore("store atomic i32", 0, innerCallee, 0);
-        Asserts.assertTrue(outerBlock.occurrenceCount("store atomic") >= 3,
-                target + ": outer field state is replayed at its later escape");
-        outerBlock.assertBefore("store atomic", 2, outerCallee, 0);
+        assertGEP(innerBlock, innerResult,
+                offset(TestWrapper.Inner.class, "value"));
+        innerBlock.assertOccurrenceCount("getelementptr", 1);
+        innerBlock.assertOccurrenceCount("store atomic", 1);
+        innerBlock.assertOccurrenceCount("store atomic i32", 1);
+        innerBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 0);
+        innerBlock.assertBefore("store atomic", 0, innerCallee, 0);
+
+        assertGEP(outerBlock, outerResult,
+                offset(TestWrapper.Outer.class, "marker"));
+        assertGEP(outerBlock, outerResult,
+                offset(TestWrapper.Outer.class, "first"));
+        assertGEP(outerBlock, outerResult,
+                offset(TestWrapper.Outer.class, "second"));
+        outerBlock.assertOccurrenceCount("%pea.matslot", 6);
+        outerBlock.assertOccurrenceCount(
+                "ptr addrspace(1) %pea.matslot", 3);
+        outerBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 2);
+        outerBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + innerResult + ",", 2);
+        outerBlock.assertBefore("%pea.matslot", 5, outerCallee, 0);
     }
 
     private static NestedDescriptors identifyNestedDescriptors(
@@ -285,6 +317,38 @@ public class TestNestedVODeopt {
                 PEATestUtils.DeoptValueKind.SCALAR, "inner scalar value");
     }
 
+    private static void assertDescriptorKlass(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            PEATestUtils.AllocationSite allocation, Method target) {
+        Matcher matcher = JAVA_KLASS.matcher(allocation.instruction());
+        Asserts.assertTrue(matcher.find(),
+                target + ": source allocation has an exact java-klass");
+        Asserts.assertEquals(descriptor.klassOperand(),
+                "i64 " + matcher.group(1),
+                target + ": descriptor klass matches its source allocation");
+    }
+
+    private static void assertGEP(
+            PEATestUtils.IRBlock block, String owner, int offset) {
+        block.assertOccurrenceCount(
+                "ptr addrspace(1) " + owner + ", i64 " + offset, 1);
+    }
+
+    private static void assertUniqueCall(
+            PEATestUtils.IRBody before, PEATestUtils.IRBody after,
+            String callee, Method target) {
+        String invocation = "@\"" + callee + "\"(";
+        Asserts.assertEquals(before.occurrenceCount(invocation), 1,
+                target + ": one exact frontend call to " + callee);
+        Asserts.assertEquals(after.occurrenceCount(invocation), 1,
+                target + ": one exact final call to " + callee);
+        int bci = before.deoptBundleAtCall(callee, 0).rootScope().bci();
+        Asserts.assertEquals(before.callOccurrencesAtBCI(callee, bci), List.of(0),
+                target + ": exact callee is uniquely bound to source BCI " + bci);
+        Asserts.assertEquals(after.callOccurrencesAtBCI(callee, bci), List.of(0),
+                target + ": final callee preserves unique source BCI " + bci);
+    }
+
     private static int offset(Class<?> holder, String name) throws Exception {
         Field field = holder.getDeclaredField(name);
         return Math.toIntExact(UNSAFE.objectFieldOffset(field));
@@ -349,6 +413,10 @@ public class TestNestedVODeopt {
                     "one staged active-frame deoptimization");
             Asserts.assertNotEquals(savedOuter, savedInner,
                     "saved outer and inner have distinct identities");
+            Asserts.assertEquals(savedOuter.getClass(), Outer.class,
+                    "materialized outer exact class");
+            Asserts.assertEquals(savedInner.getClass(), Inner.class,
+                    "materialized inner exact class");
             Asserts.assertSame(savedOuter.first, savedInner,
                     "saved outer first field identity");
             Asserts.assertSame(savedOuter.second, savedInner,
@@ -372,6 +440,8 @@ public class TestNestedVODeopt {
             requestNestedDeopt();
             if (outer.first != inner || outer.second != inner
                     || outer.first != outer.second
+                    || outer.getClass() != Outer.class
+                    || inner.getClass() != Inner.class
                     || outer.marker != seed + 5
                     || inner.value != seed + 3) {
                 return -1;
@@ -405,6 +475,8 @@ public class TestNestedVODeopt {
             requestStagedDeopt();
             if (outer.first != inner || outer.second != inner
                     || outer.first != outer.second
+                    || outer.getClass() != Outer.class
+                    || inner.getClass() != Inner.class
                     || inner.value != seed + 7) {
                 return -3;
             }

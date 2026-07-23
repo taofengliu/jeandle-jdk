@@ -37,6 +37,8 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
@@ -45,6 +47,8 @@ public class TestPEASharedObjectGraph {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEASharedObjectGraph$TestWrapper";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+    private static final Pattern JAVA_KLASS =
+            Pattern.compile("\"java-klass\"=\"([0-9]+)\"");
 
     public static void main(String[] args) throws Exception {
         Method deopt = TestWrapper.class.getMethod(
@@ -165,6 +169,7 @@ public class TestPEASharedObjectGraph {
                 target + ": no lowered graph allocation remains");
 
         String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        assertUniqueCall(before, after, callee, target);
         PEATestUtils.DeoptBundle source = before.deoptBundleAtCall(callee, 0);
         PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(callee, 0);
         Asserts.assertEquals(source.virtualObjects().size(), 0,
@@ -172,7 +177,7 @@ public class TestPEASharedObjectGraph {
         Asserts.assertEquals(bundle.rootScope().bci(), source.rootScope().bci(),
                 target + ": graph descriptor rewrite preserves BCI");
         bundle.assertVirtualObjectIds(0, 1, 2, 3, 4);
-        assertSharedDescriptorGraph(bundle);
+        assertSharedDescriptorGraph(bundle, before.allocations(), target);
     }
 
     private static void assertPartialShape(
@@ -220,12 +225,52 @@ public class TestPEASharedObjectGraph {
         firstBlock.assertAbsent("jeandle.new_array");
         secondBlock.assertAbsent("jeandle.new_instance");
         secondBlock.assertAbsent("jeandle.new_array");
-        Asserts.assertTrue(firstBlock.occurrenceCount("store atomic") >= 3,
-                target + ": first parent and child replay before first escape");
+        List<PEATestUtils.AllocationSite> finalAllocations =
+                after.allocations();
+        Asserts.assertEquals(finalAllocations.size(), 5,
+                target + ": final IR retains exactly the five graph allocations");
+        String child = finalAllocations.get(0).result();
+        String firstParent = finalAllocations.get(1).result();
+        String secondParent = finalAllocations.get(2).result();
+        String root = finalAllocations.get(3).result();
+        String array = finalAllocations.get(4).result();
+        assertGEP(firstBlock, child, offset(TestWrapper.Child.class, "value"));
+        assertGEP(firstBlock, firstParent,
+                offset(TestWrapper.Parent.class, "value"));
+        assertGEP(firstBlock, firstParent,
+                offset(TestWrapper.Parent.class, "child"));
+        firstBlock.assertOccurrenceCount("getelementptr", 3);
+        firstBlock.assertOccurrenceCount("store atomic", 3);
+        firstBlock.assertOccurrenceCount("store atomic i32", 2);
+        firstBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 1);
+        firstBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + child + ",", 1);
         firstBlock.assertBefore("store atomic", 2, firstCallee, 0);
-        Asserts.assertTrue(secondBlock.occurrenceCount("store atomic") >= 8,
-                target + ": remaining live graph replays before second escape");
-        secondBlock.assertBefore("store atomic", 7, secondCallee, 0);
+
+        assertGEP(secondBlock, secondParent,
+                offset(TestWrapper.Parent.class, "value"));
+        assertGEP(secondBlock, secondParent,
+                offset(TestWrapper.Parent.class, "child"));
+        for (String field : List.of("value", "left", "right", "child")) {
+            assertGEP(secondBlock, root,
+                    offset(TestWrapper.Root.class, field));
+        }
+        int base = Unsafe.ARRAY_OBJECT_BASE_OFFSET;
+        int scale = Unsafe.ARRAY_OBJECT_INDEX_SCALE;
+        for (int index = 0; index < 4; index++) {
+            assertGEP(secondBlock, array, base + index * scale);
+        }
+        secondBlock.assertOccurrenceCount("getelementptr", 10);
+        secondBlock.assertOccurrenceCount("store atomic", 10);
+        secondBlock.assertOccurrenceCount("store atomic i32", 2);
+        secondBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 8);
+        secondBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + child + ",", 4);
+        secondBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + firstParent + ",", 2);
+        secondBlock.assertOccurrenceCount(
+                "store atomic ptr addrspace(1) " + secondParent + ",", 2);
+        secondBlock.assertBefore("store atomic", 9, secondCallee, 0);
     }
 
     private static void assertDeadShape(
@@ -299,7 +344,9 @@ public class TestPEASharedObjectGraph {
     }
 
     private static void assertSharedDescriptorGraph(
-            PEATestUtils.DeoptBundle bundle) throws Exception {
+            PEATestUtils.DeoptBundle bundle,
+            List<PEATestUtils.AllocationSite> allocations, Method target)
+            throws Exception {
         int childValue = offset(TestWrapper.Child.class, "value");
         Set<Integer> parentOffsets = Set.of(
                 offset(TestWrapper.Parent.class, "child"),
@@ -338,10 +385,19 @@ public class TestPEASharedObjectGraph {
         Asserts.assertNotNull(array, "Object[] descriptor");
         Asserts.assertEquals(parents.size(), 2,
                 "two parent descriptors share one child");
+        assertDescriptorKlass(child, allocations.get(0), target);
+        for (PEATestUtils.VirtualObjectDescriptor parent : parents) {
+            assertDescriptorKlass(parent, allocations.get(1), target);
+        }
+        assertDescriptorKlass(root, allocations.get(3), target);
+        assertDescriptorKlass(array, allocations.get(4), target);
 
         int parentChild = offset(TestWrapper.Parent.class, "child");
         for (PEATestUtils.VirtualObjectDescriptor parent : parents) {
-            bundle.assertVORef(parent.id(), parentChild, child.id());
+            Asserts.assertEquals(voRef(parent, parentChild), child.id(),
+                    "parent child VORef");
+            assertIntEntry(parent,
+                    offset(TestWrapper.Parent.class, "value"));
         }
         int rootLeft = offset(TestWrapper.Root.class, "left");
         int rootRight = offset(TestWrapper.Root.class, "right");
@@ -353,14 +409,18 @@ public class TestPEASharedObjectGraph {
                 "root.right references one parent descriptor");
         Asserts.assertNotEquals(voRef(root, rootLeft), voRef(root, rootRight),
                 "diamond arms remain distinct identities");
-        bundle.assertVORef(root.id(), rootChild, child.id());
+        Asserts.assertEquals(voRef(root, rootChild), child.id(),
+                "root child VORef");
+        assertIntEntry(root, offset(TestWrapper.Root.class, "value"));
+        assertIntEntry(child, childValue);
 
         int base = Unsafe.ARRAY_OBJECT_BASE_OFFSET;
         int scale = Unsafe.ARRAY_OBJECT_INDEX_SCALE;
         Asserts.assertEquals(array.elements().keySet(),
                 Set.of(base, base + scale, base + 2 * scale, base + 3 * scale),
                 "exact Object[] descriptor offsets");
-        bundle.assertVORef(array.id(), base, child.id());
+        Asserts.assertEquals(voRef(array, base), child.id(),
+                "array first child VORef");
         Asserts.assertTrue(parentIds.contains(voRef(array, base + scale)),
                 "array[1] references a parent");
         Asserts.assertTrue(parentIds.contains(voRef(array, base + 2 * scale)),
@@ -368,7 +428,8 @@ public class TestPEASharedObjectGraph {
         Asserts.assertNotEquals(voRef(array, base + scale),
                 voRef(array, base + 2 * scale),
                 "array parent elements preserve distinct identities");
-        bundle.assertVORef(array.id(), base + 3 * scale, child.id());
+        Asserts.assertEquals(voRef(array, base + 3 * scale), child.id(),
+                "array second child VORef");
     }
 
     private static int voRef(
@@ -377,10 +438,59 @@ public class TestPEASharedObjectGraph {
                 descriptor.entries().get(offset);
         Asserts.assertNotNull(entry,
                 "descriptor " + descriptor.id() + " entry at " + offset);
+        Asserts.assertEquals(entry.basicType(),
+                PEATestUtils.DeoptBasicType.OBJECT,
+                "descriptor reference basic type");
         Asserts.assertEquals(entry.value().kind(),
                 PEATestUtils.DeoptValueKind.VO_REF,
                 "descriptor edge is a VORef");
         return entry.value().virtualObjectId();
+    }
+
+    private static void assertIntEntry(
+            PEATestUtils.VirtualObjectDescriptor descriptor, int offset) {
+        PEATestUtils.VirtualObjectEntry entry =
+                descriptor.entries().get(offset);
+        Asserts.assertNotNull(entry,
+                "descriptor " + descriptor.id() + " int entry at " + offset);
+        Asserts.assertEquals(entry.basicType(),
+                PEATestUtils.DeoptBasicType.INT,
+                "descriptor integer basic type");
+        Asserts.assertEquals(entry.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR,
+                "descriptor integer scalar kind");
+    }
+
+    private static void assertDescriptorKlass(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            PEATestUtils.AllocationSite allocation, Method target) {
+        Matcher matcher = JAVA_KLASS.matcher(allocation.instruction());
+        Asserts.assertTrue(matcher.find(),
+                target + ": source allocation has an exact java-klass");
+        Asserts.assertEquals(descriptor.klassOperand(),
+                "i64 " + matcher.group(1),
+                target + ": descriptor klass matches source allocation");
+    }
+
+    private static void assertGEP(
+            PEATestUtils.IRBlock block, String owner, int offset) {
+        block.assertOccurrenceCount(
+                "ptr addrspace(1) " + owner + ", i64 " + offset, 1);
+    }
+
+    private static void assertUniqueCall(
+            PEATestUtils.IRBody before, PEATestUtils.IRBody after,
+            String callee, Method target) {
+        String invocation = "@\"" + callee + "\"(";
+        Asserts.assertEquals(before.occurrenceCount(invocation), 1,
+                target + ": one exact frontend call to " + callee);
+        Asserts.assertEquals(after.occurrenceCount(invocation), 1,
+                target + ": one exact final call to " + callee);
+        int bci = before.deoptBundleAtCall(callee, 0).rootScope().bci();
+        Asserts.assertEquals(before.callOccurrencesAtBCI(callee, bci), List.of(0),
+                target + ": exact callee uniquely bound to source BCI " + bci);
+        Asserts.assertEquals(after.callOccurrencesAtBCI(callee, bci), List.of(0),
+                target + ": final callee preserves source BCI " + bci);
     }
 
     private static int offset(Class<?> holder, String name) throws Exception {
@@ -524,7 +634,12 @@ public class TestPEASharedObjectGraph {
                     || root.child != child
                     || left.child != child || right.child != child
                     || array[0] != child || array[3] != child
-                    || array[1] != left || array[2] != right) {
+                    || array[1] != left || array[2] != right
+                    || child.getClass() != Child.class
+                    || left.getClass() != Parent.class
+                    || right.getClass() != Parent.class
+                    || root.getClass() != Root.class
+                    || array.getClass() != Object[].class) {
                 return -1;
             }
             ((Child) array[0]).value += 11;
@@ -575,7 +690,12 @@ public class TestPEASharedObjectGraph {
             int late = consumeGraph(root, second, array);
             if (savedFirst != first || savedSecond != second
                     || savedRoot != root || savedArray != array
-                    || savedChild != child) {
+                    || savedChild != child
+                    || child.getClass() != Child.class
+                    || first.getClass() != Parent.class
+                    || second.getClass() != Parent.class
+                    || root.getClass() != Root.class
+                    || array.getClass() != Object[].class) {
                 return -3;
             }
             return early + late + child.value;
@@ -659,6 +779,16 @@ public class TestPEASharedObjectGraph {
                     context + ": array first parent");
             Asserts.assertSame(savedArray[2], savedSecond,
                     context + ": array second parent");
+            Asserts.assertEquals(savedChild.getClass(), Child.class,
+                    context + ": child exact class");
+            Asserts.assertEquals(savedFirst.getClass(), Parent.class,
+                    context + ": first parent exact class");
+            Asserts.assertEquals(savedSecond.getClass(), Parent.class,
+                    context + ": second parent exact class");
+            Asserts.assertEquals(savedRoot.getClass(), Root.class,
+                    context + ": root exact class");
+            Asserts.assertEquals(savedArray.getClass(), Object[].class,
+                    context + ": array exact class");
         }
 
         private static Method target(String name, Class<?>... parameters) {
