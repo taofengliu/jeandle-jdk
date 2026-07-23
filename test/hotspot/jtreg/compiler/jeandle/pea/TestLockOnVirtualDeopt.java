@@ -12,129 +12,226 @@
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
  *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this work; if not, write to the Free Software Foundation,
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 /*
  * @test
- * @summary PEA lock reconstruction at deopt: a never-escaping VO held in
- *          a balanced synchronized block is still virtual at a null-check
- *          safepoint inside the block. PEA elides the monitorenter/exit and
- *          rewrites the deopt bundle's monitor entry to eliminated=true with a
- *          VORef owner, so HotSpot relock_objects re-acquires the lock on the
- *          reallocated owner at deopt. No IllegalMonitorStateException.
+ * @summary PEA reconstructs a virtual lock in an exactly deoptimized active
+ *          frame that continues, mutates, exits normally, and reacquires it
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestLockOnVirtualDeopt
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestLockOnVirtualDeopt {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestLockOnVirtualDeopt$TestWrapper";
+    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestLockOnVirtualDeopt$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                wrapper));
+        Method target = TestWrapper.class.getMethod("testContinuingFrame", int.class);
+        Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+        for (int lockingMode : List.of(1, 2)) {
+            builder(false, lockingMode, target, requestDeopt)
+                    .runPEAOnOffEquivalent();
+        }
 
-        // p is held in a balanced synchronized block. PEA elides the
-        // monitorenter/exit (the monitor JavaOps are lower-phase=1, so they
-        // reach PEA unexpanded and PEA folds the balanced pair on the virtual
-        // receiver; NeverEscapes -> OrigAlloc eliminated). The inp.h null-check
-        // safepoint's monitor entry is rewritten to eliminated=true (index=1)
-        // with a VORef owner, and a ScalarValueType VO descriptor is emitted
-        // for p. At deopt HotSpot reallocates p and re-acquires its lock
-        // (relock_objects).
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test", TestWrapper.Holder.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc i32 .*test.*");
-        // PEA described the locked virtual object p: the ScalarValueType VO
-        // descriptor header (vo_id 0) = (0<<32)|(4<<16)|T_OBJECT(12) = 262156.
-        checker.check("262156");
-        // PEA elided the balanced monitorenter/monitorexit pair: no real
-        // monitor call remains. The deopt bundle for the null-check deopt
-        // inside the synchronized block carries the eliminated marker
-        // (1<<32)|(3<<16)|T_OBJECT(12) = 4295163916 with a VORef owner, so
-        // HotSpot relock_objects re-acquires the lock on the reallocated p.
-        // (4295163916 shares the same deopt-bundle line as 262156 and is not
-        // re-asserted here -- FileCheck is forward-only by line; the elision
-        // is confirmed by the absence of the real monitor call.)
-        checker.checkNot("monitorenter_with");
-        checker.checkNot("monitorexit_with");
-        System.out.println("TestLockOnVirtualDeopt IR: P4c lock-elision mechanism validated");
+        try (PEATestUtils.RunResult run =
+                builder(true, 2, target, requestDeopt).run()) {
+            assertShape(run, target, requestDeopt);
+        }
+    }
 
-        // test(holder) returns 10 (p.x) + 20 (p.y) + 0 (holder.h) = 30.
-        // test(null) null-check deopts at inp.h INSIDE the synchronized block;
-        // deopt reconstructs the frame and the lock state, then the interpreter
-        // throws NPE on the null inp.h access (unwinding monitorexit). A broken
-        // lock reconstruction surfaces as an IllegalMonitorStateException or a
-        // nonzero exit.
-        output.shouldContain("TestLockOnVirtualDeopt result: 30");
-        output.shouldContain("TestLockOnVirtualDeopt deopt: NPE");
-        output.shouldNotContain("IllegalMonitorStateException");
+    private static PEATestUtils.RunBuilder builder(
+            boolean shape, int lockingMode, Method target, Method requestDeopt) {
+        PEATestUtils.RunBuilder builder = shape
+                ? PEATestUtils.shapeRun(WRAPPER, target)
+                : PEATestUtils.behaviorRun(WRAPPER, target);
+        return builder.dontinline(requestDeopt).lockingMode(lockingMode);
+    }
+
+    private static void assertShape(
+            PEATestUtils.RunResult run, Method target, Method requestDeopt)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        List<Integer> sourceBCIs = before.allocationBCIs();
+
+        Asserts.assertEquals(sourceBCIs.size(), 1,
+                target + ": one source lock owner");
+        Asserts.assertEquals(new HashSet<>(sourceBCIs).size(), 1,
+                target + ": source owner allocation BCI is unique");
+        Asserts.assertEquals(first.neverEscapes(), 0,
+                target + ": owner is observed only after the deopt helper");
+        Asserts.assertEquals(first.partiallyEscapes(), 1,
+                target + ": owner is virtual at deopt then materialized");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": owner does not always escape");
+        Asserts.assertEquals(after.allocationBCIs(), sourceBCIs,
+                target + ": partial owner reuses its source OrigAlloc");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1,
+                target + ": exact retained source allocation count");
+
+        String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        PEATestUtils.DeoptBundle source = exactBundle(before, callee);
+        PEATestUtils.DeoptBundle bundle = exactBundle(after, callee);
+        Asserts.assertEquals(source.virtualObjects().size(), 0,
+                target + ": frontend helper call has no PEA descriptors");
+        Asserts.assertEquals(bundle.rootScope().bci(), source.rootScope().bci(),
+                target + ": descriptor rewrite preserves helper-call BCI");
+        Asserts.assertEquals(bundle.rootScope().duplicateBCI(),
+                bundle.rootScope().bci(),
+                target + ": helper-call BCI is duplicated exactly");
+        Asserts.assertEquals(bundle.scopes().size(), 1,
+                target + ": single active Java scope");
+        bundle.assertVirtualObjectIds(0);
+
+        PEATestUtils.VirtualObjectDescriptor point = bundle.virtualObject(0);
+        int xOffset = offset(TestWrapper.Point.class, "x");
+        int yOffset = offset(TestWrapper.Point.class, "y");
+        Asserts.assertEquals(point.fields().keySet(), Set.of(xOffset, yOffset),
+                target + ": exact owner field descriptor");
+        assertScalar(point, xOffset, "i32 18");
+        assertScalar(point, yOffset, "i32 31");
+
+        Asserts.assertEquals(bundle.rootScope().monitors().size(), 1,
+                target + ": one exact logical monitor entry");
+        PEATestUtils.DeoptMonitor monitor =
+                bundle.rootScope().monitors().get(0);
+        Asserts.assertEquals(monitor.depth(), 0,
+                target + ": root monitor depth");
+        Asserts.assertTrue(monitor.eliminated(),
+                target + ": virtual owner monitor is eliminated");
+        Asserts.assertEquals(monitor.owner().kind(),
+                PEATestUtils.DeoptValueKind.VO_REF,
+                target + ": monitor owner uses a typed VORef");
+        Asserts.assertEquals(monitor.owner().virtualObjectId(), 0,
+                target + ": monitor owner descriptor identity");
+    }
+
+    private static PEATestUtils.DeoptBundle exactBundle(
+            PEATestUtils.IRBody body, String callee) {
+        Asserts.assertEquals(body.occurrenceCount("@\"" + callee + "\"("), 1,
+                body.methodId() + ": exact no-VO deopt helper call");
+        return body.deoptBundleAtCall(callee, 0);
+    }
+
+    private static void assertScalar(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            int offset, String operand) {
+        PEATestUtils.VirtualObjectEntry entry = descriptor.fields().get(offset);
+        Asserts.assertNotNull(entry);
+        Asserts.assertEquals(entry.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertEquals(entry.value().operand(), operand);
+    }
+
+    private static int offset(Class<?> holder, String name) throws Exception {
+        Field field = holder.getDeclaredField(name);
+        return Math.toIntExact(UNSAFE.objectFieldOffset(field));
     }
 
     public static class TestWrapper {
-        // Simple null-check vehicle (not a VO).
-        public static class Holder { public int h; }
-        public static class Point { public int x; public int y; }
+        private static final Method DEOPT_TARGET = target();
+        private static int deoptRequests;
 
-        public static void main(String[] args) {
-            // Initialize classes so test() compiles a real body (no class-init
-            // trap stubs), with PEA virtualizing p.
-            new Holder();
-            new Point();
-            Holder holder = new Holder();
-            holder.h = 0;
-            int r = test(holder);   // compiles + runs (no deopt)
-            System.out.println("TestLockOnVirtualDeopt result: " + r);
-            try {
-                test(null);          // null-check deopt inside synchronized; p locked
-                Asserts.fail("expected NPE");
-            } catch (NullPointerException e) {
-                System.out.println("TestLockOnVirtualDeopt deopt: NPE");
-            }
-            Asserts.assertEquals(r, 30);
+        public static class Point {
+            public int x;
+            public int y;
         }
 
-        // Compiled by Jeandle. p (Point) never escapes and is held in a
-        // balanced synchronized block (PEA elides the monitorenter/exit). At
-        // the inp.h safepoint inside the block p is still virtual AND locked,
-        // so PEA describes it and rewrites the monitor entry to
-        // eliminated=true with a VORef owner.
-        public static int test(Holder inp) {
-            Point p = new Point();
-            p.x = 10;
-            p.y = 20;
-            int ox;
-            synchronized (p) {
-                ox = inp.h;          // null-check safepoint; p virtual + locked
+        public static void main(String[] args) throws Exception {
+            new Point();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+            int result = testContinuingFrame(7);
+            if (result != 37_051) {
+                throw new AssertionError("single monitor result " + result);
             }
-            return p.x + p.y + ox;
+            if (deoptRequests != 1) {
+                throw new AssertionError("deopt request count " + deoptRequests);
+            }
+            System.out.println("PEA-RESULT:" + result);
+        }
+
+        public static int testContinuingFrame(int seed) {
+            Point point = new Point();
+            point.x = seed + 11;
+            point.y = seed + 24;
+            synchronized (point) {
+                int token = requestDeopt();
+                if (!Thread.holdsLock(point)
+                        || point.x != 18 || point.y != 31) {
+                    return Integer.MIN_VALUE + 1;
+                }
+                point.x += token;
+                point.y += 3;
+                if (point.x != 23 || point.y != 34
+                        || !Thread.holdsLock(point)) {
+                    return Integer.MIN_VALUE + 2;
+                }
+            }
+            if (Thread.holdsLock(point)) {
+                return Integer.MIN_VALUE + 3;
+            }
+            synchronized (point) {
+                if (!Thread.holdsLock(point)
+                        || point.x != 23 || point.y != 34) {
+                    return Integer.MIN_VALUE + 4;
+                }
+                point.x += 7;
+                point.y += 17;
+            }
+            if (Thread.holdsLock(point)
+                    || point.x != 30 || point.y != 51) {
+                return Integer.MIN_VALUE + 5;
+            }
+            return point.x * 1000 + point.y + 7000;
+        }
+
+        private static int requestDeopt() {
+            deoptRequests++;
+            if (deoptRequests != 1) {
+                throw new AssertionError("deopt helper reexecuted");
+            }
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(DEOPT_TARGET, 2);
+            if (!evidence.frameDeoptimized()
+                    || evidence.compilationLevel() != 4
+                    || evidence.markedNMethods() != 1) {
+                throw new AssertionError("exact active-frame deopt evidence");
+            }
+            return 5;
+        }
+
+        private static Method target() {
+            try {
+                return TestWrapper.class.getMethod(
+                        "testContinuingFrame", int.class);
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
         }
     }
 }

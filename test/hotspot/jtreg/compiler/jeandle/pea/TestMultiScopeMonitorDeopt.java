@@ -12,149 +12,347 @@
  * version 2 for more details (a copy is included in the LICENSE file that
  * accompanied this code).
  *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this work; if not, write to the Free Software Foundation,
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 /*
  * @test
- * @summary PEA multi-scope descriptors: a never-escaping VO allocated by the
- *          CALLER is the owner of a balanced synchronized block that spans an
- *          INLINED callee's safepoint, so the monitor entry with owner=VO sits
- *          in the ROOT (outer) scope's monitor section of that safepoint's
- *          deopt bundle. It must still be virtualized AND described: the VO
- *          descriptor is emitted into the ROOT scope's VO section (the
- *          deopt-point-level object pool) and the root monitor entry is
- *          rewritten to eliminated=true with a VORef owner, so HotSpot
- *          reallocates the VO and re-acquires its lock (relock_objects) at
- *          deopt. No IllegalMonitorStateException; the interpreter's unwinding
- *          monitorexit stays balanced.
+ * @summary PEA reconstructs every nested, reentrant, and interleaved virtual
+ *          monitor across root and forced-inline scopes at active-frame deopt
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestMultiScopeMonitorDeopt
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestMultiScopeMonitorDeopt {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestMultiScopeMonitorDeopt$TestWrapper";
+    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestMultiScopeMonitorDeopt$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                wrapper));
+        Method target = TestWrapper.class.getMethod(
+                "testNestedReentrantInterleaved", int.class);
+        Method inlineScope = TestWrapper.class.getDeclaredMethod(
+                "inlineScope", TestWrapper.LockState.class,
+                TestWrapper.LockState.class, int.class);
+        Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+        for (int lockingMode : List.of(1, 2)) {
+            builder(false, lockingMode, target, inlineScope, requestDeopt)
+                    .runPEAOnOffEquivalent();
+        }
 
-        // outer (Outer) is allocated by the CALLER (test), never escapes, and
-        // is the owner of a synchronized block spanning the inlined inlinee
-        // call. PEA folds the balanced monitorenter/monitorexit pair on the
-        // virtual receiver, so outer stays virtual AND locked across inlinee's
-        // null-check safepoint. That safepoint's deopt bundle has TWO scopes:
-        // the ROOT scope is test (the call site, holding one locked monitor on
-        // outer) and the inner scope is inlinee@1. outer is referenced from
-        // the root scope's monitor section, so (post multi-scope-descriptors
-        // fix) its VO descriptor is emitted into the ROOT scope's VO section
-        // and the root monitor entry is rewritten to eliminated=true with a
-        // VORef owner. Verified on the post-optimization dump.
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test", TestWrapper.Holder.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc i32 .*test.*");
-        // The allocation is eliminated (NeverEscapes): no new_instance remains.
-        checker.checkNot("new_instance");
-        // PEA elided the balanced monitorenter/monitorexit pair: no real
-        // monitor call remains in the optimized IR.
-        checker.checkNot("monitorenter_with");
-        checker.checkNot("monitorexit_with");
-        // The whole deopt bundle is one line. Lock the layout of the root
-        // scope section with a single ordered pattern:
-        //   262156      VO header of outer: vo_id 0, instance ->
-        //               (0<<32)|(4<<16)|T_OBJECT(12)
-        //   4295163916  eliminated monitor entry in the ROOT scope's monitor
-        //               section: (1<<32)|(3<<16)|T_OBJECT(12), followed by
-        //               i32 <vo_id> + basic_lock -- outer's lock is elided and
-        //               re-acquired by relock_objects at deopt
-        //   393233      MethodType marker (6<<16)|17 that starts the NEXT
-        //               (inner) scope (inlinee@1) -- proves the bundle is
-        //               multi-scope and that both the descriptor and the
-        //               eliminated monitor sit in the ROOT scope's section,
-        //               before the inner scope begins.
-        checker.checkPattern("262156.*4295163916.*393233");
+        try (PEATestUtils.RunResult run =
+                builder(true, 2, target, inlineScope, requestDeopt).run()) {
+            assertShape(run, target, requestDeopt);
+        }
+    }
 
-        // test(holder) runs to completion: 7 + 0 (holder.h) = 7. test(null)
-        // null-check deopts inside the inlined inlinee while outer is locked;
-        // deopt reconstructs the caller frame, reallocates outer and re-locks
-        // it, then the interpreter throws NPE on the null h.h access,
-        // unwinding the monitorexit on the rebuilt outer (must stay balanced),
-        // and the catch completes with outer.ox == 7. A broken relock surfaces
-        // as an IllegalMonitorStateException or a nonzero exit.
-        output.shouldContain("TestMultiScopeMonitorDeopt result: 7");
-        output.shouldContain("TestMultiScopeMonitorDeopt deopt: 7");
-        output.shouldNotContain("IllegalMonitorStateException");
+    private static PEATestUtils.RunBuilder builder(
+            boolean shape, int lockingMode, Method target,
+            Method inlineScope, Method requestDeopt) {
+        PEATestUtils.RunBuilder builder = shape
+                ? PEATestUtils.shapeRun(WRAPPER, target)
+                : PEATestUtils.behaviorRun(WRAPPER, target);
+        return builder.inline(inlineScope)
+                .dontinline(requestDeopt)
+                .lockingMode(lockingMode);
+    }
+
+    private static void assertShape(
+            PEATestUtils.RunResult run, Method target, Method requestDeopt)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        List<Integer> sourceBCIs = before.allocationBCIs();
+
+        Asserts.assertEquals(sourceBCIs.size(), 3,
+                target + ": two visible owners and one monitor-only owner");
+        Asserts.assertEquals(new HashSet<>(sourceBCIs).size(), 3,
+                target + ": every owner has a distinct source allocation");
+        Asserts.assertEquals(first.neverEscapes(), 1,
+                target + ": monitor-only owner never escapes");
+        Asserts.assertEquals(first.partiallyEscapes(), 2,
+                target + ": visible owners materialize after the deopt call");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": no owner always escapes");
+        Asserts.assertEquals(after.allocationBCIs(),
+                List.of(sourceBCIs.get(0), sourceBCIs.get(1)),
+                target + ": visible owners reuse their source OrigAllocs");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 2,
+                target + ": monitor-only owner allocation remains eliminated");
+
+        String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
+        PEATestUtils.DeoptBundle source = exactBundle(before, callee);
+        PEATestUtils.DeoptBundle bundle = exactBundle(after, callee);
+        Asserts.assertEquals(source.virtualObjects().size(), 0,
+                target + ": frontend helper call has no PEA descriptors");
+        Asserts.assertEquals(bundle.rootScope().bci(), source.rootScope().bci(),
+                target + ": descriptor rewrite preserves root call BCI");
+        Asserts.assertEquals(bundle.rootScope().duplicateBCI(),
+                bundle.rootScope().bci(),
+                target + ": root BCI remains duplicated exactly");
+        Asserts.assertEquals(bundle.scopes().size(), 2,
+                target + ": exact root plus forced-inline scope count");
+        Asserts.assertEquals(bundle.inlineScopes().size(), 1,
+                target + ": exactly one forced-inline Java scope");
+
+        Map<Integer, Integer> ownerByMarker = descriptorIdsByMarker(bundle, target);
+        int outerOwner = ownerByMarker.get(101);
+        int innerOwner = ownerByMarker.get(202);
+        int monitorOnlyOwner = monitorOnlyDescriptor(bundle, ownerByMarker, target);
+
+        assertMonitor(bundle.rootScope(), 0, outerOwner, target + ": root outer");
+        Asserts.assertEquals(bundle.rootScope().monitors().size(), 1,
+                target + ": root scope carries one logical entry");
+
+        PEATestUtils.DeoptScope inline = bundle.inlineScopes().get(0);
+        Asserts.assertEquals(inline.monitors().size(), 3,
+                target + ": inline scope preserves all three logical entries");
+        assertMonitor(inline, 0, innerOwner, target + ": inline inner owner");
+        assertMonitor(inline, 1, outerOwner,
+                target + ": inline reentrant outer owner");
+        assertMonitor(inline, 2, monitorOnlyOwner,
+                target + ": inline innermost monitor-only owner");
+
+        Set<Integer> ordinaryRefs = new HashSet<>();
+        for (PEATestUtils.DeoptScope scope : bundle.scopes()) {
+            collectVORefs(ordinaryRefs, scope.locals());
+            collectVORefs(ordinaryRefs, scope.stack());
+        }
+        for (PEATestUtils.VirtualObjectDescriptor descriptor
+                : bundle.virtualObjects().values()) {
+            for (PEATestUtils.VirtualObjectEntry entry
+                    : descriptor.entries().values()) {
+                if (entry.value().kind() == PEATestUtils.DeoptValueKind.VO_REF) {
+                    ordinaryRefs.add(entry.value().virtualObjectId());
+                }
+            }
+        }
+        Asserts.assertTrue(ordinaryRefs.containsAll(
+                Set.of(outerOwner, innerOwner)),
+                target + ": visible owners remain ordinary frame roots");
+        Asserts.assertFalse(ordinaryRefs.contains(monitorOnlyOwner),
+                target + ": innermost owner is reachable only from monitor metadata");
+    }
+
+    private static PEATestUtils.DeoptBundle exactBundle(
+            PEATestUtils.IRBody body, String callee) {
+        Asserts.assertEquals(body.occurrenceCount("@\"" + callee + "\"("), 1,
+                body.methodId() + ": exact no-VO deopt helper call");
+        return body.deoptBundleAtCall(callee, 0);
+    }
+
+    private static Map<Integer, Integer> descriptorIdsByMarker(
+            PEATestUtils.DeoptBundle bundle, Method target) throws Exception {
+        int idOffset = offset(TestWrapper.LockState.class, "id");
+        int valueOffset = offset(TestWrapper.LockState.class, "value");
+        Map<Integer, Integer> byMarker = new HashMap<>();
+        for (PEATestUtils.VirtualObjectDescriptor descriptor
+                : bundle.virtualObjects().values()) {
+            if (!descriptor.fields().keySet().equals(Set.of(idOffset, valueOffset))) {
+                continue;
+            }
+            PEATestUtils.DeoptValue id = descriptor.fields().get(idOffset).value();
+            Asserts.assertEquals(id.kind(), PEATestUtils.DeoptValueKind.SCALAR,
+                    target + ": owner marker is scalar");
+            int marker = Integer.parseInt(id.operand().substring("i32 ".length()));
+            Asserts.assertNull(byMarker.put(marker, descriptor.id()),
+                    target + ": owner marker is unique");
+        }
+        Asserts.assertEquals(byMarker.keySet(), Set.of(101, 202),
+                target + ": exact visible-owner marker set");
+        assertScalar(bundle.virtualObject(byMarker.get(101)), valueOffset, "i32 12");
+        assertScalar(bundle.virtualObject(byMarker.get(202)), valueOffset, "i32 16");
+        return byMarker;
+    }
+
+    private static int monitorOnlyDescriptor(
+            PEATestUtils.DeoptBundle bundle, Map<Integer, Integer> visible,
+            Method target) {
+        Asserts.assertEquals(bundle.virtualObjects().size(), 3,
+                target + ": exact descriptor count");
+        Set<Integer> remaining = new HashSet<>(bundle.virtualObjects().keySet());
+        remaining.removeAll(visible.values());
+        Asserts.assertEquals(remaining.size(), 1,
+                target + ": one monitor-only descriptor");
+        int id = remaining.iterator().next();
+        Asserts.assertEquals(bundle.virtualObject(id).fields(), Map.of(),
+                target + ": marker-free monitor-only owner descriptor");
+        return id;
+    }
+
+    private static void assertMonitor(
+            PEATestUtils.DeoptScope scope, int depth, int ownerId,
+            String message) {
+        PEATestUtils.DeoptMonitor monitor = scope.monitors().get(depth);
+        Asserts.assertEquals(monitor.depth(), depth, message + " depth");
+        Asserts.assertTrue(monitor.eliminated(), message + " is eliminated");
+        Asserts.assertEquals(monitor.owner().kind(),
+                PEATestUtils.DeoptValueKind.VO_REF, message + " owner kind");
+        Asserts.assertEquals(monitor.owner().virtualObjectId(), ownerId,
+                message + " owner identity");
+    }
+
+    private static void collectVORefs(
+            Set<Integer> ids, Map<Integer, PEATestUtils.DeoptValue> values) {
+        for (PEATestUtils.DeoptValue value : values.values()) {
+            if (value.kind() == PEATestUtils.DeoptValueKind.VO_REF) {
+                ids.add(value.virtualObjectId());
+            }
+        }
+    }
+
+    private static void assertScalar(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            int offset, String operand) {
+        PEATestUtils.VirtualObjectEntry entry = descriptor.fields().get(offset);
+        Asserts.assertNotNull(entry);
+        Asserts.assertEquals(entry.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR);
+        Asserts.assertEquals(entry.value().operand(), operand);
+    }
+
+    private static int offset(Class<?> holder, String name) throws Exception {
+        Field field = holder.getDeclaredField(name);
+        return Math.toIntExact(UNSAFE.objectFieldOffset(field));
     }
 
     public static class TestWrapper {
-        // Simple null-check vehicle (not a VO).
-        public static class Holder { public int h; }
-        public static class Outer { public int ox; }
+        private static final Method DEOPT_TARGET = target();
+        private static int deoptRequests;
 
-        public static void main(String[] args) {
-            // Initialize classes so test() compiles a real body (no class-init
-            // trap stubs), with PEA virtualizing outer.
-            new Holder();
-            new Outer();
-            Holder holder = new Holder();
-            holder.h = 0;
-            int r = test(holder);   // compiles + runs (no deopt)
-            System.out.println("TestMultiScopeMonitorDeopt result: " + r);
-            int d = test(null);     // null-check deopt in inlined inlinee; outer locked
-            System.out.println("TestMultiScopeMonitorDeopt deopt: " + d);
-            Asserts.assertEquals(r, 7);
-            Asserts.assertEquals(d, 7);
+        public static class LockState {
+            public int id;
+            public int value;
         }
 
-        // Compiled by Jeandle. outer (Outer) never escapes and is the owner of
-        // a balanced synchronized block spanning the inlined inlinee call, so
-        // at inlinee's null-check safepoint the ROOT scope's monitor section
-        // holds an entry with owner=outer. PEA elides the monitorenter/exit,
-        // describes outer, and rewrites the root monitor entry to
-        // eliminated=true with a VORef owner.
-        public static int test(Holder inp) {
-            Outer outer = new Outer();
-            outer.ox = 7;
-            int o;
-            try {
-                synchronized (outer) {
-                    o = inlinee(inp);   // inlined; null-check deopt when inp==null
-                }
-            } catch (NullPointerException e) {
-                o = 0;                  // interpreter: rebuilt + relocked outer
+        public static class MetadataLock { }
+
+        public static void main(String[] args) throws Exception {
+            new LockState();
+            new MetadataLock();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+            int result = testNestedReentrantInterleaved(7);
+            if (result != 38_039) {
+                throw new AssertionError("multi-scope monitor result " + result);
             }
-            return outer.ox + o;        // 7 + 0 = 7
+            if (deoptRequests != 1) {
+                throw new AssertionError("deopt request count " + deoptRequests);
+            }
+            System.out.println("PEA-RESULT:" + result);
         }
 
-        public static int inlinee(Holder h) {
-            return h.h;                 // null-check safepoint with a deopt bundle
+        public static int testNestedReentrantInterleaved(int seed) {
+            LockState outer = new LockState();
+            outer.id = 101;
+            outer.value = seed;
+            LockState inner = new LockState();
+            inner.id = 202;
+            inner.value = seed * 2;
+
+            int innerResult;
+            synchronized (outer) {
+                outer.value++;
+                innerResult = inlineScope(outer, inner, seed);
+                if (!Thread.holdsLock(outer)) {
+                    return Integer.MIN_VALUE + 1;
+                }
+                outer.value += 7;
+            }
+            if (Thread.holdsLock(outer) || Thread.holdsLock(inner)) {
+                return Integer.MIN_VALUE + 2;
+            }
+            synchronized (outer) {
+                synchronized (inner) {
+                    if (!Thread.holdsLock(outer) || !Thread.holdsLock(inner)) {
+                        return Integer.MIN_VALUE + 3;
+                    }
+                    outer.value += 11;
+                    inner.value += 13;
+                }
+            }
+            if (innerResult != 53 || Thread.holdsLock(outer)
+                    || Thread.holdsLock(inner)) {
+                return Integer.MIN_VALUE + 4;
+            }
+            return outer.value * 1000 + inner.value;
+        }
+
+        private static int inlineScope(
+                LockState outer, LockState inner, int seed) {
+            synchronized (inner) {
+                inner.value += 2;
+                synchronized (outer) {
+                    outer.value += 4;
+                    synchronized (new MetadataLock()) {
+                        int token = requestDeopt();
+                        if (!Thread.holdsLock(outer)
+                                || !Thread.holdsLock(inner)) {
+                            return Integer.MIN_VALUE + 5;
+                        }
+                        outer.value += token;
+                        inner.value += 6;
+                    }
+                    if (!Thread.holdsLock(outer)
+                            || !Thread.holdsLock(inner)) {
+                        return Integer.MIN_VALUE + 6;
+                    }
+                    outer.value += 3;
+                }
+                if (!Thread.holdsLock(outer)
+                        || !Thread.holdsLock(inner)) {
+                    return Integer.MIN_VALUE + 7;
+                }
+                inner.value += 4;
+            }
+            return outer.value + inner.value + seed;
+        }
+
+        private static int requestDeopt() {
+            deoptRequests++;
+            if (deoptRequests != 1) {
+                throw new AssertionError("deopt helper reexecuted");
+            }
+            PEATestUtils.ActiveFrameDeoptEvidence evidence =
+                    PEATestUtils.deoptimizeActiveFrame(DEOPT_TARGET, 2);
+            if (!evidence.frameDeoptimized()
+                    || evidence.compilationLevel() != 4
+                    || evidence.markedNMethods() != 1) {
+                throw new AssertionError("exact active-frame deopt evidence");
+            }
+            return 5;
+        }
+
+        private static Method target() {
+            try {
+                return TestWrapper.class.getMethod(
+                        "testNestedReentrantInterleaved", int.class);
+            } catch (ReflectiveOperationException failure) {
+                throw new ExceptionInInitializerError(failure);
+            }
         }
     }
 }
