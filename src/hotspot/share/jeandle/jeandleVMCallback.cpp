@@ -386,14 +386,10 @@ int jeandle_get_java_mirror(uintptr_t klass_ptr) {
   if (klass_ptr == 0) {
     return -1;
   }
-  // ciEnv::get_klass(Klass*) is private; use the public get_instance_klass_for_klass
-  // accessor. PEA virtual receivers are instance klasses; for any other klass kind,
-  // bail (return -1 => PEA materializes, which is sound per the contract).
+  // ciEnv::get_klass(Klass*) is private; use the public accessor that accepts
+  // instance, type-array, and object-array klasses.
   Klass* k = (Klass*)klass_ptr;
-  if (!k->is_instance_klass()) {
-    return -1;
-  }
-  ciKlass* ci_k = ciEnv::current()->get_instance_klass_for_klass(k);
+  ciKlass* ci_k = ciEnv::current()->get_klass_for_klass(k);
   if (ci_k == nullptr || !ci_k->is_loaded()) {
     return -1;
   }
