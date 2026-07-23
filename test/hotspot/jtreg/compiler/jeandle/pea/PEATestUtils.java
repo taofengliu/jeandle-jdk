@@ -1846,7 +1846,8 @@ public final class PEATestUtils {
                 instruction.append(' ').append(nextLine);
                 i++;
             }
-            if (!containsCallOrInvoke(instruction.toString())) {
+            if (!containsCallOrInvoke(instruction.toString())
+                    || !hasCompleteCallableOperand(instruction.toString())) {
                 throw new IllegalStateException(method + ": malformed LLVM call instruction: "
                         + instruction);
             }
@@ -2562,6 +2563,61 @@ public final class PEATestUtils {
             }
         }
         return quoted || parentheses != 0 || brackets != 0 || braces != 0;
+    }
+
+    private static boolean hasCompleteCallableOperand(String line) {
+        Matcher operation = CALL_OR_INVOKE_OPCODE.matcher(line);
+        if (!operation.find()) {
+            return false;
+        }
+
+        for (int at = operation.end(); at < line.length(); at++) {
+            char sigil = line.charAt(at);
+            if (sigil != '@' && sigil != '%') {
+                continue;
+            }
+            ParsedOperand operand = parseLLVMNamedOperand(line, at);
+            int next = operand.end;
+            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
+                next++;
+            }
+            if (next < line.length() && line.charAt(next) == '(') {
+                return true;
+            }
+            at = operand.end - 1;
+        }
+
+        int topLevelParenthesisGroups = 0;
+        int depth = 0;
+        boolean quoted = false;
+        for (int i = operation.end(); i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (quoted) {
+                if (ch == '\\') {
+                    i++;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+            } else if (ch == '(') {
+                if (depth++ == 0) {
+                    topLevelParenthesisGroups++;
+                }
+            } else if (ch == ')') {
+                depth--;
+            }
+        }
+
+        // Constant-expression callees have their own parenthesized operands
+        // followed by the call argument list. Inline asm has no separate
+        // named callee, so its single parenthesized call-argument list is
+        // sufficient.
+        return line.substring(operation.end()).matches("(?s).*\\basm\\b.*")
+                ? topLevelParenthesisGroups >= 1
+                : topLevelParenthesisGroups >= 2;
     }
 
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {

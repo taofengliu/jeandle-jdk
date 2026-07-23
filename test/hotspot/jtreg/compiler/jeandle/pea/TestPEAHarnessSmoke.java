@@ -465,14 +465,29 @@ public class TestPEAHarnessSmoke {
                         + "ptr elementtype(ptr addrspace(1) (ptr, ptr)) @new_instance, "
                         + "i32 2, i32 0, ptr %klass, ptr %thread)",
                 "call void %fp(ptr @new_array)",
-                "call void inttoptr (i64 139956031309536 to ptr)"
-                        + "(ptr addrspace(1) %object, ptr %card)",
+                "call void inttoptr (i64 139956031309536 to ptr)\n"
+                        + "  (ptr addrspace(1) %object, ptr %card)",
+                "call void asm sideeffect \"\", \"\"()",
                 "store i32 1, ptr %out",
                 "call void @resultless.lowered.neighbor()",
                 "ret i32 1");
         Asserts.assertEquals(body.loweredAllocCount(), 3,
                 "direct and statepoint allocation callees are counted exactly"
                         + " while constant-expression indirect calls are skipped");
+
+        PEATestUtils.IRBody truncatedIndirect = bodyWithInstructions(id,
+                "call void inttoptr (i64 139956031309536 to ptr)",
+                "%later = call ptr addrspace(1) @new_instance(ptr %klass, ptr %thread)",
+                "ret i32 1");
+        expectFailure("balanced indirect call without a call argument list",
+                truncatedIndirect::loweredAllocCount);
+
+        PEATestUtils.IRBody unterminatedIndirect = bodyWithInstructions(id,
+                "call void inttoptr (i64 139956031309536 to ptr",
+                "%later = call ptr addrspace(1) @new_instance(ptr %klass, ptr %thread)",
+                "ret i32 1");
+        expectFailure("unterminated indirect callable operand",
+                unterminatedIndirect::loweredAllocCount);
     }
 
     private static void testSyntheticParser(Method noArgs, Method complex, Method decoy) {
