@@ -137,15 +137,18 @@ public class TestPEASharedObjectGraph {
         int childValueOffset = offset(TestWrapper.Child.class, "value");
         int parentValueOffset = offset(TestWrapper.Parent.class, "value");
         int parentChildOffset = offset(TestWrapper.Parent.class, "child");
-        assertSourceStore(before, sourceChild, childValueOffset, "i32");
-        assertSourceStore(
-                before, sourceFirstParent, parentValueOffset, "i32");
+        String beforeSeed = intArgument(before, 0);
+        String afterSeed = intArgument(after, 0);
+        assertSourceScalarStore(
+                before, sourceChild, childValueOffset, beforeSeed, 1);
+        assertSourceScalarStore(
+                before, sourceFirstParent, parentValueOffset, beforeSeed, 2);
         callBlock.assertAbsent("jeandle.new_instance");
-        assertReplayStore(after, callBlock, child, childValueOffset,
-                "i32", null, callee);
-        assertReplayStore(after, callBlock, firstParent, parentValueOffset,
-                "i32", null, callee);
-        assertReplayStore(after, callBlock, firstParent, parentChildOffset,
+        assertScalarReplay(after, callBlock, child, childValueOffset,
+                afterSeed, 1, callee);
+        assertScalarReplay(after, callBlock, firstParent, parentValueOffset,
+                afterSeed, 2, callee);
+        assertReferenceReplay(after, callBlock, firstParent, parentChildOffset,
                 "ptr addrspace(1)", child, callee);
         callBlock.assertOccurrenceCount("getelementptr", 3);
         callBlock.assertOccurrenceCount("store atomic", 3);
@@ -200,7 +203,8 @@ public class TestPEASharedObjectGraph {
         Asserts.assertEquals(bundle.rootScope().bci(), source.rootScope().bci(),
                 target + ": graph descriptor rewrite preserves BCI");
         bundle.assertVirtualObjectIds(0, 1, 2, 3, 4);
-        assertSharedDescriptorGraph(bundle, before.allocations(), target);
+        assertSharedDescriptorGraph(
+                bundle, before.allocations(), after, target);
     }
 
     private static void assertPartialShape(
@@ -248,20 +252,27 @@ public class TestPEASharedObjectGraph {
         firstBlock.assertAbsent("jeandle.new_array");
         secondBlock.assertAbsent("jeandle.new_instance");
         secondBlock.assertAbsent("jeandle.new_array");
-        List<PEATestUtils.AllocationSite> finalAllocations =
-                after.allocations();
-        Asserts.assertEquals(finalAllocations.size(), 5,
+        List<PEATestUtils.AllocationSite> allocations = before.allocations();
+        Asserts.assertEquals(after.allocations().size(), 5,
                 target + ": final IR retains exactly the five graph allocations");
-        String child = finalAllocations.get(0).result();
-        String firstParent = finalAllocations.get(1).result();
-        String secondParent = finalAllocations.get(2).result();
-        String root = finalAllocations.get(3).result();
-        String array = finalAllocations.get(4).result();
-        assertGEP(firstBlock, child, offset(TestWrapper.Child.class, "value"));
-        assertGEP(firstBlock, firstParent,
-                offset(TestWrapper.Parent.class, "value"));
-        assertGEP(firstBlock, firstParent,
-                offset(TestWrapper.Parent.class, "child"));
+        String child = allocationResult(after, allocations.get(0).key());
+        String firstParent =
+                allocationResult(after, allocations.get(1).key());
+        String secondParent =
+                allocationResult(after, allocations.get(2).key());
+        String root = allocationResult(after, allocations.get(3).key());
+        String array = allocationResult(after, allocations.get(4).key());
+        String afterSeed = intArgument(after, 0);
+        int childValueOffset = offset(TestWrapper.Child.class, "value");
+        int parentValueOffset = offset(TestWrapper.Parent.class, "value");
+        int parentChildOffset = offset(TestWrapper.Parent.class, "child");
+        assertScalarReplay(after, firstBlock, child, childValueOffset,
+                afterSeed, 1, firstCallee);
+        assertScalarReplay(after, firstBlock, firstParent, parentValueOffset,
+                afterSeed, 2, firstCallee);
+        assertReferenceReplay(
+                after, firstBlock, firstParent, parentChildOffset,
+                "ptr addrspace(1)", child, firstCallee);
         firstBlock.assertOccurrenceCount("getelementptr", 3);
         firstBlock.assertOccurrenceCount("store atomic", 3);
         firstBlock.assertOccurrenceCount("store atomic i32", 2);
@@ -270,19 +281,33 @@ public class TestPEASharedObjectGraph {
                 "store atomic ptr addrspace(1) " + child + ",", 1);
         firstBlock.assertBefore("store atomic", 2, firstCallee, 0);
 
-        assertGEP(secondBlock, secondParent,
-                offset(TestWrapper.Parent.class, "value"));
-        assertGEP(secondBlock, secondParent,
-                offset(TestWrapper.Parent.class, "child"));
-        for (String field : List.of("value", "left", "right", "child")) {
-            assertGEP(secondBlock, root,
-                    offset(TestWrapper.Root.class, field));
-        }
+        assertScalarReplay(after, secondBlock, secondParent,
+                parentValueOffset, afterSeed, 3, secondCallee);
+        assertReferenceReplay(
+                after, secondBlock, secondParent, parentChildOffset,
+                "ptr addrspace(1)", child, secondCallee);
+        assertScalarReplay(after, secondBlock, root,
+                offset(TestWrapper.Root.class, "value"),
+                afterSeed, 4, secondCallee);
+        assertReferenceReplay(after, secondBlock, root,
+                offset(TestWrapper.Root.class, "left"),
+                "ptr addrspace(1)", firstParent, secondCallee);
+        assertReferenceReplay(after, secondBlock, root,
+                offset(TestWrapper.Root.class, "right"),
+                "ptr addrspace(1)", secondParent, secondCallee);
+        assertReferenceReplay(after, secondBlock, root,
+                offset(TestWrapper.Root.class, "child"),
+                "ptr addrspace(1)", child, secondCallee);
         int base = Unsafe.ARRAY_OBJECT_BASE_OFFSET;
         int scale = Unsafe.ARRAY_OBJECT_INDEX_SCALE;
-        for (int index = 0; index < 4; index++) {
-            assertGEP(secondBlock, array, base + index * scale);
-        }
+        assertReferenceReplay(after, secondBlock, array, base,
+                "ptr addrspace(1)", child, secondCallee);
+        assertReferenceReplay(after, secondBlock, array, base + scale,
+                "ptr addrspace(1)", firstParent, secondCallee);
+        assertReferenceReplay(after, secondBlock, array, base + 2 * scale,
+                "ptr addrspace(1)", secondParent, secondCallee);
+        assertReferenceReplay(after, secondBlock, array, base + 3 * scale,
+                "ptr addrspace(1)", child, secondCallee);
         secondBlock.assertOccurrenceCount("getelementptr", 10);
         secondBlock.assertOccurrenceCount("store atomic", 10);
         secondBlock.assertOccurrenceCount("store atomic i32", 2);
@@ -351,12 +376,15 @@ public class TestPEASharedObjectGraph {
                 allocationResult(after, allocations.get(1).key());
         int childOffset = offset(TestWrapper.Parent.class, "child");
         int valueOffset = offset(TestWrapper.Parent.class, "value");
-        assertSourceStore(before, sourceParent, valueOffset, "i32");
+        String beforeSeed = intArgument(before, 0);
+        String afterSeed = intArgument(after, 0);
+        assertSourceScalarStore(
+                before, sourceParent, valueOffset, beforeSeed, 2);
         callBlock.assertAbsent("jeandle.new_instance");
-        assertReplayStore(after, callBlock, parentResult, childOffset,
+        assertReferenceReplay(after, callBlock, parentResult, childOffset,
                 "ptr addrspace(1)", "null", callee);
-        assertReplayStore(after, callBlock, parentResult, valueOffset,
-                "i32", null, callee);
+        assertScalarReplay(after, callBlock, parentResult, valueOffset,
+                afterSeed, 2, callee);
         callBlock.assertOccurrenceCount("getelementptr", 2);
         callBlock.assertOccurrenceCount("store atomic", 2);
         callBlock.assertOccurrenceCount("store atomic ptr addrspace(1)", 1);
@@ -377,7 +405,8 @@ public class TestPEASharedObjectGraph {
 
     private static void assertSharedDescriptorGraph(
             PEATestUtils.DeoptBundle bundle,
-            List<PEATestUtils.AllocationSite> allocations, Method target)
+            List<PEATestUtils.AllocationSite> allocations,
+            PEATestUtils.IRBody body, Method target)
             throws Exception {
         int childValue = offset(TestWrapper.Child.class, "value");
         Set<Integer> parentOffsets = Set.of(
@@ -417,10 +446,20 @@ public class TestPEASharedObjectGraph {
         Asserts.assertNotNull(array, "Object[] descriptor");
         Asserts.assertEquals(parents.size(), 2,
                 "two parent descriptors share one child");
+        String seed = intArgument(body, 0);
+        PEATestUtils.VirtualObjectDescriptor firstParent =
+                uniqueDescriptorWithIntValue(
+                        parents, body, seed,
+                        offset(TestWrapper.Parent.class, "value"), 2,
+                        "first parent");
+        PEATestUtils.VirtualObjectDescriptor secondParent =
+                uniqueDescriptorWithIntValue(
+                        parents, body, seed,
+                        offset(TestWrapper.Parent.class, "value"), 3,
+                        "second parent");
         assertDescriptorKlass(child, allocations.get(0), target);
-        for (PEATestUtils.VirtualObjectDescriptor parent : parents) {
-            assertDescriptorKlass(parent, allocations.get(1), target);
-        }
+        assertDescriptorKlass(firstParent, allocations.get(1), target);
+        assertDescriptorKlass(secondParent, allocations.get(2), target);
         assertDescriptorKlass(root, allocations.get(3), target);
         assertDescriptorKlass(array, allocations.get(4), target);
 
@@ -428,23 +467,20 @@ public class TestPEASharedObjectGraph {
         for (PEATestUtils.VirtualObjectDescriptor parent : parents) {
             Asserts.assertEquals(voRef(parent, parentChild), child.id(),
                     "parent child VORef");
-            assertIntEntry(parent,
-                    offset(TestWrapper.Parent.class, "value"));
         }
         int rootLeft = offset(TestWrapper.Root.class, "left");
         int rootRight = offset(TestWrapper.Root.class, "right");
         int rootChild = offset(TestWrapper.Root.class, "child");
-        Set<Integer> parentIds = Set.of(parents.get(0).id(), parents.get(1).id());
-        Asserts.assertTrue(parentIds.contains(voRef(root, rootLeft)),
-                "root.left references one parent descriptor");
-        Asserts.assertTrue(parentIds.contains(voRef(root, rootRight)),
-                "root.right references one parent descriptor");
-        Asserts.assertNotEquals(voRef(root, rootLeft), voRef(root, rootRight),
-                "diamond arms remain distinct identities");
+        Asserts.assertEquals(voRef(root, rootLeft), firstParent.id(),
+                "root.left references the first parent");
+        Asserts.assertEquals(voRef(root, rootRight), secondParent.id(),
+                "root.right references the second parent");
         Asserts.assertEquals(voRef(root, rootChild), child.id(),
                 "root child VORef");
-        assertIntEntry(root, offset(TestWrapper.Root.class, "value"));
-        assertIntEntry(child, childValue);
+        assertIntEntry(
+                root, offset(TestWrapper.Root.class, "value"),
+                body, seed, 4);
+        assertIntEntry(child, childValue, body, seed, 1);
 
         int base = Unsafe.ARRAY_OBJECT_BASE_OFFSET;
         int scale = Unsafe.ARRAY_OBJECT_INDEX_SCALE;
@@ -453,13 +489,11 @@ public class TestPEASharedObjectGraph {
                 "exact Object[] descriptor offsets");
         Asserts.assertEquals(voRef(array, base), child.id(),
                 "array first child VORef");
-        Asserts.assertTrue(parentIds.contains(voRef(array, base + scale)),
-                "array[1] references a parent");
-        Asserts.assertTrue(parentIds.contains(voRef(array, base + 2 * scale)),
-                "array[2] references a parent");
-        Asserts.assertNotEquals(voRef(array, base + scale),
-                voRef(array, base + 2 * scale),
-                "array parent elements preserve distinct identities");
+        Asserts.assertEquals(voRef(array, base + scale), firstParent.id(),
+                "array[1] references the first parent");
+        Asserts.assertEquals(
+                voRef(array, base + 2 * scale), secondParent.id(),
+                "array[2] references the second parent");
         Asserts.assertEquals(voRef(array, base + 3 * scale), child.id(),
                 "array second child VORef");
     }
@@ -480,7 +514,8 @@ public class TestPEASharedObjectGraph {
     }
 
     private static void assertIntEntry(
-            PEATestUtils.VirtualObjectDescriptor descriptor, int offset) {
+            PEATestUtils.VirtualObjectDescriptor descriptor, int offset,
+            PEATestUtils.IRBody body, String seed, int delta) {
         PEATestUtils.VirtualObjectEntry entry =
                 descriptor.entries().get(offset);
         Asserts.assertNotNull(entry,
@@ -491,6 +526,29 @@ public class TestPEASharedObjectGraph {
         Asserts.assertEquals(entry.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR,
                 "descriptor integer scalar kind");
+        assertAffineI32(body, entry.value().operand(), seed, delta,
+                "descriptor " + descriptor.id() + " int value");
+    }
+
+    private static PEATestUtils.VirtualObjectDescriptor uniqueDescriptorWithIntValue(
+            List<PEATestUtils.VirtualObjectDescriptor> descriptors,
+            PEATestUtils.IRBody body, String seed, int offset, int delta,
+            String detail) {
+        List<PEATestUtils.VirtualObjectDescriptor> matches =
+                descriptors.stream().filter(descriptor -> {
+                    PEATestUtils.VirtualObjectEntry entry =
+                            descriptor.entries().get(offset);
+                    return entry != null
+                            && entry.basicType()
+                                    == PEATestUtils.DeoptBasicType.INT
+                            && entry.value().kind()
+                                    == PEATestUtils.DeoptValueKind.SCALAR
+                            && isAffineI32(
+                                    body, entry.value().operand(), seed, delta);
+                }).toList();
+        Asserts.assertEquals(matches.size(), 1,
+                body.methodId() + ": one exact " + detail + " descriptor");
+        return matches.get(0);
     }
 
     private static void assertDescriptorKlass(
@@ -504,49 +562,13 @@ public class TestPEASharedObjectGraph {
                 target + ": descriptor klass matches source allocation");
     }
 
-    private static void assertGEP(
-            PEATestUtils.IRBlock block, String owner, int offset) {
-        block.assertOccurrenceCount(
-                "ptr addrspace(1) " + owner + ", i64 " + offset, 1);
-    }
+    private record ReplayStore(String slot, String value, String line) {}
 
-    private static void assertSourceStore(
-            PEATestUtils.IRBody body, String owner, int offset, String type) {
-        Pattern gep = gepPattern(owner, offset);
-        java.util.HashSet<String> slots = new java.util.HashSet<>();
-        List<String> lines = body.lines();
-        for (String line : lines) {
-            Matcher matcher = gep.matcher(line);
-            if (matcher.matches()) {
-                slots.add(matcher.group(1));
-            }
-        }
-        Asserts.assertTrue(!slots.isEmpty(),
-                body.methodId() + ": source GEP for " + owner
-                        + " at offset " + offset);
+    private record AffineI32(int seedCoefficient, int constant) {}
 
-        int stores = 0;
-        for (String line : lines) {
-            for (String slot : slots) {
-                Pattern store = Pattern.compile("^store atomic "
-                        + Pattern.quote(type)
-                        + " (.+), ptr addrspace\\(1\\) "
-                        + Pattern.quote(slot)
-                        + " unordered, align \\d+(?:, .*)?$");
-                if (store.matcher(line).matches()) {
-                    stores++;
-                }
-            }
-        }
-        Asserts.assertTrue(stores > 0,
-                body.methodId() + ": typed source store for " + owner
-                        + " at offset " + offset);
-    }
-
-    private static void assertReplayStore(
+    private static ReplayStore exactReplayStore(
             PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
-            String owner, int offset, String type, String value,
-            String consumer) {
+            String owner, int offset, String type) {
         List<String> lines = block.lines();
         Pattern gep = gepPattern(owner, offset);
         java.util.ArrayList<String> slots = new java.util.ArrayList<>();
@@ -559,29 +581,80 @@ public class TestPEASharedObjectGraph {
         Asserts.assertEquals(slots.size(), 1,
                 body.methodId() + ": one replay GEP for " + owner
                         + " at offset " + offset);
-        String store;
-        if (value != null) {
-            store = "store atomic " + type + " " + value
-                    + ", ptr addrspace(1) " + slots.get(0);
-            block.assertOccurrenceCount(store, 1);
-        } else {
-            Pattern pattern = Pattern.compile("^store atomic "
-                    + Pattern.quote(type)
-                    + " .+, ptr addrspace\\(1\\) "
-                    + Pattern.quote(slots.get(0))
+        Pattern pattern = Pattern.compile("^store atomic "
+                + Pattern.quote(type)
+                + " (.+), ptr addrspace\\(1\\) "
+                + Pattern.quote(slots.get(0))
+                + " unordered, align \\d+(?:, .*)?$");
+        java.util.ArrayList<ReplayStore> stores = new java.util.ArrayList<>();
+        for (String line : lines) {
+            Matcher matcher = pattern.matcher(line);
+            if (matcher.matches()) {
+                stores.add(new ReplayStore(
+                        slots.get(0), matcher.group(1), line));
+            }
+        }
+        Asserts.assertEquals(stores.size(), 1,
+                body.methodId() + ": one exact replay store through "
+                        + slots.get(0));
+        return stores.get(0);
+    }
+
+    private static void assertScalarReplay(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
+            String owner, int offset, String seed, int delta,
+            String consumer) {
+        ReplayStore replay = exactReplayStore(
+                body, block, owner, offset, "i32");
+        assertAffineI32(body, replay.value(), seed, delta,
+                "scalar replay for " + owner + " at offset " + offset);
+        block.assertBefore(replay.line(), 0, consumer, 0);
+    }
+
+    private static void assertReferenceReplay(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
+            String owner, int offset, String type, String value,
+            String consumer) {
+        ReplayStore replay = exactReplayStore(
+                body, block, owner, offset, type);
+        Asserts.assertEquals(replay.value(), value,
+                body.methodId() + ": exact reference replay value for "
+                        + owner + " at offset " + offset);
+        block.assertBefore(replay.line(), 0, consumer, 0);
+    }
+
+    private static void assertSourceScalarStore(
+            PEATestUtils.IRBody body, String owner, int offset,
+            String seed, int delta) {
+        Pattern gep = gepPattern(owner, offset);
+        java.util.HashSet<String> slots = new java.util.HashSet<>();
+        for (String line : body.lines()) {
+            Matcher matcher = gep.matcher(line);
+            if (matcher.matches()) {
+                slots.add(matcher.group(1));
+            }
+        }
+        Asserts.assertTrue(!slots.isEmpty(),
+                body.methodId() + ": source GEP for " + owner
+                        + " at offset " + offset);
+        int matches = 0;
+        for (String slot : slots) {
+            Pattern store = Pattern.compile(
+                    "^store atomic i32 (.+), ptr addrspace\\(1\\) "
+                    + Pattern.quote(slot)
                     + " unordered, align \\d+(?:, .*)?$");
-            java.util.ArrayList<String> stores = new java.util.ArrayList<>();
-            for (String line : lines) {
-                if (pattern.matcher(line).matches()) {
-                    stores.add(line);
+            for (String line : body.lines()) {
+                Matcher matcher = store.matcher(line);
+                if (matcher.matches()
+                        && isAffineI32(
+                                body, matcher.group(1), seed, delta)) {
+                    matches++;
                 }
             }
-            Asserts.assertEquals(stores.size(), 1,
-                    body.methodId() + ": one scalar replay store through "
-                            + slots.get(0));
-            store = stores.get(0);
         }
-        block.assertBefore(store, 0, consumer, 0);
+        Asserts.assertEquals(matches, 1,
+                body.methodId() + ": one exact source scalar store for "
+                        + owner + " at offset " + offset);
     }
 
     private static Pattern gepPattern(String owner, int offset) {
@@ -602,6 +675,89 @@ public class TestPEASharedObjectGraph {
         Asserts.assertEquals(results.size(), 1,
                 body.methodId() + ": one allocation for " + key);
         return results.get(0);
+    }
+
+    private static String intArgument(PEATestUtils.IRBody body, int index) {
+        String marker = "@\"" + body.methodId().llvmFunctionName() + "\"(";
+        Pattern argument = Pattern.compile(
+                "(?:^|, )i32(?: [a-z][a-z0-9]*(?:\\([^)]*\\))?)* ("
+                + LLVM_LOCAL + ")(?=,|\\))");
+        java.util.ArrayList<String> arguments = new java.util.ArrayList<>();
+        for (String line : body.lines()) {
+            int start = line.indexOf(marker);
+            if (start < 0 || !line.startsWith("define ")) {
+                continue;
+            }
+            Matcher matcher = argument.matcher(
+                    line.substring(start + marker.length()));
+            while (matcher.find()) {
+                arguments.add(matcher.group(1));
+            }
+        }
+        Asserts.assertTrue(index < arguments.size(),
+                body.methodId() + ": i32 argument " + index);
+        return arguments.get(index);
+    }
+
+    private static void assertAffineI32(
+            PEATestUtils.IRBody body, String typedOrRawOperand,
+            String seed, int delta, String detail) {
+        String operand = typedOrRawOperand.startsWith("i32 ")
+                ? typedOrRawOperand.substring(4) : typedOrRawOperand;
+        AffineI32 affine = affineI32(
+                body, operand, seed, new HashSet<>());
+        Asserts.assertEquals(affine, new AffineI32(1, delta),
+                body.methodId() + ": " + detail);
+    }
+
+    private static boolean isAffineI32(
+            PEATestUtils.IRBody body, String typedOrRawOperand,
+            String seed, int delta) {
+        String operand = typedOrRawOperand.startsWith("i32 ")
+                ? typedOrRawOperand.substring(4) : typedOrRawOperand;
+        AffineI32 affine = affineI32(
+                body, operand, seed, new HashSet<>());
+        return new AffineI32(1, delta).equals(affine);
+    }
+
+    private static AffineI32 affineI32(
+            PEATestUtils.IRBody body, String operand,
+            String seed, Set<String> visiting) {
+        if (operand.equals(seed)) {
+            return new AffineI32(1, 0);
+        }
+        if (operand.matches("-?\\d+")) {
+            return new AffineI32(0, Integer.parseInt(operand));
+        }
+        if (!operand.matches(LLVM_LOCAL) || !visiting.add(operand)) {
+            return null;
+        }
+        Pattern arithmetic = Pattern.compile("^" + Pattern.quote(operand)
+                + " = (add|sub)(?: nuw)?(?: nsw)? i32 ("
+                + LLVM_LOCAL + "|-?\\d+), (" + LLVM_LOCAL
+                + "|-?\\d+)(?:, .*)?$");
+        AffineI32 result = null;
+        for (String line : body.lines()) {
+            Matcher matcher = arithmetic.matcher(line);
+            if (!matcher.matches()) {
+                continue;
+            }
+            AffineI32 left = affineI32(
+                    body, matcher.group(2), seed, visiting);
+            AffineI32 right = affineI32(
+                    body, matcher.group(3), seed, visiting);
+            if (left == null || right == null) {
+                break;
+            }
+            int sign = matcher.group(1).equals("add") ? 1 : -1;
+            result = new AffineI32(
+                    left.seedCoefficient()
+                            + sign * right.seedCoefficient(),
+                    left.constant() + sign * right.constant());
+            break;
+        }
+        visiting.remove(operand);
+        return result;
     }
 
     private static void assertUniqueCall(

@@ -133,9 +133,10 @@ public class TestNestedVODeopt {
         NestedDescriptors graph = identifyNestedDescriptors(reconstructed);
         assertDescriptorKlass(graph.outer(), allocations.get(0), target);
         assertDescriptorKlass(graph.inner(), allocations.get(1), target);
+        String seed = intArgument(after, 0);
         assertOuterDescriptor(reconstructed, graph.outer(), graph.inner(),
-                PEATestUtils.DeoptValueKind.VO_REF);
-        assertInnerDescriptor(graph.inner());
+                PEATestUtils.DeoptValueKind.VO_REF, after, seed, 5);
+        assertInnerDescriptor(graph.inner(), after, seed, 3);
     }
 
     private static void assertStagedShape(
@@ -200,8 +201,10 @@ public class TestNestedVODeopt {
         bundle.assertVirtualObjectIds(0);
         PEATestUtils.VirtualObjectDescriptor outer = bundle.virtualObject(0);
         assertDescriptorKlass(outer, allocations.get(0), target);
+        String afterSeed = intArgument(after, 0);
         assertOuterDescriptor(bundle, outer, null,
-                PEATestUtils.DeoptValueKind.MATERIALIZED_OOP);
+                PEATestUtils.DeoptValueKind.MATERIALIZED_OOP,
+                after, afterSeed, 11);
         PEATestUtils.VirtualObjectEntry firstChild =
                 outer.fields().get(offset(TestWrapper.Outer.class, "first"));
         PEATestUtils.VirtualObjectEntry secondChild =
@@ -222,9 +225,10 @@ public class TestNestedVODeopt {
         innerBlock.assertAbsent("jeandle.new_instance");
         outerBlock.assertAbsent("jeandle.new_instance");
         int innerValueOffset = offset(TestWrapper.Inner.class, "value");
-        assertSourceStore(before, sourceInner, innerValueOffset, "i32");
-        assertReplayStore(after, innerBlock, innerResult, innerValueOffset,
-                "i32", null, innerCallee);
+        assertSourceScalarStore(before, sourceInner, innerValueOffset,
+                intArgument(before, 0), 7);
+        assertScalarReplay(after, innerBlock, innerResult, innerValueOffset,
+                afterSeed, 7, innerCallee);
         innerBlock.assertOccurrenceCount("getelementptr", 1);
         innerBlock.assertOccurrenceCount("store atomic", 1);
         innerBlock.assertOccurrenceCount("store atomic i32", 1);
@@ -234,13 +238,14 @@ public class TestNestedVODeopt {
         int firstOffset = offset(TestWrapper.Outer.class, "first");
         int secondOffset = offset(TestWrapper.Outer.class, "second");
         assertAtomicIntUpdate(after, outerBlock, innerResult,
-                innerValueOffset, outerCallee);
-        assertSourceStore(before, sourceOuter, markerOffset, "i32");
-        assertReplayStore(after, outerBlock, outerResult, markerOffset,
-                "i32", null, outerCallee);
-        assertReplayStore(after, outerBlock, outerResult, firstOffset,
+                innerValueOffset, 17, outerCallee);
+        assertSourceScalarStore(before, sourceOuter, markerOffset,
+                intArgument(before, 0), 11);
+        assertScalarReplay(after, outerBlock, outerResult, markerOffset,
+                afterSeed, 24, outerCallee);
+        assertReferenceReplay(after, outerBlock, outerResult, firstOffset,
                 "ptr addrspace(1)", innerResult, outerCallee);
-        assertReplayStore(after, outerBlock, outerResult, secondOffset,
+        assertReferenceReplay(after, outerBlock, outerResult, secondOffset,
                 "ptr addrspace(1)", innerResult, outerCallee);
         outerBlock.assertOccurrenceCount("getelementptr", 4);
         outerBlock.assertOccurrenceCount("load atomic i32", 1);
@@ -286,7 +291,9 @@ public class TestNestedVODeopt {
             PEATestUtils.DeoptBundle bundle,
             PEATestUtils.VirtualObjectDescriptor outer,
             PEATestUtils.VirtualObjectDescriptor inner,
-            PEATestUtils.DeoptValueKind childKind) throws Exception {
+            PEATestUtils.DeoptValueKind childKind,
+            PEATestUtils.IRBody body, String seed, int markerDelta)
+            throws Exception {
         Set<Integer> offsets = Set.of(
                 offset(TestWrapper.Outer.class, "first"),
                 offset(TestWrapper.Outer.class, "second"),
@@ -315,10 +322,14 @@ public class TestNestedVODeopt {
                 PEATestUtils.DeoptBasicType.INT, "outer marker type");
         Asserts.assertEquals(marker.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR, "outer marker value");
+        assertAffineI32(body, marker.value().operand(), seed, markerDelta,
+                "outer marker descriptor value");
     }
 
     private static void assertInnerDescriptor(
-            PEATestUtils.VirtualObjectDescriptor inner) throws Exception {
+            PEATestUtils.VirtualObjectDescriptor inner,
+            PEATestUtils.IRBody body, String seed, int valueDelta)
+            throws Exception {
         Asserts.assertEquals(inner.kind(),
                 PEATestUtils.DescriptorKind.INSTANCE,
                 "inner descriptor kind");
@@ -331,6 +342,8 @@ public class TestNestedVODeopt {
                 PEATestUtils.DeoptBasicType.INT, "inner value type");
         Asserts.assertEquals(value.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR, "inner scalar value");
+        assertAffineI32(body, value.value().operand(), seed, valueDelta,
+                "inner descriptor value");
     }
 
     private static void assertDescriptorKlass(
@@ -344,43 +357,13 @@ public class TestNestedVODeopt {
                 target + ": descriptor klass matches its source allocation");
     }
 
-    private static void assertSourceStore(
-            PEATestUtils.IRBody body, String owner, int offset, String type) {
-        Pattern gep = gepPattern(owner, offset);
-        java.util.HashSet<String> slots = new java.util.HashSet<>();
-        List<String> lines = body.lines();
-        for (String line : lines) {
-            Matcher matcher = gep.matcher(line);
-            if (matcher.matches()) {
-                slots.add(matcher.group(1));
-            }
-        }
-        Asserts.assertTrue(!slots.isEmpty(),
-                body.methodId() + ": source GEP for " + owner
-                        + " at offset " + offset);
+    private record ReplayStore(String slot, String value, String line) {}
 
-        int stores = 0;
-        for (String line : lines) {
-            for (String slot : slots) {
-                Pattern store = Pattern.compile("^store atomic "
-                        + Pattern.quote(type)
-                        + " (.+), ptr addrspace\\(1\\) "
-                        + Pattern.quote(slot)
-                        + " unordered, align \\d+(?:, .*)?$");
-                if (store.matcher(line).matches()) {
-                    stores++;
-                }
-            }
-        }
-        Asserts.assertTrue(stores > 0,
-                body.methodId() + ": typed source store for " + owner
-                        + " at offset " + offset);
-    }
+    private record AffineI32(int seedCoefficient, int constant) {}
 
-    private static void assertReplayStore(
+    private static ReplayStore exactReplayStore(
             PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
-            String owner, int offset, String type, String value,
-            String consumer) {
+            String owner, int offset, String type) {
         List<String> lines = block.lines();
         Pattern gep = gepPattern(owner, offset);
         java.util.ArrayList<String> slots = new java.util.ArrayList<>();
@@ -393,34 +376,85 @@ public class TestNestedVODeopt {
         Asserts.assertEquals(slots.size(), 1,
                 body.methodId() + ": one replay GEP for " + owner
                         + " at offset " + offset);
-        String store;
-        if (value != null) {
-            store = "store atomic " + type + " " + value
-                    + ", ptr addrspace(1) " + slots.get(0);
-            block.assertOccurrenceCount(store, 1);
-        } else {
-            Pattern pattern = Pattern.compile("^store atomic "
-                    + Pattern.quote(type)
-                    + " .+, ptr addrspace\\(1\\) "
-                    + Pattern.quote(slots.get(0))
+        Pattern pattern = Pattern.compile("^store atomic "
+                + Pattern.quote(type)
+                + " (.+), ptr addrspace\\(1\\) "
+                + Pattern.quote(slots.get(0))
+                + " unordered, align \\d+(?:, .*)?$");
+        java.util.ArrayList<ReplayStore> stores = new java.util.ArrayList<>();
+        for (String line : lines) {
+            Matcher matcher = pattern.matcher(line);
+            if (matcher.matches()) {
+                stores.add(new ReplayStore(
+                        slots.get(0), matcher.group(1), line));
+            }
+        }
+        Asserts.assertEquals(stores.size(), 1,
+                body.methodId() + ": one exact replay store through "
+                        + slots.get(0));
+        return stores.get(0);
+    }
+
+    private static void assertScalarReplay(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
+            String owner, int offset, String seed, int delta,
+            String consumer) {
+        ReplayStore replay = exactReplayStore(
+                body, block, owner, offset, "i32");
+        assertAffineI32(body, replay.value(), seed, delta,
+                "scalar replay for " + owner + " at offset " + offset);
+        block.assertBefore(replay.line(), 0, consumer, 0);
+    }
+
+    private static void assertReferenceReplay(
+            PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
+            String owner, int offset, String type, String value,
+            String consumer) {
+        ReplayStore replay = exactReplayStore(
+                body, block, owner, offset, type);
+        Asserts.assertEquals(replay.value(), value,
+                body.methodId() + ": exact reference replay value for "
+                        + owner + " at offset " + offset);
+        block.assertBefore(replay.line(), 0, consumer, 0);
+    }
+
+    private static void assertSourceScalarStore(
+            PEATestUtils.IRBody body, String owner, int offset,
+            String seed, int delta) {
+        Pattern gep = gepPattern(owner, offset);
+        java.util.HashSet<String> slots = new java.util.HashSet<>();
+        for (String line : body.lines()) {
+            Matcher matcher = gep.matcher(line);
+            if (matcher.matches()) {
+                slots.add(matcher.group(1));
+            }
+        }
+        Asserts.assertTrue(!slots.isEmpty(),
+                body.methodId() + ": source GEP for " + owner
+                        + " at offset " + offset);
+        int matches = 0;
+        for (String slot : slots) {
+            Pattern store = Pattern.compile(
+                    "^store atomic i32 (.+), ptr addrspace\\(1\\) "
+                    + Pattern.quote(slot)
                     + " unordered, align \\d+(?:, .*)?$");
-            java.util.ArrayList<String> stores = new java.util.ArrayList<>();
-            for (String line : lines) {
-                if (pattern.matcher(line).matches()) {
-                    stores.add(line);
+            for (String line : body.lines()) {
+                Matcher matcher = store.matcher(line);
+                if (matcher.matches()
+                        && isAffineI32(
+                                body, matcher.group(1), seed, delta)) {
+                    matches++;
                 }
             }
-            Asserts.assertEquals(stores.size(), 1,
-                    body.methodId() + ": one scalar replay store through "
-                            + slots.get(0));
-            store = stores.get(0);
         }
-        block.assertBefore(store, 0, consumer, 0);
+        Asserts.assertEquals(matches, 1,
+                body.methodId() + ": one exact source scalar store for "
+                        + owner + " at offset " + offset);
     }
 
     private static void assertAtomicIntUpdate(
             PEATestUtils.IRBody body, PEATestUtils.IRBlock block,
-            String owner, int offset, String consumer) {
+            String owner, int offset, int delta, String consumer) {
         List<String> lines = block.lines();
         Pattern gep = gepPattern(owner, offset);
         java.util.ArrayList<String> slots = new java.util.ArrayList<>();
@@ -434,31 +468,136 @@ public class TestNestedVODeopt {
                 body.methodId() + ": one update GEP for " + owner
                         + " at offset " + offset);
 
-        Pattern loadPattern = Pattern.compile("^" + LLVM_LOCAL
+        Pattern loadPattern = Pattern.compile("^(" + LLVM_LOCAL + ")"
                 + " = load atomic i32, ptr addrspace\\(1\\) "
                 + Pattern.quote(slots.get(0))
                 + " unordered, align \\d+(?:, .*)?$");
-        Pattern storePattern = Pattern.compile("^store atomic i32 .+"
-                + ", ptr addrspace\\(1\\) " + Pattern.quote(slots.get(0))
-                + " unordered, align \\d+(?:, .*)?$");
         java.util.ArrayList<String> loads = new java.util.ArrayList<>();
-        java.util.ArrayList<String> stores = new java.util.ArrayList<>();
+        String loadedValue = null;
         for (String line : lines) {
-            if (loadPattern.matcher(line).matches()) {
+            Matcher load = loadPattern.matcher(line);
+            if (load.matches()) {
                 loads.add(line);
-            }
-            if (storePattern.matcher(line).matches()) {
-                stores.add(line);
+                loadedValue = load.group(1);
             }
         }
         Asserts.assertEquals(loads.size(), 1,
                 body.methodId() + ": one atomic int load through "
                         + slots.get(0));
+        Pattern addPattern = Pattern.compile("^(" + LLVM_LOCAL
+                + ") = add(?: nuw)?(?: nsw)? i32 "
+                + "(?:" + Pattern.quote(loadedValue) + ", " + delta
+                + "|" + delta + ", " + Pattern.quote(loadedValue)
+                + ")(?:, .*)?$");
+        java.util.ArrayList<String> adds = new java.util.ArrayList<>();
+        String updatedValue = null;
+        for (String line : lines) {
+            Matcher add = addPattern.matcher(line);
+            if (add.matches()) {
+                adds.add(line);
+                updatedValue = add.group(1);
+            }
+        }
+        Asserts.assertEquals(adds.size(), 1,
+                body.methodId() + ": one exact +" + delta
+                        + " update of the loaded int");
+        Pattern storePattern = Pattern.compile("^store atomic i32 "
+                + Pattern.quote(updatedValue)
+                + ", ptr addrspace\\(1\\) " + Pattern.quote(slots.get(0))
+                + " unordered, align \\d+(?:, .*)?$");
+        java.util.ArrayList<String> stores = new java.util.ArrayList<>();
+        for (String line : lines) {
+            if (storePattern.matcher(line).matches()) {
+                stores.add(line);
+            }
+        }
         Asserts.assertEquals(stores.size(), 1,
                 body.methodId() + ": one atomic int store through "
                         + slots.get(0));
-        block.assertBefore(loads.get(0), 0, stores.get(0), 0);
+        block.assertBefore(loads.get(0), 0, adds.get(0), 0);
+        block.assertBefore(adds.get(0), 0, stores.get(0), 0);
         block.assertBefore(stores.get(0), 0, consumer, 0);
+    }
+
+    private static String intArgument(PEATestUtils.IRBody body, int index) {
+        String marker = "@\"" + body.methodId().llvmFunctionName() + "\"(";
+        Pattern argument = Pattern.compile(
+                "(?:^|, )i32(?: [a-z][a-z0-9]*(?:\\([^)]*\\))?)* ("
+                + LLVM_LOCAL + ")(?=,|\\))");
+        java.util.ArrayList<String> arguments = new java.util.ArrayList<>();
+        for (String line : body.lines()) {
+            int start = line.indexOf(marker);
+            if (start < 0 || !line.startsWith("define ")) {
+                continue;
+            }
+            Matcher matcher = argument.matcher(
+                    line.substring(start + marker.length()));
+            while (matcher.find()) {
+                arguments.add(matcher.group(1));
+            }
+        }
+        Asserts.assertTrue(index < arguments.size(),
+                body.methodId() + ": i32 argument " + index);
+        return arguments.get(index);
+    }
+
+    private static void assertAffineI32(
+            PEATestUtils.IRBody body, String typedOrRawOperand,
+            String seed, int delta, String detail) {
+        String operand = typedOrRawOperand.startsWith("i32 ")
+                ? typedOrRawOperand.substring(4) : typedOrRawOperand;
+        AffineI32 affine = affineI32(
+                body, operand, seed, new HashSet<>());
+        Asserts.assertEquals(affine, new AffineI32(1, delta),
+                body.methodId() + ": " + detail);
+    }
+
+    private static boolean isAffineI32(
+            PEATestUtils.IRBody body, String operand,
+            String seed, int delta) {
+        AffineI32 affine = affineI32(
+                body, operand, seed, new HashSet<>());
+        return new AffineI32(1, delta).equals(affine);
+    }
+
+    private static AffineI32 affineI32(
+            PEATestUtils.IRBody body, String operand,
+            String seed, Set<String> visiting) {
+        if (operand.equals(seed)) {
+            return new AffineI32(1, 0);
+        }
+        if (operand.matches("-?\\d+")) {
+            return new AffineI32(0, Integer.parseInt(operand));
+        }
+        if (!operand.matches(LLVM_LOCAL) || !visiting.add(operand)) {
+            return null;
+        }
+        Pattern arithmetic = Pattern.compile("^" + Pattern.quote(operand)
+                + " = (add|sub)(?: nuw)?(?: nsw)? i32 ("
+                + LLVM_LOCAL + "|-?\\d+), (" + LLVM_LOCAL
+                + "|-?\\d+)(?:, .*)?$");
+        AffineI32 result = null;
+        for (String line : body.lines()) {
+            Matcher matcher = arithmetic.matcher(line);
+            if (!matcher.matches()) {
+                continue;
+            }
+            AffineI32 left = affineI32(
+                    body, matcher.group(2), seed, visiting);
+            AffineI32 right = affineI32(
+                    body, matcher.group(3), seed, visiting);
+            if (left == null || right == null) {
+                break;
+            }
+            int sign = matcher.group(1).equals("add") ? 1 : -1;
+            result = new AffineI32(
+                    left.seedCoefficient()
+                            + sign * right.seedCoefficient(),
+                    left.constant() + sign * right.constant());
+            break;
+        }
+        visiting.remove(operand);
+        return result;
     }
 
     private static Pattern gepPattern(String owner, int offset) {
