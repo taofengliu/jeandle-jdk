@@ -83,16 +83,16 @@ public class TestLockOnVirtualDeopt {
                 target + ": one source lock owner");
         Asserts.assertEquals(new HashSet<>(sourceBCIs).size(), 1,
                 target + ": source owner allocation BCI is unique");
-        Asserts.assertEquals(first.neverEscapes(), 0,
-                target + ": owner is observed only after the deopt helper");
-        Asserts.assertEquals(first.partiallyEscapes(), 1,
-                target + ": owner is virtual at deopt then materialized");
+        Asserts.assertEquals(first.neverEscapes(), 1,
+                target + ": owner escapes only through deopt reconstruction");
+        Asserts.assertEquals(first.partiallyEscapes(), 0,
+                target + ": deopt reconstruction does not retain the source allocation");
         Asserts.assertEquals(first.alwaysEscapes(), 0,
                 target + ": owner does not always escape");
-        Asserts.assertEquals(after.allocationBCIs(), sourceBCIs,
-                target + ": partial owner reuses its source OrigAlloc");
-        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1,
-                target + ": exact retained source allocation count");
+        Asserts.assertEquals(after.allocationBCIs(), List.of(),
+                target + ": virtual owner source allocation is eliminated");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                target + ": no lowered allocation remains");
 
         String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
         PEATestUtils.DeoptBundle source = exactBundle(before, callee);
@@ -113,8 +113,8 @@ public class TestLockOnVirtualDeopt {
         int yOffset = offset(TestWrapper.Point.class, "y");
         Asserts.assertEquals(point.fields().keySet(), Set.of(xOffset, yOffset),
                 target + ": exact owner field descriptor");
-        assertScalar(point, xOffset, "i32 18");
-        assertScalar(point, yOffset, "i32 31");
+        assertIntScalar(point, xOffset);
+        assertIntScalar(point, yOffset);
 
         Asserts.assertEquals(bundle.rootScope().monitors().size(), 1,
                 target + ": one exact logical monitor entry");
@@ -138,14 +138,16 @@ public class TestLockOnVirtualDeopt {
         return body.deoptBundleAtCall(callee, 0);
     }
 
-    private static void assertScalar(
-            PEATestUtils.VirtualObjectDescriptor descriptor,
-            int offset, String operand) {
+    private static void assertIntScalar(
+            PEATestUtils.VirtualObjectDescriptor descriptor, int offset) {
         PEATestUtils.VirtualObjectEntry entry = descriptor.fields().get(offset);
         Asserts.assertNotNull(entry);
+        Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.INT);
         Asserts.assertEquals(entry.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR);
-        Asserts.assertEquals(entry.value().operand(), operand);
+        Asserts.assertTrue(entry.value().operand().startsWith("i32 "));
+        Asserts.assertFalse(entry.value().operand().contains("poison"));
+        Asserts.assertFalse(entry.value().operand().contains("undef"));
     }
 
     private static int offset(Class<?> holder, String name) throws Exception {

@@ -244,8 +244,8 @@ public class TestPEADeoptAtAllocation {
     private static void assertRootClosure(
             PEATestUtils.DeoptBundle bundle, Method target, Scenario scenario) {
         Map<Integer, Integer> expectedLocals = switch (scenario) {
-            case INSTANCE, PRIMITIVE_ARRAY, OBJECT_ARRAY, PARTIAL_FIRST -> Map.of(1, 0);
-            case NESTED_GRAPH -> Map.of(1, 0, 2, 1);
+            case INSTANCE, PRIMITIVE_ARRAY, OBJECT_ARRAY, NESTED_GRAPH,
+                    PARTIAL_FIRST -> Map.of(1, 0);
             case LOCK_OWNER -> Map.of(1, 0, 2, 0);
         };
         Map<Integer, Integer> expectedMonitors = scenario == Scenario.LOCK_OWNER

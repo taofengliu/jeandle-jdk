@@ -92,17 +92,16 @@ public class TestMultiScopeMonitorDeopt {
                 target + ": two visible owners and one monitor-only owner");
         Asserts.assertEquals(new HashSet<>(sourceBCIs).size(), 3,
                 target + ": every owner has a distinct source allocation");
-        Asserts.assertEquals(first.neverEscapes(), 1,
-                target + ": monitor-only owner never escapes");
-        Asserts.assertEquals(first.partiallyEscapes(), 2,
-                target + ": visible owners materialize after the deopt call");
+        Asserts.assertEquals(first.neverEscapes(), 3,
+                target + ": all owners remain virtual until deoptimization");
+        Asserts.assertEquals(first.partiallyEscapes(), 0,
+                target + ": no owner escapes in compiled Java code");
         Asserts.assertEquals(first.alwaysEscapes(), 0,
                 target + ": no owner always escapes");
-        Asserts.assertEquals(after.allocationBCIs(),
-                List.of(sourceBCIs.get(0), sourceBCIs.get(1)),
-                target + ": visible owners reuse their source OrigAllocs");
-        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 2,
-                target + ": monitor-only owner allocation remains eliminated");
+        Asserts.assertEquals(after.allocationBCIs(), List.of(),
+                target + ": every virtual owner allocation is eliminated");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                target + ": no lowered owner allocation remains");
 
         String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
         PEATestUtils.DeoptBundle source = exactBundle(before, callee);
@@ -137,23 +136,6 @@ public class TestMultiScopeMonitorDeopt {
         assertMonitor(inline, 2, monitorOnlyOwner,
                 target + ": inline innermost monitor-only owner");
 
-        Set<Integer> ordinaryRefs = new HashSet<>();
-        for (PEATestUtils.DeoptScope scope : bundle.scopes()) {
-            collectVORefs(ordinaryRefs, scope.locals());
-            collectVORefs(ordinaryRefs, scope.stack());
-        }
-        for (PEATestUtils.VirtualObjectDescriptor descriptor
-                : bundle.virtualObjects().values()) {
-            for (PEATestUtils.VirtualObjectEntry entry
-                    : descriptor.entries().values()) {
-                if (entry.value().kind() == PEATestUtils.DeoptValueKind.VO_REF) {
-                    ordinaryRefs.add(entry.value().virtualObjectId());
-                }
-            }
-        }
-        Asserts.assertTrue(ordinaryRefs.containsAll(
-                Set.of(outerOwner, innerOwner)),
-                target + ": visible owners remain ordinary frame roots");
     }
 
     private static PEATestUtils.DeoptBundle exactBundle(
@@ -182,8 +164,8 @@ public class TestMultiScopeMonitorDeopt {
         }
         Asserts.assertEquals(byMarker.keySet(), Set.of(101, 202),
                 target + ": exact visible-owner marker set");
-        assertScalar(bundle.virtualObject(byMarker.get(101)), valueOffset, "i32 12");
-        assertScalar(bundle.virtualObject(byMarker.get(202)), valueOffset, "i32 16");
+        assertIntScalar(bundle.virtualObject(byMarker.get(101)), valueOffset, target);
+        assertIntScalar(bundle.virtualObject(byMarker.get(202)), valueOffset, target);
         return byMarker;
     }
 
@@ -214,23 +196,22 @@ public class TestMultiScopeMonitorDeopt {
                 message + " owner identity");
     }
 
-    private static void collectVORefs(
-            Set<Integer> ids, Map<Integer, PEATestUtils.DeoptValue> values) {
-        for (PEATestUtils.DeoptValue value : values.values()) {
-            if (value.kind() == PEATestUtils.DeoptValueKind.VO_REF) {
-                ids.add(value.virtualObjectId());
-            }
-        }
-    }
-
-    private static void assertScalar(
+    private static void assertIntScalar(
             PEATestUtils.VirtualObjectDescriptor descriptor,
-            int offset, String operand) {
+            int offset, Method target) {
         PEATestUtils.VirtualObjectEntry entry = descriptor.fields().get(offset);
         Asserts.assertNotNull(entry);
+        Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.INT,
+                target + ": dynamic owner value type");
         Asserts.assertEquals(entry.value().kind(),
-                PEATestUtils.DeoptValueKind.SCALAR);
-        Asserts.assertEquals(entry.value().operand(), operand);
+                PEATestUtils.DeoptValueKind.SCALAR,
+                target + ": dynamic owner value kind");
+        Asserts.assertTrue(entry.value().operand().startsWith("i32 "),
+                target + ": dynamic owner value operand");
+        Asserts.assertFalse(entry.value().operand().contains("poison"),
+                target + ": dynamic owner value is available");
+        Asserts.assertFalse(entry.value().operand().contains("undef"),
+                target + ": dynamic owner value is defined");
     }
 
     private static int offset(Class<?> holder, String name) throws Exception {

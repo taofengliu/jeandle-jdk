@@ -622,7 +622,8 @@ public final class PEATestUtils {
 
     /**
      * Mark one exact level-4 nmethod and prove the requested active frame is
-     * deoptimized without globally deoptimizing unrelated frames.
+     * deoptimized without globally deoptimizing unrelated frames. The frame
+     * depth is relative to this helper's caller.
      */
     public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
             Method target, int frameDepth) {
@@ -644,7 +645,7 @@ public final class PEATestUtils {
             throw new RuntimeException("Expected exactly one marked nmethod for "
                     + MethodId.of(target) + ", got " + markedNMethods);
         }
-        boolean frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth);
+        boolean frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 1);
         if (!frameDeoptimized) {
             throw new RuntimeException("Frame at depth " + frameDepth
                     + " was not deoptimized for " + MethodId.of(target));
@@ -1454,8 +1455,8 @@ public final class PEATestUtils {
                 "(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
         private static final Pattern PEA_ALLOCATION = Pattern.compile(
                 "@jeandle\\.new_(?:instance|array)(?=\\s*\\()");
-        private static final Pattern LOWERED_ALLOCATION = Pattern.compile(
-                "@new_(?:instance|array)(?=\\s*\\()");
+        private static final Pattern LOWERED_ALLOCATION_TARGET = Pattern.compile(
+                "@new_(?:instance|array)\\s*$");
         private static final Pattern DEOPT_BCI = Pattern.compile(
                 "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1,");
         private static final Pattern BLOCK_LABEL = Pattern.compile(
@@ -1523,7 +1524,41 @@ public final class PEATestUtils {
         }
 
         public int loweredAllocCount() {
-            return (int) lines.stream().filter(l -> LOWERED_ALLOCATION.matcher(l).find()).count();
+            return (int) lines.stream().filter(this::isLoweredAllocation).count();
+        }
+
+        private boolean isLoweredAllocation(String line) {
+            String callee = calledFunctionName(line);
+            if ("new_instance".equals(callee) || "new_array".equals(callee)) {
+                return true;
+            }
+            if (callee == null
+                    || !callee.startsWith("llvm.experimental.gc.statepoint")) {
+                return false;
+            }
+
+            int calleeAt = line.indexOf("@" + callee);
+            if (calleeAt < 0) {
+                throw new IllegalStateException(
+                        method + ": malformed statepoint callee: " + line);
+            }
+            int open = line.indexOf('(', calleeAt + callee.length() + 1);
+            if (open < 0) {
+                throw new IllegalStateException(
+                        method + ": malformed statepoint call: " + line);
+            }
+            int close = matchingDelimiter(line, open, '(', ')');
+            if (close < 0) {
+                throw new IllegalStateException(
+                        method + ": malformed statepoint call: " + line);
+            }
+            List<String> operands = splitTopLevelOperands(
+                    line.substring(open + 1, close), method);
+            if (operands.size() < 3) {
+                throw new IllegalStateException(
+                        method + ": statepoint lacks a target operand: " + line);
+            }
+            return LOWERED_ALLOCATION_TARGET.matcher(operands.get(2)).find();
         }
 
         public List<Integer> allocationBCIs() {
@@ -1571,13 +1606,38 @@ public final class PEATestUtils {
 
         /** Parse the bundle on one call selected by exact LLVM callee and occurrence. */
         public DeoptBundle deoptBundleAtCall(String exactCallee, int occurrence) {
+            if (occurrence < 0) {
+                throw new IllegalArgumentException("Call occurrence must be non-negative");
+            }
+            List<String> matches = instructionsCalling(exactCallee);
+            if (occurrence >= matches.size()) {
+                throw new IllegalStateException(method + ": no call occurrence " + occurrence
+                        + " of exact callee @" + exactCallee);
+            }
+            return parseDeoptBundle(method, matches.get(occurrence));
+        }
+
+        /**
+         * Return global exact-callee occurrence indices whose root deopt scope
+         * has the requested BCI.
+         */
+        public List<Integer> callOccurrencesAtBCI(String exactCallee, int bci) {
+            List<String> matches = instructionsCalling(exactCallee);
+            ArrayList<Integer> result = new ArrayList<>();
+            for (int occurrence = 0; occurrence < matches.size(); occurrence++) {
+                DeoptBundle bundle = parseDeoptBundle(method, matches.get(occurrence));
+                if (bundle.rootScope().bci() == bci) {
+                    result.add(occurrence);
+                }
+            }
+            return List.copyOf(result);
+        }
+
+        private List<String> instructionsCalling(String exactCallee) {
             Objects.requireNonNull(exactCallee);
             if (exactCallee.isEmpty() || exactCallee.charAt(0) == '@') {
                 throw new IllegalArgumentException(
                         "Exact callee must be a non-empty raw LLVM function name");
-            }
-            if (occurrence < 0) {
-                throw new IllegalArgumentException("Call occurrence must be non-negative");
             }
             ArrayList<String> matches = new ArrayList<>();
             for (int i = 0; i < lines.size(); i++) {
@@ -1586,11 +1646,7 @@ public final class PEATestUtils {
                     matches.add(instructionStartingAt(i));
                 }
             }
-            if (occurrence >= matches.size()) {
-                throw new IllegalStateException(method + ": no call occurrence " + occurrence
-                        + " of exact callee @" + exactCallee);
-            }
-            return parseDeoptBundle(method, matches.get(occurrence));
+            return List.copyOf(matches);
         }
 
         /** Parse the bundle on one Jeandle allocation selected by exact SSA result. */
@@ -1845,6 +1901,10 @@ public final class PEATestUtils {
         LinkedHashMap<Integer, DeoptValue> stack = new LinkedHashMap<>();
         ArrayList<DeoptMonitor> monitors = new ArrayList<>();
         String origPcOperand = "";
+        // HotSpot appends scope values in operand order. Normal encodings carry
+        // their slot index, while a VORef encoding carries its VO id instead.
+        int nextLocalSlot = 0;
+        int nextStackSlot = 0;
         int phase = 0;
         while (at < operands.size()) {
             DecodedEncoding encoding = decodeEncoding(method, operands.get(at));
@@ -1866,7 +1926,19 @@ public final class PEATestUtils {
                 DeoptValue value = valueType == 8
                         ? parseVORef(method, encoding, operands.get(at + 1))
                         : parseConcreteValue(method, encoding, operands.get(at + 1));
-                putUniqueScopeValue(method, locals, encoding.index(), value, "local");
+                if (valueType == 0 && encoding.index() != nextLocalSlot) {
+                    throw invalidDeopt(method, "out-of-order local index "
+                            + encoding.index() + ", expected " + nextLocalSlot);
+                }
+                if (valueType == 8
+                        && encoding.index() != value.virtualObjectId()) {
+                    throw invalidDeopt(method,
+                            "VORef local encoding id does not match its value");
+                }
+                putUniqueScopeValue(
+                        method, locals, nextLocalSlot, value, "local");
+                nextLocalSlot += valueType == 8
+                        ? 1 : scopeSlotWidth(encoding.basicType());
                 at += 2;
             } else if (valueType == 1 || valueType == 9) {
                 phase = requireScopePhase(method, phase, 1, "stack");
@@ -1874,7 +1946,19 @@ public final class PEATestUtils {
                 DeoptValue value = valueType == 9
                         ? parseVORef(method, encoding, operands.get(at + 1))
                         : parseConcreteValue(method, encoding, operands.get(at + 1));
-                putUniqueScopeValue(method, stack, encoding.index(), value, "stack");
+                if (valueType == 1 && encoding.index() != nextStackSlot) {
+                    throw invalidDeopt(method, "out-of-order stack index "
+                            + encoding.index() + ", expected " + nextStackSlot);
+                }
+                if (valueType == 9
+                        && encoding.index() != value.virtualObjectId()) {
+                    throw invalidDeopt(method,
+                            "VORef stack encoding id does not match its value");
+                }
+                putUniqueScopeValue(
+                        method, stack, nextStackSlot, value, "stack");
+                nextStackSlot += valueType == 9
+                        ? 1 : scopeSlotWidth(encoding.basicType());
                 at += 2;
             } else if (valueType == 3) {
                 phase = requireScopePhase(method, phase, 2, "monitor");
@@ -2052,6 +2136,11 @@ public final class PEATestUtils {
                     "out-of-order " + section + " section");
         }
         return requested;
+    }
+
+    private static int scopeSlotWidth(DeoptBasicType type) {
+        return type == DeoptBasicType.LONG || type == DeoptBasicType.DOUBLE
+                ? 2 : 1;
     }
 
     private static void putUniqueScopeValue(

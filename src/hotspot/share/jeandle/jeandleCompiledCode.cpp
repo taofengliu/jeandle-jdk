@@ -1023,10 +1023,14 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
               ov->field_values()->append(ef->sv1);
               if (ef->sv2 != nullptr)
                 ov->field_values()->append(ef->sv2);
-            } else if (bt == T_LONG || bt == T_DOUBLE) {
-              // reassign consumes TWO field_values slots for long/double.
+            } else if (bt == T_LONG) {
+              // Untouched wide fields use the same typed two-slot form as
+              // touched fields. On LP64 the second slot supplies all 64 bits.
               ov->field_values()->append(new ConstantIntValue(0));
+              ov->field_values()->append(new ConstantLongValue((jlong)0));
+            } else if (bt == T_DOUBLE) {
               ov->field_values()->append(new ConstantIntValue(0));
+              ov->field_values()->append(new ConstantDoubleValue(0.0));
             } else if (is_reference_type(bt)) {
               ov->field_values()->append(new ConstantOopWriteValue(nullptr));
             } else {

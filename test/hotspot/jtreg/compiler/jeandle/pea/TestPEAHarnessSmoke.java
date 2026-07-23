@@ -57,6 +57,7 @@ public class TestPEAHarnessSmoke {
         testTypedDeoptParser(noArgs);
         testMalformedDeoptBundles(noArgs);
         testExactAllocationSelection(noArgs);
+        testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
         testMalformedTranscripts(noArgs);
         testMalformedLockReplays(noArgs);
@@ -114,7 +115,7 @@ public class TestPEAHarnessSmoke {
                 + typed(1, 0, 10) + ", i32 %local, "
                 + typed(2, 0, 12) + ", ptr addrspace(1) null, "
                 + typed(3, 0, 12) + ", ptr addrspace(1) %external, "
-                + typed(0, 9, 12) + ", i32 1, "
+                + typed(1, 9, 12) + ", i32 1, "
                 + typed(1, 3, 12) + ", i32 0, ptr %rootLock, "
                 + typed(0, 5, 15) + ", ptr %origPc, "
                 + typed(0, 6, 17) + ", i64 777, "
@@ -182,6 +183,12 @@ public class TestPEAHarnessSmoke {
 
         Asserts.assertEquals(body.deoptBundleAtCall("exact.site", 0)
                 .rootScope().bci(), 11);
+        Asserts.assertEquals(body.callOccurrencesAtBCI("exact.site", 11),
+                List.of(0));
+        Asserts.assertEquals(body.callOccurrencesAtBCI("exact.site", 44),
+                List.of(1));
+        Asserts.assertEquals(body.callOccurrencesAtBCI("exact.site", 99),
+                List.of());
         expectFailure("missing exact callee",
                 () -> body.deoptBundleAtCall("exact.site.extra", 0));
         expectFailure("negative exact call occurrence",
@@ -209,7 +216,7 @@ public class TestPEAHarnessSmoke {
                         + typed(8, 0, 10) + ", i32 2)");
         expectDeoptFailure(id, "dangling VORef",
                 "\"deopt\"(i64 0, i32 1, i32 1, "
-                        + typed(0, 8, 12) + ", i32 7)");
+                        + typed(7, 8, 12) + ", i32 7)");
         expectDeoptFailure(id, "unknown value encoding",
                 "\"deopt\"(i64 0, i32 1, i32 1, "
                         + typed(0, 2, 10) + ", i32 7)");
@@ -262,6 +269,27 @@ public class TestPEAHarnessSmoke {
                 "ret i32 1");
         expectFailure("ambiguous allocation SSA",
                 () -> ambiguous.deoptBundleAtAllocation("%same"));
+    }
+
+    private static void testLoweredAllocationCounting(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "%direct = call ptr addrspace(1) @new_instance(ptr %klass, ptr %thread)",
+                "%array = invoke token (i64, i32, ptr, i32, i32, ...)"
+                        + " @llvm.experimental.gc.statepoint.p0("
+                        + "i64 1, i32 0, "
+                        + "ptr elementtype(ptr addrspace(1) (ptr, i32, ptr)) @new_array, "
+                        + "i32 3, i32 0, ptr %arrayKlass, i32 7, ptr %thread)"
+                        + " to label %next unwind label %fail",
+                "%instance = call token (i64, i32, ptr, i32, i32, ...)"
+                        + " @llvm.experimental.gc.statepoint.p0("
+                        + "i64 2, i32 0, "
+                        + "ptr elementtype(ptr addrspace(1) (ptr, ptr)) @new_instance, "
+                        + "i32 2, i32 0, ptr %klass, ptr %thread)",
+                "call void %fp(ptr @new_array)",
+                "ret i32 1");
+        Asserts.assertEquals(body.loweredAllocCount(), 3,
+                "direct and statepoint allocation callees are counted exactly");
     }
 
     private static void testSyntheticParser(Method noArgs, Method complex, Method decoy) {
@@ -624,10 +652,6 @@ public class TestPEAHarnessSmoke {
                 () -> PEATestUtils.deoptimizeActiveFrame(null, 1));
         Asserts.assertThrows(IllegalArgumentException.class,
                 () -> PEATestUtils.deoptimizeActiveFrame(uncompiled, -1));
-        RuntimeException failure = Asserts.assertThrows(RuntimeException.class,
-                () -> PEATestUtils.deoptimizeActiveFrame(uncompiled, 1));
-        Asserts.assertTrue(failure.getMessage().contains("compiled at level 4"),
-                "active-frame precondition reports exact compilation state");
     }
 
     private static void testRealShapeRun(Method noArgs, Method complex, Method decoy)
@@ -915,6 +939,10 @@ public class TestPEAHarnessSmoke {
                     "fail-fast reports the compilation state: " + failure.getMessage());
             Asserts.assertTrue(elapsedMillis < 10_000,
                     "not-compilable target must fail promptly, elapsed=" + elapsedMillis + "ms");
+            RuntimeException deoptFailure = Asserts.assertThrows(RuntimeException.class,
+                    () -> PEATestUtils.deoptimizeActiveFrame(method, 1));
+            Asserts.assertTrue(deoptFailure.getMessage().contains("compiled at level 4"),
+                    "active-frame precondition reports exact compilation state");
             System.out.println("PEATestUtils not-compilable fail-fast: OK");
         }
 

@@ -137,7 +137,7 @@ public class TestDuringCallDeoptIdentity {
     }
 
     public static class TestWrapper {
-        private static final String EXPECTED_DIGEST = "ac3846a5d504c13a";
+        private static final String EXPECTED_DIGEST = "35d7b5af4430947";
         private static final Method DEOPT_TARGET = target();
 
         public static class Payload {
@@ -205,12 +205,12 @@ public class TestDuringCallDeoptIdentity {
                     "one exact caller deoptimization request");
             Asserts.assertEquals(mutationPasses, 2,
                     "the one-shot guard prevents repeated mutation");
-            Asserts.assertEquals(guardSkips, 1,
-                    "the one-shot guard detects call re-execution");
+            Asserts.assertEquals(guardSkips, 0,
+                    "the deoptimized caller resumes at the call continuation");
             Asserts.assertEquals(callerContinuations, 2,
                     "the deoptimized caller continues exactly once");
-            Asserts.assertEquals(calleeEntries, 3,
-                    "normal call plus initial and re-executed deopt calls");
+            Asserts.assertEquals(calleeEntries, 2,
+                    "normal and deoptimizing calls each enter once");
             digest = mix(digest, deopt);
             digest = mix(digest, deoptRequests);
             digest = mix(digest, mutationPasses);

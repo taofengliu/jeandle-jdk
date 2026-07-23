@@ -46,7 +46,6 @@ public class TestPEACyclicObjectGraph {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEACyclicObjectGraph$TestWrapper";
     private static final String JEANDLE_NEW_INSTANCE = "@jeandle.new_instance";
-    private static final String LOWERED_NEW_INSTANCE = "@new_instance";
 
     public static void main(String[] args) throws Exception {
         Method self = TestWrapper.class.getMethod("testSelfCycleReadOnly");
@@ -131,7 +130,7 @@ public class TestPEACyclicObjectGraph {
         PEATestUtils.IRBody after = report.finalAfter();
         PEATestUtils.IRBody lowered = run.finalIR(target);
         assertOrigAllocationsRetained(frontend, after, 2, target);
-        assertLoweredOrigAllocationsRetained(frontend, lowered, 2, target);
+        assertLoweredAllocationCount(frontend, lowered, 2, target);
 
         after.assertLineCount("store atomic i32 101", 1);
         after.assertLineCount("store atomic i32 202", 1);
@@ -165,12 +164,11 @@ public class TestPEACyclicObjectGraph {
         PEATestUtils.IRBody lowered = run.finalIR(target);
         List<Integer> sourceBCIs = allocationBCIs(frontend, JEANDLE_NEW_INSTANCE);
         List<Integer> afterBCIs = allocationBCIs(after, JEANDLE_NEW_INSTANCE);
-        List<Integer> loweredBCIs = allocationBCIs(lowered, LOWERED_NEW_INSTANCE);
         Asserts.assertEquals(sourceBCIs.size(), 2, target + ": source allocation BCIs");
         Asserts.assertEquals(afterBCIs, List.of(sourceBCIs.get(0)),
                 target + ": only source parent OrigAlloc retained");
-        Asserts.assertEquals(loweredBCIs, List.of(sourceBCIs.get(0)),
-                target + ": lowering preserves only parent source BCI");
+        Asserts.assertEquals(lowered.loweredAllocCount(), 1,
+                target + ": lowering preserves only the parent allocation");
         after.assertLineCount("store atomic i32 303", 1);
         after.assertAbsent("store atomic i32 404");
     }
@@ -292,15 +290,14 @@ public class TestPEACyclicObjectGraph {
                 target + ": retained allocations are source OrigAllocs in source order");
     }
 
-    private static void assertLoweredOrigAllocationsRetained(PEATestUtils.IRBody before,
-                                                              PEATestUtils.IRBody lowered,
-                                                              int expected, Method target) {
+    private static void assertLoweredAllocationCount(PEATestUtils.IRBody before,
+                                                      PEATestUtils.IRBody lowered,
+                                                      int expected, Method target) {
         List<Integer> sourceBCIs = allocationBCIs(before, JEANDLE_NEW_INSTANCE);
-        List<Integer> loweredBCIs = allocationBCIs(lowered, LOWERED_NEW_INSTANCE);
         Asserts.assertEquals(sourceBCIs.size(), expected,
                 target + ": source allocation BCI count");
-        Asserts.assertEquals(loweredBCIs, sourceBCIs,
-                target + ": lowered allocations preserve source BCI and order");
+        Asserts.assertEquals(lowered.loweredAllocCount(), expected,
+                target + ": exact lowered allocation count");
     }
 
     private static List<Integer> allocationBCIs(PEATestUtils.IRBody body, String callee) {

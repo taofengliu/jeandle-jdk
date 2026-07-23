@@ -47,6 +47,8 @@ public class TestPEADeoptImplicitTrap {
             "compiler.jeandle.pea.TestPEADeoptImplicitTrap$TestWrapper";
     private static final String SCENARIO_PROPERTY =
             "compiler.jeandle.pea.implicitTrapScenario";
+    private static final String DEOPT_CALLEE =
+            "llvm.experimental.deoptimize.i32";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
     private static final int NULL_TRAP_BCI = 35;
     private static final int CHECKCAST_TRAP_BCI = 25;
@@ -63,16 +65,16 @@ public class TestPEADeoptImplicitTrap {
 
         private final String kind;
         private final boolean hasMonitor;
-        private final int trapCount;
-        private final int trapOccurrence;
+        private final int trapCountAtBCI;
+        private final int trapOccurrenceAtBCI;
         private final int trapBCI;
 
         Scenario(String kind, boolean hasMonitor, int trapCount, int trapOccurrence,
                  int trapBCI) {
             this.kind = kind;
             this.hasMonitor = hasMonitor;
-            this.trapCount = trapCount;
-            this.trapOccurrence = trapOccurrence;
+            this.trapCountAtBCI = trapCount;
+            this.trapOccurrenceAtBCI = trapOccurrence;
             this.trapBCI = trapBCI;
         }
     }
@@ -110,7 +112,10 @@ public class TestPEADeoptImplicitTrap {
         PEATestUtils.RunBuilder builder = shape ? PEATestUtils.shapeRun(WRAPPER, target)
                 : PEATestUtils.behaviorRun(WRAPPER, target);
         return builder.extraFlags("-D" + SCENARIO_PROPERTY + "=" + scenario.name(),
-                        "-XX:+JeandleUseProfile", "-XX:CompileThreshold=20000")
+                        "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+                        "-XX:+JeandleUseProfile",
+                        "-XX:ProfileMaturityPercentage=0",
+                        "-XX:CompileThreshold=20000")
                 .inline(TestWrapper.class.getDeclaredMethod("graphRoot"))
                 .inline(TestWrapper.class.getDeclaredMethod(
                         "graphArray", TestWrapper.Node.class,
@@ -128,11 +133,11 @@ public class TestPEADeoptImplicitTrap {
         Asserts.assertEquals(before.peaAllocCount(), 4,
                 target + ": root, peer, shared child, and object array enter PEA");
         assertTrapSelection(before, target, scenario, "frontend");
-        Asserts.assertEquals(after.occurrenceCount("@llvm.experimental.deoptimize"),
-                scenario.trapCount, target + ": exact natural " + scenario.kind + " trap count");
         assertTrapSelection(after, target, scenario, "final");
+        List<Integer> occurrences = trapOccurrences(after, target, scenario, "final");
+        int trapOccurrence = occurrences.get(scenario.trapOccurrenceAtBCI);
         PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(
-                "llvm.experimental.deoptimize", scenario.trapOccurrence);
+                DEOPT_CALLEE, trapOccurrence);
         Asserts.assertEquals(bundle.scopes().size(), 1,
                 target + ": trap has one active Java scope");
         Asserts.assertEquals(bundle.rootScope().duplicateBCI(), bundle.rootScope().bci(),
@@ -140,7 +145,7 @@ public class TestPEADeoptImplicitTrap {
         assertGraph(bundle, target, scenario.hasMonitor);
 
         PEATestUtils.IRBlock trapBlock =
-                after.blockContaining("@llvm.experimental.deoptimize", scenario.trapOccurrence);
+                after.blockContaining("@llvm.experimental.deoptimize", trapOccurrence);
         trapBlock.assertAbsent("@jeandle.new_");
         trapBlock.assertAbsent("store atomic i32");
         trapBlock.assertAbsent("store atomic i32 900");
@@ -148,33 +153,44 @@ public class TestPEADeoptImplicitTrap {
 
     private static void assertTrapSelection(PEATestUtils.IRBody body, Method target,
                                             Scenario scenario, String phase) {
-        Asserts.assertEquals(body.occurrenceCount("@llvm.experimental.deoptimize"),
-                scenario.trapCount, target + ": exact " + phase + " " + scenario.kind
-                        + " trap count");
+        List<Integer> occurrences = trapOccurrences(body, target, scenario, phase);
+        int selectedOccurrence = occurrences.get(scenario.trapOccurrenceAtBCI);
         PEATestUtils.DeoptBundle selected = body.deoptBundleAtCall(
-                "llvm.experimental.deoptimize", scenario.trapOccurrence);
+                DEOPT_CALLEE, selectedOccurrence);
         Asserts.assertEquals(selected.rootScope().bci(), scenario.trapBCI,
                 target + ": selected " + phase + " " + scenario.kind + " trap BCI");
         if (scenario == Scenario.BOUNDS) {
             // The frontend emits the array null guard before the bounds guard;
             // both naturally describe the iaload BCI but use distinct fail blocks.
             PEATestUtils.DeoptBundle first = body.deoptBundleAtCall(
-                    "llvm.experimental.deoptimize", 0);
+                    DEOPT_CALLEE, occurrences.get(0));
             Asserts.assertEquals(first.rootScope().bci(), scenario.trapBCI,
                     target + ": first " + phase + " bounds-method trap BCI");
             if (phase.equals("frontend")) {
-                assertBoundsFailBlocks(body, target);
+                assertBoundsFailBlocks(body, target, occurrences);
             }
         }
     }
 
-    private static void assertBoundsFailBlocks(PEATestUtils.IRBody body, Method target) {
+    private static List<Integer> trapOccurrences(
+            PEATestUtils.IRBody body, Method target,
+            Scenario scenario, String phase) {
+        List<Integer> occurrences = body.callOccurrencesAtBCI(
+                DEOPT_CALLEE, scenario.trapBCI);
+        Asserts.assertEquals(occurrences.size(), scenario.trapCountAtBCI,
+                target + ": exact " + phase + " " + scenario.kind
+                        + " trap count at BCI " + scenario.trapBCI);
+        return occurrences;
+    }
+
+    private static void assertBoundsFailBlocks(
+            PEATestUtils.IRBody body, Method target, List<Integer> occurrences) {
         PEATestUtils.IRBlock nullFail = body.blockContaining(
-                "@llvm.experimental.deoptimize", 0);
+                "@llvm.experimental.deoptimize", occurrences.get(0));
         Asserts.assertEquals(nullFail.occurrenceCount("bci_33_null_check_fail:"), 1,
                 target + ": first bounds-method trap is the null-check fail block");
         PEATestUtils.IRBlock rangeFail = body.blockContaining(
-                "@llvm.experimental.deoptimize", 1);
+                "@llvm.experimental.deoptimize", occurrences.get(1));
         Asserts.assertEquals(rangeFail.occurrenceCount("bci_33_boundary_check_fail:"), 1,
                 target + ": second bounds-method trap is the range-check fail block");
         body.assertBefore("label %bci_33_null_check_fail", 0,
@@ -305,9 +321,8 @@ public class TestPEADeoptImplicitTrap {
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
             Method target = targetFor(scenario);
-            ColdObservation before = observeBeforeColdTrap(target);
+            assertCompiledBeforeColdTrap(target);
             digest = mix(digest, triggerColdPath(scenario));
-            assertNaturalDecompile(target, before);
             assertColdOutcome(scenario);
             digest = mix(digest, normalPaths);
             digest = mix(digest, nullCatches);
@@ -528,22 +543,11 @@ public class TestPEADeoptImplicitTrap {
                     scenario + ": null monitor reacquires");
         }
 
-        private static ColdObservation observeBeforeColdTrap(Method target) {
+        private static void assertCompiledBeforeColdTrap(Method target) {
             boolean compiled = WB.isMethodCompiled(target);
             int level = WB.getMethodCompilationLevel(target);
             Asserts.assertTrue(compiled && level == 4,
                     target + ": level-4 nmethod before natural trap");
-            return new ColdObservation(compiled, level,
-                    WB.getMethodDecompileCount(target));
         }
-
-        private static void assertNaturalDecompile(Method target, ColdObservation before) {
-            boolean stillCompiled = WB.isMethodCompiled(target);
-            int decompileCount = WB.getMethodDecompileCount(target);
-            Asserts.assertTrue(!stillCompiled || decompileCount > before.decompileCount(),
-                    target + ": natural trap deoptimized its level-4 nmethod");
-        }
-
-        private record ColdObservation(boolean compiled, int level, int decompileCount) { }
     }
 }

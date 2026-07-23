@@ -59,25 +59,27 @@ public class TestPEADeoptReconstructInstance {
         Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
         Method sink = TestWrapper.class.getDeclaredMethod(
                 "sink", TestWrapper.Value.class);
-        Method hasInitialState = TestWrapper.class.getDeclaredMethod(
-                "hasInitialState", TestWrapper.Value.class,
+        Method initialStateFailure = TestWrapper.class.getDeclaredMethod(
+                "initialStateFailure", TestWrapper.Value.class,
                 TestWrapper.Value.class, TestWrapper.Holder.class,
                 Object.class, float.class, double.class);
         Method hasInitialFields = TestWrapper.class.getDeclaredMethod(
                 "hasInitialFields", TestWrapper.Value.class,
                 Object.class, float.class, double.class);
-        Method hasDefaultFields = TestWrapper.class.getDeclaredMethod(
-                "hasDefaultFields", TestWrapper.Value.class);
+        Method defaultFieldsFailure = TestWrapper.class.getDeclaredMethod(
+                "defaultFieldsFailure", TestWrapper.Value.class);
         Method mutateAndReread = TestWrapper.class.getDeclaredMethod(
                 "mutateAndReread", TestWrapper.Value.class,
                 TestWrapper.Value.class, TestWrapper.Holder.class);
         Method reconstructedResult = TestWrapper.class.getDeclaredMethod(
                 "reconstructedResult", TestWrapper.Value.class,
                 TestWrapper.Value.class);
+        Method mix = TestWrapper.class.getDeclaredMethod(
+                "mix", long.class, long.class);
         Method[] targets = {never, partialFalse, partialTrue};
         Method[] inlineHelpers = {
-                hasInitialState, hasInitialFields, hasDefaultFields,
-                mutateAndReread, reconstructedResult};
+                initialStateFailure, hasInitialFields, defaultFieldsFailure,
+                mutateAndReread, reconstructedResult, mix};
 
         runBuilder(false, targets, requestDeopt, sink, inlineHelpers)
                 .runPEAOnOffEquivalent();
@@ -119,16 +121,16 @@ public class TestPEADeoptReconstructInstance {
 
         PEATestUtils.PEARound firstRound = report.round(0);
         if (partial) {
-            Asserts.assertEquals(firstRound.neverEscapes(), 1,
-                    target + ": equal-state peer remains NeverEscapes");
-            Asserts.assertEquals(firstRound.partiallyEscapes(), 2,
-                    target + ": escaped value and referenced holder are partial");
-            Asserts.assertEquals(after.allocationBCIs(),
-                    List.of(sourceBCIs.get(0), sourceBCIs.get(2)),
-                    target + ": partial graph reuses its two OrigAllocs");
-            Asserts.assertEquals(after.peaAllocCount(), 2,
+            Asserts.assertEquals(firstRound.neverEscapes(), 0,
+                    target + ": no member of the published graph remains NeverEscapes");
+            Asserts.assertEquals(firstRound.partiallyEscapes(), 3,
+                    target + ": reference mutation publishes the complete graph");
+            Asserts.assertEquals(new HashSet<>(after.allocationBCIs()),
+                    new HashSet<>(sourceBCIs),
+                    target + ": partial graph reuses all three OrigAllocs");
+            Asserts.assertEquals(after.peaAllocCount(), 3,
                     target + ": exact retained PEA allocation count");
-            Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 2,
+            Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 3,
                     target + ": exact retained lowered OrigAlloc count");
         } else {
             Asserts.assertEquals(firstRound.neverEscapes(), 3,
@@ -191,8 +193,7 @@ public class TestPEADeoptReconstructInstance {
         Asserts.assertEquals(value.fields().keySet(), expectedOffsets,
                 "exact touched-field descriptor topology for VO " + id);
 
-        assertScalar(value, TestWrapper.Base.class, "z",
-                PEATestUtils.DeoptBasicType.INT, "i1 true");
+        assertBooleanScalar(value, TestWrapper.Base.class, "z", true);
         assertScalar(value, TestWrapper.Base.class, "b",
                 PEATestUtils.DeoptBasicType.INT, "i8 -37");
         assertScalar(value, TestWrapper.Base.class, "s",
@@ -277,6 +278,29 @@ public class TestPEADeoptReconstructInstance {
         Asserts.assertEquals(entry.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR, field + " scalar kind");
         Asserts.assertEquals(entry.value().operand(), operand, field + " operand");
+    }
+
+    private static void assertBooleanScalar(
+            PEATestUtils.VirtualObjectDescriptor descriptor,
+            Class<?> holder, String field, boolean expected) throws Exception {
+        PEATestUtils.VirtualObjectEntry entry =
+                descriptor.fields().get(offset(holder, field));
+        Asserts.assertNotNull(entry, "missing boolean field " + field);
+        Asserts.assertEquals(entry.basicType(), PEATestUtils.DeoptBasicType.INT,
+                field + " basic type");
+        Asserts.assertEquals(entry.value().kind(),
+                PEATestUtils.DeoptValueKind.SCALAR, field + " scalar kind");
+        Asserts.assertEquals(booleanValue(entry.value().operand()), expected,
+                field + " logical value");
+    }
+
+    private static boolean booleanValue(String operand) {
+        return switch (operand) {
+            case "i1 true", "i1 1", "i8 1" -> true;
+            case "i1 false", "i1 0", "i8 0" -> false;
+            default -> throw new AssertionError(
+                    "invalid normalized boolean operand: " + operand);
+        };
     }
 
     private static void assertScalarPrefix(
@@ -380,6 +404,7 @@ public class TestPEADeoptReconstructInstance {
             global = null;
             deoptTarget = NEVER_TARGET;
             long never = testNever(external, f, d);
+            requireSuccess("never", never);
             if (global != null) {
                 throw new AssertionError("never target escaped");
             }
@@ -387,18 +412,25 @@ public class TestPEADeoptReconstructInstance {
             global = null;
             deoptTarget = PARTIAL_FALSE_TARGET;
             long partialFalse = testPartialFalse(false, external, f, d);
+            requireSuccess("partial-false", partialFalse);
             if (global != null) {
                 throw new AssertionError("false partial branch escaped");
+            }
+            if (never != partialFalse) {
+                throw new AssertionError("equivalent reconstructed state differs");
             }
 
             global = null;
             deoptTarget = PARTIAL_TRUE_TARGET;
             long partialTrue = testPartialTrue(true, external, f, d);
-            if (global == null || partialTrue != (partialFalse ^ ESCAPE_MARK)) {
-                throw new AssertionError("true partial branch was not observed");
+            requireSuccess("partial-true", partialTrue);
+            if (global == null) {
+                throw new AssertionError("true partial branch did not publish its value");
             }
-            if (never != partialFalse) {
-                throw new AssertionError("equivalent reconstructed state differs");
+            if (partialTrue != (partialFalse ^ ESCAPE_MARK)) {
+                throw new AssertionError("true partial result mismatch: false="
+                        + Long.toUnsignedString(partialFalse, 16) + ", true="
+                        + Long.toUnsignedString(partialTrue, 16));
             }
 
             long payload = mix(mix(never, partialFalse), partialTrue);
@@ -439,11 +471,13 @@ public class TestPEADeoptReconstructInstance {
 
             requestDeopt();
 
-            if (!hasInitialState(first, second, holder, external, f, d)) {
-                return Long.MIN_VALUE + 1;
+            int initialFailure =
+                    initialStateFailure(first, second, holder, external, f, d);
+            if (initialFailure != 0) {
+                return Long.MIN_VALUE + initialFailure;
             }
             if (!mutateAndReread(first, second, holder)) {
-                return Long.MIN_VALUE + 2;
+                return Long.MIN_VALUE + 50;
             }
             return reconstructedResult(first, second);
         }
@@ -486,14 +520,16 @@ public class TestPEADeoptReconstructInstance {
                 sink(first);
             }
 
-            if (!hasInitialState(first, second, holder, external, f, d)) {
-                return Long.MIN_VALUE + 3;
+            int initialFailure =
+                    initialStateFailure(first, second, holder, external, f, d);
+            if (initialFailure != 0) {
+                return Long.MIN_VALUE + initialFailure;
             }
             if (escape != (global == first)) {
-                return Long.MIN_VALUE + 4;
+                return Long.MIN_VALUE + 40;
             }
             if (!mutateAndReread(first, second, holder)) {
-                return Long.MIN_VALUE + 5;
+                return Long.MIN_VALUE + 50;
             }
             return reconstructedResult(first, second)
                     ^ (global == first ? ESCAPE_MARK : 0L);
@@ -537,20 +573,22 @@ public class TestPEADeoptReconstructInstance {
                 sink(first);
             }
 
-            if (!hasInitialState(first, second, holder, external, f, d)) {
-                return Long.MIN_VALUE + 6;
+            int initialFailure =
+                    initialStateFailure(first, second, holder, external, f, d);
+            if (initialFailure != 0) {
+                return Long.MIN_VALUE + initialFailure;
             }
             if (escape != (global == first)) {
-                return Long.MIN_VALUE + 7;
+                return Long.MIN_VALUE + 40;
             }
             if (!mutateAndReread(first, second, holder)) {
-                return Long.MIN_VALUE + 8;
+                return Long.MIN_VALUE + 50;
             }
             return reconstructedResult(first, second)
                     ^ (global == first ? ESCAPE_MARK : 0L);
         }
 
-        private static boolean hasInitialState(
+        private static int initialStateFailure(
                 Value first, Value second, Holder holder,
                 Object external, float f, double d) {
             if (first == second
@@ -559,13 +597,23 @@ public class TestPEADeoptReconstructInstance {
                     || first.holder != holder || second.holder != holder
                     || first.holder != second.holder || holder.marker != 73
                     || first.ref != external || second.ref != external) {
-                return false;
+                return 1;
             }
-            if (!hasInitialFields(first, external, f, d)
-                    || !hasInitialFields(second, external, f, d)) {
-                return false;
+            if (!hasInitialFields(first, external, f, d)) {
+                return 2;
             }
-            return hasDefaultFields(first) && hasDefaultFields(second);
+            if (!hasInitialFields(second, external, f, d)) {
+                return 3;
+            }
+            int defaultFailure = defaultFieldsFailure(first);
+            if (defaultFailure != 0) {
+                return defaultFailure;
+            }
+            defaultFailure = defaultFieldsFailure(second);
+            if (defaultFailure != 0) {
+                return defaultFailure + 20;
+            }
+            return 0;
         }
 
         private static boolean hasInitialFields(
@@ -583,17 +631,38 @@ public class TestPEADeoptReconstructInstance {
                     && value.ref == external;
         }
 
-        private static boolean hasDefaultFields(Value value) {
-            return !value.defaultZ
-                    && value.defaultB == 0
-                    && value.defaultS == 0
-                    && value.defaultC == 0
-                    && value.defaultI == 0
-                    && value.defaultL == 0L
-                    && Float.floatToRawIntBits(value.defaultF) == 0
-                    && Double.doubleToRawLongBits(value.defaultD) == 0L
-                    && value.defaultRef == null
-                    && value.mutation == 0;
+        private static int defaultFieldsFailure(Value value) {
+            if (value.defaultZ) {
+                return 4;
+            }
+            if (value.defaultB != 0) {
+                return 5;
+            }
+            if (value.defaultS != 0) {
+                return 6;
+            }
+            if (value.defaultC != 0) {
+                return 7;
+            }
+            if (value.defaultI != 0) {
+                return 8;
+            }
+            if (value.defaultL != 0L) {
+                return 9;
+            }
+            if (Float.floatToRawIntBits(value.defaultF) != 0) {
+                return 10;
+            }
+            if (Double.doubleToRawLongBits(value.defaultD) != 0L) {
+                return 11;
+            }
+            if (value.defaultRef != null) {
+                return 12;
+            }
+            if (value.mutation != 0) {
+                return 13;
+            }
+            return 0;
         }
 
         private static boolean mutateAndReread(
@@ -669,6 +738,13 @@ public class TestPEADeoptReconstructInstance {
 
         private static void sink(Value value) {
             global = value;
+        }
+
+        private static void requireSuccess(String scenario, long result) {
+            if (result >= Long.MIN_VALUE + 1 && result <= Long.MIN_VALUE + 50) {
+                throw new AssertionError(
+                        scenario + " reconstruction failed with sentinel " + result);
+            }
         }
 
         private static Method target(String name, Class<?>... parameterTypes) {

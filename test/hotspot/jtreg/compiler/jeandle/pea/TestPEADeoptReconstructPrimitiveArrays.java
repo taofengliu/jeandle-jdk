@@ -66,9 +66,9 @@ public class TestPEADeoptReconstructPrimitiveArrays {
             assertArrayShape(run, bool, requestDeopt,
                     Unsafe.ARRAY_BOOLEAN_BASE_OFFSET,
                     Unsafe.ARRAY_BOOLEAN_INDEX_SCALE,
-                    PEATestUtils.DeoptBasicType.INT, "i1 ",
-                    List.of("i1 false", "i1 true", "i1 false", "i1 false",
-                            "i1 true", "i1 false"));
+                    PEATestUtils.DeoptBasicType.INT, null,
+                    List.of("boolean false", "boolean true", "boolean false",
+                            "boolean false", "boolean true", "boolean false"));
             assertArrayShape(run, bytes, requestDeopt,
                     Unsafe.ARRAY_BYTE_BASE_OFFSET,
                     Unsafe.ARRAY_BYTE_INDEX_SCALE,
@@ -185,12 +185,29 @@ public class TestPEADeoptReconstructPrimitiveArrays {
         Asserts.assertEquals(element.value().kind(),
                 PEATestUtils.DeoptValueKind.SCALAR,
                 target + ": scalar element at byte offset " + offset);
-        Asserts.assertTrue(element.value().operand().startsWith(operandPrefix),
-                target + ": typed element operand at byte offset " + offset);
         if (exactOperand != null) {
-            Asserts.assertEquals(element.value().operand(), exactOperand,
-                    target + ": exact element operand at byte offset " + offset);
+            if (exactOperand.startsWith("boolean ")) {
+                boolean expected = Boolean.parseBoolean(
+                        exactOperand.substring("boolean ".length()));
+                Asserts.assertEquals(booleanValue(element.value().operand()), expected,
+                        target + ": logical boolean value at byte offset " + offset);
+            } else {
+                Asserts.assertEquals(element.value().operand(), exactOperand,
+                        target + ": exact element operand at byte offset " + offset);
+            }
+        } else {
+            Asserts.assertTrue(element.value().operand().startsWith(operandPrefix),
+                    target + ": typed element operand at byte offset " + offset);
         }
+    }
+
+    private static boolean booleanValue(String operand) {
+        return switch (operand) {
+            case "i1 true", "i1 1", "i8 1" -> true;
+            case "i1 false", "i1 0", "i8 0" -> false;
+            default -> throw new AssertionError(
+                    "invalid normalized boolean operand: " + operand);
+        };
     }
 
     public static class TestWrapper {
@@ -215,6 +232,8 @@ public class TestPEADeoptReconstructPrimitiveArrays {
         private static Method deoptTarget;
 
         public static void main(String[] args) throws Exception {
+            Float.intBitsToFloat(0);
+            Double.longBitsToDouble(0);
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
             long payload = 0x6A09E667F3BCC909L;

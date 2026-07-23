@@ -58,21 +58,19 @@ public class TestPEADeoptReconstructObjectArrays {
         Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
         Method sink = TestWrapper.class.getDeclaredMethod(
                 "sink", Object[].class);
-        Method hasInitialTopology = TestWrapper.class.getDeclaredMethod(
-                "hasInitialTopology", Object[].class, TestWrapper.Child.class,
+        Method observeInitialTopology = TestWrapper.class.getDeclaredMethod(
+                "observeInitialTopology", Object[].class, TestWrapper.Child.class,
                 TestWrapper.Cycle.class, Object.class,
                 TestWrapper.Materialized.class);
-        Method mutateAndReread = TestWrapper.class.getDeclaredMethod(
-                "mutateAndReread", Object[].class, TestWrapper.Child.class,
+        Method mutateAndObserve = TestWrapper.class.getDeclaredMethod(
+                "mutateAndObserve", Object[].class, TestWrapper.Child.class,
                 TestWrapper.Cycle.class, Object.class,
                 TestWrapper.Materialized.class);
-        Method reconstructedResult = TestWrapper.class.getDeclaredMethod(
-                "reconstructedResult", Object[].class, TestWrapper.Child.class,
-                TestWrapper.Cycle.class, Object.class,
-                TestWrapper.Materialized.class);
+        Method mix = TestWrapper.class.getDeclaredMethod(
+                "mix", long.class, long.class);
         Method[] targets = {never, partialFalse, partialTrue};
         Method[] inlineHelpers = {
-                hasInitialTopology, mutateAndReread, reconstructedResult};
+                observeInitialTopology, mutateAndObserve, mix};
 
         runBuilder(false, targets, requestDeopt, sink, inlineHelpers)
                 .runPEAOnOffEquivalent();
@@ -298,14 +296,15 @@ public class TestPEADeoptReconstructObjectArrays {
             global = null;
             deoptTarget = NEVER_TARGET;
             long never = testNever(external, sibling);
-            if (global != null) {
+            long expected = expectedResult();
+            if (global != null || never != expected) {
                 throw new AssertionError("never target escaped");
             }
 
             global = null;
             deoptTarget = PARTIAL_FALSE_TARGET;
             long partialFalse = testPartialFalse(false, external, sibling);
-            if (global != null) {
+            if (global != null || partialFalse != expected) {
                 throw new AssertionError("false partial branch escaped");
             }
 
@@ -339,15 +338,11 @@ public class TestPEADeoptReconstructObjectArrays {
 
             requestDeopt();
 
-            if (!hasInitialTopology(
-                    array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 1;
-            }
-            if (!mutateAndReread(array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 2;
-            }
-            return reconstructedResult(
+            long initial =
+                    observeInitialTopology(array, child, cycle, external, sibling);
+            long mutated = mutateAndObserve(
                     array, child, cycle, external, sibling);
+            return mix(initial, mutated);
         }
 
         public static long testPartialFalse(
@@ -370,19 +365,11 @@ public class TestPEADeoptReconstructObjectArrays {
                 sink(array);
             }
 
-            if (!hasInitialTopology(
-                    array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 3;
-            }
-            if (escape != (global == array)) {
-                return Long.MIN_VALUE + 4;
-            }
-            if (!mutateAndReread(array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 5;
-            }
-            return reconstructedResult(
-                    array, child, cycle, external, sibling)
-                    ^ (global == array ? ESCAPE_MARK : 0L);
+            long initial =
+                    observeInitialTopology(array, child, cycle, external, sibling);
+            long mutated = mutateAndObserve(
+                    array, child, cycle, external, sibling);
+            return mix(initial, mutated) ^ (escape ? ESCAPE_MARK : 0L);
         }
 
         public static long testPartialTrue(
@@ -405,40 +392,32 @@ public class TestPEADeoptReconstructObjectArrays {
                 sink(array);
             }
 
-            if (!hasInitialTopology(
-                    array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 6;
-            }
-            if (escape != (global == array)) {
-                return Long.MIN_VALUE + 7;
-            }
-            if (!mutateAndReread(array, child, cycle, external, sibling)) {
-                return Long.MIN_VALUE + 8;
-            }
-            return reconstructedResult(
-                    array, child, cycle, external, sibling)
-                    ^ (global == array ? ESCAPE_MARK : 0L);
+            long initial =
+                    observeInitialTopology(array, child, cycle, external, sibling);
+            long mutated = mutateAndObserve(
+                    array, child, cycle, external, sibling);
+            return mix(initial, mutated) ^ (escape ? ESCAPE_MARK : 0L);
         }
 
-        private static boolean hasInitialTopology(
+        private static long observeInitialTopology(
                 Object[] array, Child child, Cycle cycle,
                 Object external, Materialized sibling) {
-            return array.length == 6
-                    && array[0] == null
-                    && array[1] == external
-                    && array[2] == child
-                    && array[3] == sibling
-                    && array[4] == child
-                    && array[2] == array[4]
-                    && array[5] == cycle
-                    && child.value == 17
-                    && cycle.array == array
-                    && cycle.marker == 41
-                    && sibling.marker == 59
-                    && external != sibling;
+            long result = array.length;
+            result = mix(result, child.value);
+            result = mix(result, cycle.marker);
+            result = mix(result, sibling.marker);
+            result = mix(result, array[0] == null ? 1 : 0);
+            result = mix(result, array[1] == external ? 2 : 0);
+            result = mix(result, array[2] == child ? 4 : 0);
+            result = mix(result, array[3] == sibling ? 8 : 0);
+            result = mix(result, array[4] == child ? 16 : 0);
+            result = mix(result, array[2] == array[4] ? 32 : 0);
+            result = mix(result, array[5] == cycle ? 64 : 0);
+            result = mix(result, cycle.array == array ? 128 : 0);
+            return mix(result, external != sibling ? 256 : 0);
         }
 
-        private static boolean mutateAndReread(
+        private static long mutateAndObserve(
                 Object[] array, Child child, Cycle cycle,
                 Object external, Materialized sibling) {
             array[0] = sibling;
@@ -450,31 +429,36 @@ public class TestPEADeoptReconstructObjectArrays {
             child.value = 83;
             cycle.marker = 97;
             cycle.array = null;
-            if (array[0] != sibling || array[1] != child
-                    || array[2] != cycle || array[3] != external
-                    || array[4] != array || array[5] != child
-                    || child.value != 83 || cycle.marker != 97
-                    || cycle.array != null || sibling.marker != 59) {
-                return false;
-            }
-            cycle.array = array;
-            return cycle.array == array && array[4] == cycle.array;
-        }
-
-        private static long reconstructedResult(
-                Object[] array, Child child, Cycle cycle,
-                Object external, Materialized sibling) {
             long result = child.value;
             result = mix(result, cycle.marker);
-            result = mix(result, array.length);
+            result = mix(result, sibling.marker);
             result = mix(result, array[0] == sibling ? 1 : 0);
             result = mix(result, array[1] == child ? 2 : 0);
             result = mix(result, array[2] == cycle ? 4 : 0);
             result = mix(result, array[3] == external ? 8 : 0);
             result = mix(result, array[4] == array ? 16 : 0);
             result = mix(result, array[5] == child ? 32 : 0);
-            result = mix(result, cycle.array == array ? 64 : 0);
-            return result;
+            result = mix(result, cycle.array == null ? 64 : 0);
+            cycle.array = array;
+            result = mix(result, cycle.array == array ? 128 : 0);
+            return mix(result, array[4] == cycle.array ? 256 : 0);
+        }
+
+        private static long expectedResult() {
+            long initial = 6;
+            initial = mix(initial, 17);
+            initial = mix(initial, 41);
+            initial = mix(initial, 59);
+            for (long value : new long[] {1, 2, 4, 8, 16, 32, 64, 128, 256}) {
+                initial = mix(initial, value);
+            }
+            long mutated = 83;
+            mutated = mix(mutated, 97);
+            mutated = mix(mutated, 59);
+            for (long value : new long[] {1, 2, 4, 8, 16, 32, 64, 128, 256}) {
+                mutated = mix(mutated, value);
+            }
+            return mix(initial, mutated);
         }
 
         private static void requestDeopt() {
