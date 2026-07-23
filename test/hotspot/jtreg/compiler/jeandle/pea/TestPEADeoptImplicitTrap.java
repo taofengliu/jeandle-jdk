@@ -19,7 +19,7 @@
 
 /*
  * @test
- * @summary PEA reconstructs virtual graphs at natural implicit exception traps
+ * @summary PEA reconstructs virtual graphs at natural implicit exception and uncommon traps
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
@@ -47,6 +47,8 @@ public class TestPEADeoptImplicitTrap {
             "compiler.jeandle.pea.TestPEADeoptImplicitTrap$TestWrapper";
     private static final Unsafe UNSAFE = Unsafe.getUnsafe();
     private static final int BOUNDS_TRAP_BCI = 33;
+    private static final int DIVIDE_TRAP_BCI = 38;
+    private static final int UNCOMMON_TRAP_BCI = 30;
 
     public static void main(String[] args) throws Exception {
         Method nullTrap = TestWrapper.class.getMethod(
@@ -55,7 +57,9 @@ public class TestPEADeoptImplicitTrap {
                 "checkcastTrap", Object.class, int.class);
         Method boundsTrap = TestWrapper.class.getMethod(
                 "boundsTrap", int[].class, int.class, int.class);
-        Method[] targets = {nullTrap, checkcastTrap, boundsTrap};
+        Method divideTrap = TestWrapper.class.getMethod("divideTrap", int.class, int.class);
+        Method uncommonTrap = TestWrapper.class.getMethod("uncommonTrap", int.class, int.class);
+        Method[] targets = {nullTrap, checkcastTrap, boundsTrap, divideTrap, uncommonTrap};
 
         builder(false, targets).runPEAOnOffEquivalent();
         try (PEATestUtils.RunResult run = builder(true, targets).run()) {
@@ -63,6 +67,10 @@ public class TestPEADeoptImplicitTrap {
             assertTrapShape(run, checkcastTrap, "checkcast", false, 1, 0, -1);
             assertTrapShape(run, boundsTrap, "bounds", false, 2, 1,
                     BOUNDS_TRAP_BCI);
+            assertTrapShape(run, divideTrap, "divide-zero", true, 1, 0,
+                    DIVIDE_TRAP_BCI);
+            assertTrapShape(run, uncommonTrap, "uncommon branch", true, 1, 0,
+                    UNCOMMON_TRAP_BCI);
         }
     }
 
@@ -70,7 +78,8 @@ public class TestPEADeoptImplicitTrap {
             throws ReflectiveOperationException {
         PEATestUtils.RunBuilder builder = shape ? PEATestUtils.shapeRun(WRAPPER, targets)
                 : PEATestUtils.behaviorRun(WRAPPER, targets);
-        return builder.inline(TestWrapper.class.getDeclaredMethod("graphRoot"))
+        return builder.extraFlags("-XX:+JeandleUseProfile", "-XX:CompileThreshold=20000")
+                .inline(TestWrapper.class.getDeclaredMethod("graphRoot"))
                 .inline(TestWrapper.class.getDeclaredMethod(
                         "graphArray", TestWrapper.Node.class,
                         TestWrapper.Node.class, TestWrapper.Node.class));
@@ -115,6 +124,10 @@ public class TestPEADeoptImplicitTrap {
         PEATestUtils.DeoptBundle selected = before.deoptBundleAtCall(
                 "llvm.experimental.deoptimize", trapOccurrence);
         if (expectedBCI >= 0) {
+            Asserts.assertEquals(selected.rootScope().bci(), expectedBCI,
+                    target + ": selected " + kind + " trap BCI");
+        }
+        if (expectedTrapCount > 1) {
             // The frontend emits the array null guard before the bounds guard;
             // both naturally describe the iaload BCI.
             PEATestUtils.DeoptBundle first = before.deoptBundleAtCall(
@@ -174,7 +187,7 @@ public class TestPEADeoptImplicitTrap {
 
         if (hasMonitor) {
             Asserts.assertEquals(bundle.rootScope().monitors().size(), 1,
-                    target + ": one active monitor at the null trap");
+                    target + ": one active monitor at the trap");
             PEATestUtils.DeoptMonitor monitor = bundle.rootScope().monitors().get(0);
             Asserts.assertTrue(monitor.eliminated(),
                     target + ": monitor is represented as eliminated virtual state");
@@ -216,10 +229,14 @@ public class TestPEADeoptImplicitTrap {
                 int.class);
         private static final Method BOUNDS_TARGET = target("boundsTrap", int[].class,
                 int.class, int.class);
+        private static final Method DIVIDE_TARGET = target("divideTrap", int.class, int.class);
+        private static final Method UNCOMMON_TARGET = target("uncommonTrap", int.class, int.class);
         private static int normalPaths;
         private static int nullCatches;
         private static int checkcastCatches;
         private static int boundsCatches;
+        private static int divideCatches;
+        private static int uncommonBranches;
         private static int monitorReacquires;
 
         public static class Node {
@@ -244,7 +261,7 @@ public class TestPEADeoptImplicitTrap {
             new Rejected();
             long digest = 0x6A09E667F3BCC909L;
             warmNormalPaths();
-            Asserts.assertEquals(normalPaths, WARMUP_ITERATIONS * 3,
+            Asserts.assertEquals(normalPaths, WARMUP_ITERATIONS * 5,
                     "repeated warm normal paths");
 
             PEATestUtils.compileConfiguredTargetsAtLevel4();
@@ -258,15 +275,25 @@ public class TestPEADeoptImplicitTrap {
             ColdObservation boundsBefore = observeBeforeColdTrap(BOUNDS_TARGET);
             digest = mix(digest, boundsTrap(new int[] {17, 29, 43}, 4, 6));
             assertNaturalDecompile(BOUNDS_TARGET, boundsBefore);
+            ColdObservation divideBefore = observeBeforeColdTrap(DIVIDE_TARGET);
+            digest = mix(digest, divideTrap(0, 7));
+            assertNaturalDecompile(DIVIDE_TARGET, divideBefore);
+            ColdObservation uncommonBefore = observeBeforeColdTrap(UNCOMMON_TARGET);
+            digest = mix(digest, uncommonTrap(-17, 8));
+            assertNaturalDecompile(UNCOMMON_TARGET, uncommonBefore);
             Asserts.assertEquals(nullCatches, 1, "one natural null catch");
             Asserts.assertEquals(checkcastCatches, 1, "one natural checkcast catch");
             Asserts.assertEquals(boundsCatches, 1, "one natural bounds catch");
+            Asserts.assertEquals(divideCatches, 1, "one natural divide-zero catch");
+            Asserts.assertEquals(uncommonBranches, 1, "one natural uncommon branch");
             Asserts.assertEquals(monitorReacquires, 1,
                     "null trap exits and reacquires its monitor once");
             digest = mix(digest, normalPaths);
             digest = mix(digest, nullCatches);
             digest = mix(digest, checkcastCatches);
             digest = mix(digest, boundsCatches);
+            digest = mix(digest, divideCatches);
+            digest = mix(digest, uncommonBranches);
             digest = mix(digest, monitorReacquires);
             System.out.println("PEA-RESULT:" + Long.toUnsignedString(digest, 16));
         }
@@ -330,6 +357,43 @@ public class TestPEADeoptImplicitTrap {
             } catch (ArrayIndexOutOfBoundsException expected) {
                 boundsCatches++;
                 mutateAfterTrap(root, peer, shared, array, seed);
+            }
+            return verifyAndDigest(root, peer, shared, array, seed);
+        }
+
+        public static int divideTrap(int divisor, int seed) {
+            Node root = graphRoot();
+            Node peer = root.left;
+            Node shared = root.shared;
+            Object[] array = graphArray(root, peer, shared);
+            try {
+                synchronized (root) {
+                    root.value += 900 / divisor;
+                    peer.value += array.length;
+                }
+                normalPaths++;
+            } catch (ArithmeticException expected) {
+                divideCatches++;
+                mutateAfterTrap(root, peer, shared, array, seed);
+            }
+            return verifyAndDigest(root, peer, shared, array, seed);
+        }
+
+        public static int uncommonTrap(int value, int seed) {
+            Node root = graphRoot();
+            Node peer = root.left;
+            Node shared = root.shared;
+            Object[] array = graphArray(root, peer, shared);
+            synchronized (root) {
+                if (value < 0) {
+                    root.value += -value;
+                    peer.value += array.length;
+                    uncommonBranches++;
+                } else {
+                    root.value += value;
+                    peer.value += array.length;
+                    normalPaths++;
+                }
             }
             return verifyAndDigest(root, peer, shared, array, seed);
         }
@@ -398,6 +462,8 @@ public class TestPEADeoptImplicitTrap {
                 nullTrap(external(7), 1);
                 checkcastTrap(new Accepted(), 2);
                 boundsTrap(new int[] {17, 29, 43}, 1, 3);
+                divideTrap(9, 4);
+                uncommonTrap(17, 5);
             }
         }
 
