@@ -33,7 +33,6 @@ package compiler.jeandle.pea;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.ref.WeakReference;
-import java.util.ArrayList;
 import java.util.List;
 
 import jdk.test.lib.Asserts;
@@ -41,66 +40,84 @@ import jdk.test.lib.Asserts;
 public class TestPEANonVirtualizableInstances {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEANonVirtualizableInstances$TestWrapper";
+    private static final String SHAPE_RUN_PROPERTY =
+            "compiler.jeandle.pea.nonVirtualizableShapeRun";
+    private static final String THROWING_CTOR =
+            "compiler_jeandle_pea_TestPEANonVirtualizableInstances$TestWrapper$ThrowingBox_<init>(I)V";
 
     public static void main(String[] args) throws Exception {
         Method volatileOnly = TestWrapper.class.getMethod("testVolatileOnly", int.class, int.class);
         Method finalizable = TestWrapper.class.getMethod("testFinalizable", int.class);
         Method thread = TestWrapper.class.getMethod("testThreadLifecycle", int.class);
+        Method weakCaller = TestWrapper.class.getMethod("testWeakReference", Object.class);
         Method weakFactory = TestWrapper.class.getMethod("makeWeakReference", Object.class);
         Method identity = TestWrapper.class.getMethod("testIdentitySensitive", int.class);
         Method unknown = TestWrapper.class.getMethod("testUnknownCall", int.class);
-        Method valueBased = TestWrapper.class.getMethod("testValueBasedMonitor", int.class);
+        Method valueBased = TestWrapper.class.getMethod("testValueBasedMonitor",
+                int.class, Object.class);
         Method throwing = TestWrapper.class.getMethod("testThrowingConstructor", int.class);
         Method unknownConsumer = TestWrapper.class.getMethod("unknownConsumer",
                 TestWrapper.PlainBox.class);
         Method threadRunner = TestWrapper.class.getMethod("startAndJoin",
                 TestWrapper.TinyThread.class);
+        Method identityHash = System.class.getMethod("identityHashCode", Object.class);
         Constructor<TestWrapper.FinalizableBox> finalizableCtor =
                 TestWrapper.FinalizableBox.class.getDeclaredConstructor();
         Constructor<TestWrapper.TinyThread> threadCtor =
                 TestWrapper.TinyThread.class.getDeclaredConstructor(int.class);
         Constructor<TestWrapper.ThrowingBox> throwingCtor =
                 TestWrapper.ThrowingBox.class.getDeclaredConstructor(int.class);
-        Method[] targets = {volatileOnly, finalizable, thread, weakFactory, identity,
-                unknown, valueBased, throwing};
+        Method[] targets = {volatileOnly, finalizable, thread, weakCaller, weakFactory,
+                identity, unknown, valueBased, throwing};
 
-        behaviorBuilder(targets, unknownConsumer, threadRunner, weakFactory,
+        behaviorBuilder(targets, unknownConsumer, threadRunner, weakFactory, identityHash,
                 finalizableCtor, threadCtor, throwingCtor)
                 .runPEAOnOffEquivalent();
         try (PEATestUtils.RunResult run =
-                shapeBuilder(targets, unknownConsumer, threadRunner, weakFactory,
+                shapeBuilder(targets, unknownConsumer, threadRunner, weakFactory, identityHash,
                         finalizableCtor, threadCtor, throwingCtor).run()) {
             assertVolatileVirtualized(run, volatileOnly);
-            assertEligibilityGates(run, finalizable, identity, unknown);
+            assertFinalizableRefused(run, finalizable);
             assertTinyThreadRetained(run, thread);
             assertWeakReferenceRetainedByDeoptimization(run, weakFactory);
+            assertWeakReferenceCallerFlow(run, weakCaller, weakFactory);
+            assertIdentityMaterialized(run, identity, identityHash);
+            assertUnknownCallMaterialized(run, unknown, unknownConsumer);
+            assertValueBasedRefused(run, valueBased);
+            assertThrowingConstructorRetained(run, throwing);
         }
     }
 
     private static PEATestUtils.RunBuilder shapeBuilder(Method[] targets, Method unknownConsumer,
                                                          Method threadRunner, Method weakFactory,
+                                                         Method identityHash,
                                                          Constructor<?> finalizableCtor,
                                                          Constructor<?> threadCtor,
                                                          Constructor<?> throwingCtor) {
         return configure(PEATestUtils.shapeRun(WRAPPER, targets), unknownConsumer,
-                threadRunner, weakFactory,
-                finalizableCtor, threadCtor, throwingCtor);
+                threadRunner, weakFactory, identityHash, finalizableCtor, threadCtor,
+                throwingCtor)
+                .lockingMode(2)
+                .extraFlags("-XX:DiagnoseSyncOnValueBasedClasses=1",
+                        "-D" + SHAPE_RUN_PROPERTY + "=true");
     }
 
     private static PEATestUtils.RunBuilder behaviorBuilder(Method[] targets,
                                                             Method unknownConsumer,
                                                             Method threadRunner, Method weakFactory,
+                                                            Method identityHash,
                                                             Constructor<?> finalizableCtor,
                                                             Constructor<?> threadCtor,
                                                             Constructor<?> throwingCtor) {
         return configure(PEATestUtils.behaviorRun(WRAPPER, targets), unknownConsumer,
-                threadRunner, weakFactory,
-                finalizableCtor, threadCtor, throwingCtor);
+                threadRunner, weakFactory, identityHash, finalizableCtor, threadCtor,
+                throwingCtor);
     }
 
     private static PEATestUtils.RunBuilder configure(PEATestUtils.RunBuilder builder,
                                                       Method unknownConsumer,
                                                       Method threadRunner, Method weakFactory,
+                                                      Method identityHash,
                                                       Constructor<?> finalizableCtor,
                                                       Constructor<?> threadCtor,
                                                       Constructor<?> throwingCtor) {
@@ -108,9 +125,11 @@ public class TestPEANonVirtualizableInstances {
                 .dontinline(unknownConsumer)
                 .dontinline(threadRunner)
                 .dontinline(weakFactory)
+                .dontinline(identityHash)
                 .compileOnly(finalizableCtor)
                 .compileOnly(threadCtor)
-                .compileOnly(throwingCtor);
+                .compileOnly(throwingCtor)
+                .dontinline(throwingCtor);
     }
 
     private static void assertVolatileVirtualized(PEATestUtils.RunResult run, Method target)
@@ -126,10 +145,10 @@ public class TestPEANonVirtualizableInstances {
                 PEATestUtils.AllocationKind.INSTANCE, target + ": volatile allocation kind");
         Asserts.assertEquals(first.effectCount("EliminateAllocation"), 1L,
                 target + ": allocation elimination");
-        Asserts.assertTrue(first.effectCount("EliminateStore") >= 2,
-                target + ": volatile writes are represented in virtual state");
-        Asserts.assertTrue(first.effectCount("ReplaceLoad") >= 2,
-                target + ": volatile read and allocation guard are replaced");
+        Asserts.assertEquals(first.effectCount("EliminateStore", "store atomic i32"), 2L,
+                target + ": exactly two volatile writes enter virtual state");
+        Asserts.assertEquals(first.effectCount("ReplaceLoad", "load atomic i32"), 1L,
+                target + ": exact volatile field load is scalarized");
         after.assertRetainsExactlyOriginalAllocations(before);
         after.assertAbsent("store atomic i32");
         after.assertAbsent("load atomic i32");
@@ -137,8 +156,8 @@ public class TestPEANonVirtualizableInstances {
                 target + ": no allocation remains after volatile scalar replacement");
     }
 
-    private static void assertOriginalAllocationRetained(PEATestUtils.RunResult run,
-                                                           Method target) throws Exception {
+    private static PEATestUtils.AllocationKey assertOneOriginalAllocationRetained(
+            PEATestUtils.RunResult run, Method target) throws Exception {
         PEATestUtils.IRBody before = run.report(target).round(0).before();
         PEATestUtils.IRBody after = run.report(target).finalAfter();
         Asserts.assertEquals(before.allocations().size(), 1,
@@ -147,24 +166,24 @@ public class TestPEANonVirtualizableInstances {
         Asserts.assertEquals(original.kind(), PEATestUtils.AllocationKind.INSTANCE,
                 target + ": eligibility-gated allocation kind");
         after.assertRetainsExactlyOriginalAllocations(before, original);
-        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1,
-                target + ": exactly the original allocation survives lowering");
+        return original;
     }
 
-    private static void assertEligibilityGates(PEATestUtils.RunResult run, Method... targets)
+    private static void assertFinalizableRefused(PEATestUtils.RunResult run, Method target)
             throws Exception {
-        List<String> failures = new ArrayList<>();
-        for (Method target : targets) {
-            try {
-                assertOriginalAllocationRetained(run, target);
-            } catch (AssertionError | RuntimeException failure) {
-                failures.add(eligibilityEvidence(run, target, (Throwable) failure));
-            }
-        }
-        if (!failures.isEmpty()) {
-            throw new RuntimeException("PEA instance eligibility failures:\n"
-                    + String.join("\n", failures));
-        }
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        assertOneOriginalAllocationRetained(run, target);
+        Asserts.assertEquals(first.neverEscapes(), 0,
+                target + ": finalizable allocation is not virtualized");
+        Asserts.assertEquals(first.partiallyEscapes(), 0,
+                target + ": finalizable allocation is not partially virtualized");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": finalizable allocation is refused before escape classification");
+        Asserts.assertEquals(first.effects().size(), 0,
+                target + ": finalizable eligibility refusal records no transform effects");
+        first.before().assertOccurrenceCount("@jeandle.register_finalizer_if_needed(", 1);
+        run.report(target).finalAfter().assertOccurrenceCount(
+                "@jeandle.register_finalizer_if_needed(", 1);
     }
 
     private static void assertTinyThreadRetained(PEATestUtils.RunResult run, Method target)
@@ -215,20 +234,142 @@ public class TestPEANonVirtualizableInstances {
                 target + ": lowered deoptimization preserves the original allocation bci");
     }
 
-    private static String eligibilityEvidence(PEATestUtils.RunResult run, Method target,
-                                              Throwable failure) throws Exception {
+    private static void assertWeakReferenceCallerFlow(PEATestUtils.RunResult run, Method target,
+                                                       Method factory)
+            throws Exception {
         PEATestUtils.PEARound first = run.report(target).round(0);
-        String sources = first.before().allocations().stream()
-                .map(PEATestUtils.AllocationSite::instruction)
-                .reduce((left, right) -> left + " || " + right).orElse("none");
-        String effects = first.effects().stream().map(PEATestUtils.PEAEffect::kind)
-                .reduce((left, right) -> left + "," + right).orElse("none");
-        return target + ": " + failure.getMessage()
-                + " | round0 Never=" + first.neverEscapes()
-                + " Partial=" + first.partiallyEscapes()
-                + " Always=" + first.alwaysEscapes()
-                + " | source=" + sources
-                + " | effects=" + effects;
+        Asserts.assertEquals(first.before().allocations().size(), 0,
+                target + ": caller owns no allocation site");
+        Asserts.assertEquals(first.effects().size(), 0,
+                target + ": caller flow is outside PEA transformations");
+
+        String factoryName = PEATestUtils.MethodId.of(factory).llvmFunctionName();
+        int[] operationBCIs = {6, 21, 26, 30, 45};
+        PEATestUtils.IRBody frontend = run.frontendIR(target);
+        frontend.assertOccurrenceCount("@\"" + factoryName + "\"(", 1);
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 0), List.of(),
+                target + ": caller is not replaced by an entry deoptimization stub");
+        for (int index = 0; index < operationBCIs.length; index++) {
+            Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                            "llvm.experimental.deoptimize.i32", operationBCIs[index]),
+                    List.of(index),
+                    target + ": exact get/refersTo/clear fallback at bci "
+                            + operationBCIs[index]);
+        }
+        frontend.assertBefore(factoryName, 0, "llvm.experimental.deoptimize.i32", 0);
+
+        PEATestUtils.IRBody lowered = run.finalIR(target);
+        String getLoad = "load atomic ptr addrspace(1), ptr addrspace(1)";
+        String refersTo = "__jeandle_dynamic_call.java_lang_ref_Reference_refersToImpl"
+                + "(Ljava/lang/Object;)Z";
+        String clear = "__jeandle_dynamic_call.java_lang_ref_Reference_clear()V";
+        lowered.assertOccurrenceCount("@\"" + factoryName + "\"", 1);
+        lowered.assertOccurrenceCount(getLoad, 2);
+        lowered.assertOccurrenceCount(refersTo, 2);
+        lowered.assertOccurrenceCount(clear, 1);
+        lowered.assertBefore(factoryName, 0, getLoad, 0);
+        lowered.assertBefore(getLoad, 0, refersTo, 0);
+        lowered.assertBefore(refersTo, 0, clear, 0);
+        lowered.assertBefore(clear, 0, getLoad, 1);
+        lowered.assertBefore(getLoad, 1, refersTo, 1);
+    }
+
+    private static void assertIdentityMaterialized(PEATestUtils.RunResult run, Method target,
+                                                    Method identityHash) throws Exception {
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        assertOneOriginalAllocationRetained(run, target);
+        Asserts.assertEquals(first.effectCount("Materialize"), 1L,
+                target + ": identity use materializes exactly once");
+        Asserts.assertEquals(first.effectCount("EliminateStore", "store atomic i32"), 1L,
+                target + ": the original field store is replayed at identity use");
+        String callee = PEATestUtils.MethodId.of(identityHash).llvmFunctionName();
+        PEATestUtils.IRBlock useBlock = run.report(target).finalAfter()
+                .blockContaining(callee, 0);
+        useBlock.assertOccurrenceCount("store atomic i32", 1);
+        useBlock.assertBefore("store atomic i32", 0, callee, 0);
+    }
+
+    private static void assertUnknownCallMaterialized(PEATestUtils.RunResult run, Method target,
+                                                       Method consumer) throws Exception {
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        assertOneOriginalAllocationRetained(run, target);
+        Asserts.assertEquals(first.effectCount("Materialize"), 1L,
+                target + ": unknown call materializes exactly once");
+        Asserts.assertEquals(first.effectCount("EliminateStore", "store atomic i32"), 1L,
+                target + ": initial field state is replayed exactly once");
+        String callee = PEATestUtils.MethodId.of(consumer).llvmFunctionName();
+        PEATestUtils.IRBlock useBlock = run.report(target).finalAfter()
+                .blockContaining(callee, 0);
+        useBlock.assertOccurrenceCount("store atomic i32", 1);
+        useBlock.assertBefore("store atomic i32", 0, callee, 0);
+    }
+
+    private static void assertValueBasedRefused(PEATestUtils.RunResult run, Method target)
+            throws Exception {
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        PEATestUtils.AllocationKey original = assertOneOriginalAllocationRetained(run, target);
+        Asserts.assertEquals(first.neverEscapes(), 0,
+                target + ": monitor-dependent allocation is not fully virtualized");
+        Asserts.assertEquals(first.partiallyEscapes(), 1,
+                target + ": unknown monitor arm materializes the allocation");
+        Asserts.assertEquals(first.alwaysEscapes(), 0,
+                target + ": allocation escapes only along the monitor arm");
+        Asserts.assertEquals(first.effects().size(), 5,
+                target + ": exact monitor-dependent transformation effects");
+        Asserts.assertEquals(first.effectCount("EliminateAllocation"), 1L,
+                target + ": allocation enters virtual state once");
+        Asserts.assertEquals(first.effectCount("ReplaceLoad"), 1L,
+                target + ": exact constructor null check replacement");
+        Asserts.assertEquals(first.effectCount("ReplaceCall"), 1L,
+                target + ": exact finalizer helper replacement");
+        Asserts.assertEquals(first.effectCount("EliminateStore", "store atomic i32"), 1L,
+                target + ": exact field store enters virtual state");
+        Asserts.assertEquals(first.effectCount("Materialize"), 1L,
+                target + ": unknown monitor arm materializes once");
+        Asserts.assertEquals(first.lockReplays().size(), 0,
+                target + ": runtime monitor is retained instead of virtually replayed");
+
+        PEATestUtils.IRBody before = first.before();
+        PEATestUtils.IRBody after = run.report(target).finalAfter();
+        after.assertRetainsExactlyOriginalAllocations(before, original);
+        before.assertOccurrenceCount("@jeandle.check_if_value_based(", 1);
+        after.assertOccurrenceCount("@jeandle.check_if_value_based(", 1);
+        after.assertOccurrenceCount("@jeandle.monitorenter_with_lightweight_lock(", 1);
+        after.assertOccurrenceCount("@SharedRuntime_complete_monitor_locking_C(", 1);
+        after.assertOccurrenceCount("@jeandle.monitorexit_with_lightweight_lock(", 1);
+        PEATestUtils.IRBody frontend = run.frontendIR(target);
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 0), List.of(),
+                target + ": diagnostic monitor path is not an entry deopt stub");
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 4), List.of(0),
+                target + ": constructor null check keeps its exact fallback bci");
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 29), List.of(2),
+                target + ": monitor null check keeps its exact fallback bci");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1,
+                target + ": lowering retains only the original allocation");
+    }
+
+    private static void assertThrowingConstructorRetained(PEATestUtils.RunResult run,
+                                                           Method target) throws Exception {
+        PEATestUtils.PEARound first = run.report(target).round(0);
+        assertOneOriginalAllocationRetained(run, target);
+        Asserts.assertEquals(first.effectCount("Materialize"), 1L,
+                target + ": constructor receiver materializes once at its invoke");
+        PEATestUtils.IRBody frontend = run.frontendIR(target);
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 0), List.of(),
+                target + ": throwing constructor path is not an entry deopt stub");
+        Asserts.assertEquals(frontend.callOccurrencesAtBCI(
+                        "llvm.experimental.deoptimize.i32", 5), List.of(0),
+                target + ": constructor receiver null fallback keeps its invoke bci");
+        PEATestUtils.IRBlock constructorBlock = frontend.blockContaining(THROWING_CTOR, 0);
+        constructorBlock.assertOccurrenceCount("invoke hotspotcc void @\""
+                + THROWING_CTOR + "\"(", 1);
+        constructorBlock.assertOccurrenceCount(" to label ", 1);
+        constructorBlock.assertOccurrenceCount(" unwind label ", 1);
     }
 
     public static class TestWrapper {
@@ -311,36 +452,69 @@ public class TestPEANonVirtualizableInstances {
 
             Object strong = new Object();
             long digest = 0xC2B2AE3D27D4EB4FL;
+            boolean executeValueBasedMonitor = !Boolean.getBoolean(SHAPE_RUN_PROPERTY);
             for (int value : new int[] {0, 7, -29, 0x12345678}) {
-                Asserts.assertEquals(testVolatileOnly(value, value ^ 0x55AA55AA),
+                int volatileResult = testVolatileOnly(value, value ^ 0x55AA55AA);
+                Asserts.assertEquals(volatileResult,
                         value ^ 0x55AA55AA, "volatile field value");
-                Asserts.assertEquals(testFinalizable(value), value * 3 + 1,
+                digest = mix(digest, volatileResult);
+
+                int finalizableResult = testFinalizable(value);
+                Asserts.assertEquals(finalizableResult, value * 3 + 1,
                         "finalizable object state");
-                Asserts.assertEquals(testThreadLifecycle(value), value * 5 + 3,
+                digest = mix(digest, finalizableResult);
+
+                int threadResult = testThreadLifecycle(value);
+                Asserts.assertEquals(threadResult, value * 5 + 3,
                         "Thread start/join lifecycle");
-                Asserts.assertEquals(testWeakReference(strong), 15,
+                digest = mix(digest, threadResult);
+                digest = mix(digest, threadValue);
+
+                int referenceResult = testWeakReference(strong);
+                Asserts.assertEquals(referenceResult, 15,
                         "WeakReference get/refersTo/clear behavior");
-                Asserts.assertEquals(testIdentitySensitive(value), value + 1,
+                digest = mix(digest, referenceResult);
+
+                int identityResult = testIdentitySensitive(value);
+                Asserts.assertEquals(identityResult, value + 1,
                         "identity hash remains stable for the same object");
+                digest = mix(digest, identityResult);
+
                 observed = null;
-                Asserts.assertEquals(testUnknownCall(value), value + 9,
+                int unknownResult = testUnknownCall(value);
+                Asserts.assertEquals(unknownResult, value + 9,
                         "unknown call observes and preserves object identity");
                 Asserts.assertNotEquals(observed, null, "unknown call receives its argument");
                 Asserts.assertEquals(observed.value, value + 9,
                         "post-call mutation is visible through the escaped identity");
-                Asserts.assertEquals(testValueBasedMonitor(value), value ^ 0x5A5A5A5A,
-                        "value-based monitor check preserves monitor semantics");
+                digest = mix(digest, unknownResult);
+                digest = mix(digest, observed == null ? 0 : 1);
+                digest = mix(digest, observed.value);
+
+                if (executeValueBasedMonitor) {
+                    int valueBasedResult = testValueBasedMonitor(value, strong);
+                    Asserts.assertEquals(valueBasedResult, value ^ 0x5A5A5A5A,
+                            "value-based monitor check preserves monitor semantics");
+                    digest = mix(digest, valueBasedResult);
+                }
+
                 constructorCalls = 0;
                 int successfulValue = Math.abs(value);
-                Asserts.assertEquals(testThrowingConstructor(successfulValue), successfulValue,
+                int constructorResult = testThrowingConstructor(successfulValue);
+                Asserts.assertEquals(constructorResult, successfulValue,
                         "successful constructor result");
                 Asserts.assertEquals(constructorCalls, 1, "successful constructor count");
+                digest = mix(digest, constructorResult);
+                digest = mix(digest, constructorCalls);
+
                 constructorCalls = 0;
-                Asserts.assertEquals(testThrowingConstructor(-successfulValue - 1),
+                int exceptionResult = testThrowingConstructor(-successfulValue - 1);
+                Asserts.assertEquals(exceptionResult,
                         successfulValue + 1,
                         "throwing constructor exception value");
                 Asserts.assertEquals(constructorCalls, 1, "throwing constructor count");
-                digest = mix(digest, value);
+                digest = mix(digest, exceptionResult);
+                digest = mix(digest, constructorCalls);
             }
             System.out.println("PEA-RESULT:" + Long.toUnsignedString(digest, 16));
         }
@@ -407,11 +581,13 @@ public class TestPEANonVirtualizableInstances {
             observed = box;
         }
 
-        @SuppressWarnings({"removal", "synchronization"})
-        public static int testValueBasedMonitor(int value) {
-            Integer boxed = new Integer(value);
-            synchronized (boxed) {
-                return boxed.intValue() ^ 0x5A5A5A5A;
+        @SuppressWarnings("synchronization")
+        public static int testValueBasedMonitor(int value, Object alternate) {
+            PlainBox boxed = new PlainBox();
+            boxed.value = value;
+            Object monitor = (value & 1) == 0 ? boxed : alternate;
+            synchronized (monitor) {
+                return boxed.value ^ 0x5A5A5A5A;
             }
         }
 
