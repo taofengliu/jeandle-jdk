@@ -37,6 +37,8 @@ import jdk.test.lib.Asserts;
 public class TestPEAPrimitiveArrayScalarReplacement {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEAPrimitiveArrayScalarReplacement$TestWrapper";
+    private static final String DEOPTIMIZE = "@llvm.experimental.deoptimize";
+    private static final String LOWERED_DEOPTIMIZE = "@__llvm_deoptimize";
 
     public static void main(String[] args) throws Exception {
         Method booleans = TestWrapper.class.getMethod(
@@ -55,11 +57,18 @@ public class TestPEAPrimitiveArrayScalarReplacement {
                 "testFloat", int.class, float.class, float.class, float.class);
         Method doubles = TestWrapper.class.getMethod(
                 "testDouble", int.class, double.class, double.class, double.class);
+        Method booleanChecksum = TestWrapper.class.getMethod(
+                "booleanChecksum", int.class, int.class, int.class,
+                boolean.class, boolean.class, boolean.class, boolean.class, boolean.class);
         Method[] targets = {booleans, bytes, shorts, chars, ints, longs, floats, doubles};
 
-        PEATestUtils.behaviorRun(WRAPPER, targets).runPEAOnOffEquivalent();
+        PEATestUtils.behaviorRun(WRAPPER, targets)
+                .dontinline(booleanChecksum)
+                .runPEAOnOffEquivalent();
 
-        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, targets).run()) {
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, targets)
+                .dontinline(booleanChecksum)
+                .run()) {
             for (Method target : targets) {
                 assertPrimitiveArrayScalarReplacement(run, target);
             }
@@ -100,14 +109,15 @@ public class TestPEAPrimitiveArrayScalarReplacement {
                 target + ": no lowered primitive allocation");
         run.finalIR(target).assertAbsent("store atomic");
         run.finalIR(target).assertAbsent("load atomic");
-        int expectedPartial = target.getName().equals("testBoolean") ? 1 : 0;
+        after.assertAbsent(DEOPTIMIZE);
+        run.finalIR(target).assertAbsent(LOWERED_DEOPTIMIZE);
         Asserts.assertEquals(first.alwaysEscapes(), 0, target + ": no escaping array");
-        Asserts.assertEquals(first.neverEscapes(), 3 - expectedPartial,
-                target + ": exact never-escaping array classification");
-        Asserts.assertEquals(first.partiallyEscapes(), expectedPartial,
-                target + ": exact partial array classification");
-        Asserts.assertEquals(first.effectCount("Materialize"), (long) expectedPartial,
-                target + ": exact deoptimization-path materialization effects");
+        Asserts.assertEquals(first.neverEscapes(), 3,
+                target + ": every qualified array is NeverEscapes");
+        Asserts.assertEquals(first.partiallyEscapes(), 0,
+                target + ": no qualified array is partially escaping");
+        Asserts.assertEquals(first.effectCount("Materialize"), 0L,
+                target + ": no qualified array is materialized");
     }
 
     public static class TestWrapper {
@@ -144,22 +154,27 @@ public class TestPEAPrimitiveArrayScalarReplacement {
 
         public static long testBoolean(boolean first, boolean second) {
             boolean[] empty = new boolean[0];
+            int emptyLength = empty.length;
+            empty = null;
             boolean[] one = new boolean[1];
-            boolean[] many = new boolean[4];
             boolean oneDefault = one[0];
+            int oneLength = one.length;
+            one = null;
+            boolean[] many = new boolean[4];
+            int manyLength = many.length;
             many[0] = first;
             many[1] = second;
             many[2] = first;
             many[3] = second;
             many[1] = first;
             many[1] = second;
-            int values = (oneDefault ? 1 : 0)
-                    | (many[0] ? 2 : 0)
-                    | (many[1] ? 4 : 0)
-                    | (many[2] ? 8 : 0)
-                    | (many[3] ? 16 : 0);
-            return ((long) empty.length << 48) | ((long) one.length << 40)
-                    | ((long) many.length << 32) | values;
+            boolean many0 = many[0];
+            boolean many1 = many[1];
+            boolean many2 = many[2];
+            boolean many3 = many[3];
+            many = null;
+            return booleanChecksum(emptyLength, oneLength, manyLength,
+                    oneDefault, many0, many1, many2, many3);
         }
 
         public static long testByte(byte first, byte second, byte third) {
@@ -370,6 +385,18 @@ public class TestPEAPrimitiveArrayScalarReplacement {
             value = mix(value, second);
             value = mix(value, third);
             return mix(value, last);
+        }
+
+        public static long booleanChecksum(int emptyLength, int oneLength, int manyLength,
+                                           boolean untouched, boolean first, boolean second,
+                                           boolean third, boolean last) {
+            int values = (untouched ? 1 : 0)
+                    | (first ? 2 : 0)
+                    | (second ? 4 : 0)
+                    | (third ? 8 : 0)
+                    | (last ? 16 : 0);
+            return ((long) emptyLength << 48) | ((long) oneLength << 40)
+                    | ((long) manyLength << 32) | values;
         }
 
         private static long lengths(int emptyLength, int oneLength, int manyLength) {

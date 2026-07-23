@@ -38,6 +38,8 @@ import jdk.test.lib.Asserts;
 public class TestPEAObjectArrayScalarReplacement {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEAObjectArrayScalarReplacement$TestWrapper";
+    private static final String DEOPTIMIZE = "@llvm.experimental.deoptimize";
+    private static final String LOWERED_DEOPTIMIZE = "@__llvm_deoptimize";
 
     public static void main(String[] args) throws Exception {
         Method nullExternal = TestWrapper.class.getMethod(
@@ -112,6 +114,8 @@ public class TestPEAObjectArrayScalarReplacement {
                 target + ": no lowered allocation");
         run.finalIR(target).assertAbsent("store atomic");
         run.finalIR(target).assertAbsent("load atomic");
+        after.assertAbsent(DEOPTIMIZE);
+        run.finalIR(target).assertAbsent(LOWERED_DEOPTIMIZE);
     }
 
     private static void assertMaterializedChild(PEATestUtils.RunResult run, Method target,
@@ -145,6 +149,11 @@ public class TestPEAObjectArrayScalarReplacement {
         PEATestUtils.IRBlock block = after.blockContaining(callee, 0);
         block.assertOccurrenceCount("store atomic i32", 1);
         block.assertBefore("store atomic i32", 0, callee, 0);
+        block.assertAbsent(DEOPTIMIZE);
+        after.blockContaining("load atomic i32", 0).assertAbsent(DEOPTIMIZE);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        finalIR.blockContaining(callee, 0).assertAbsent(LOWERED_DEOPTIMIZE);
+        finalIR.blockContaining("load atomic i32", 0).assertAbsent(LOWERED_DEOPTIMIZE);
     }
 
     private static void assertPartialArray(PEATestUtils.RunResult run, Method target,
@@ -177,6 +186,8 @@ public class TestPEAObjectArrayScalarReplacement {
         block.assertBefore("store atomic", 0, callee, 0);
         block.assertBefore("store atomic", 1, callee, 0);
         block.assertBefore("store atomic", 2, callee, 0);
+        block.assertAbsent(DEOPTIMIZE);
+        run.finalIR(target).blockContaining(callee, 0).assertAbsent(LOWERED_DEOPTIMIZE);
     }
 
     private static PEATestUtils.AllocationKey onlyKeyOfKind(

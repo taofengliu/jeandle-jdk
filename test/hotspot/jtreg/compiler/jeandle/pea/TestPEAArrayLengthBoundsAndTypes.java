@@ -31,9 +31,7 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import jdk.test.lib.Asserts;
 
@@ -42,6 +40,12 @@ public class TestPEAArrayLengthBoundsAndTypes {
             "compiler.jeandle.pea.TestPEAArrayLengthBoundsAndTypes$TestWrapper";
     private static final int ARRAY_CAP = 128;
     private static final String ARRAY_LENGTH = "@jeandle.arraylength";
+    private static final String GET_CLASS = "@jeandle.get_class";
+    private static final String DEOPTIMIZE = "@llvm.experimental.deoptimize";
+    private static final String DEOPTIMIZE_I64 = "llvm.experimental.deoptimize.i64";
+    private static final String DEOPTIMIZE_I64_CALL = "@" + DEOPTIMIZE_I64;
+    private static final String LOWERED_DEOPTIMIZE = "@__llvm_deoptimize";
+    private static final String BOUNDS_COMPARE = "icmp ult i32";
 
     public static void main(String[] args) throws Exception {
         Method length0 = TestWrapper.class.getMethod("testLength0");
@@ -55,8 +59,10 @@ public class TestPEAArrayLengthBoundsAndTypes {
         Method multi = TestWrapper.class.getMethod(
                 "testMultiArray", int.class, int.class);
         Method constantBounds = TestWrapper.class.getMethod("testConstantBounds");
-        Method constantOutOfBounds = TestWrapper.class.getMethod(
-                "testConstantOutOfBounds");
+        Method constantLowerOutOfBounds = TestWrapper.class.getMethod(
+                "testConstantLowerOutOfBounds");
+        Method constantUpperOutOfBounds = TestWrapper.class.getMethod(
+                "testConstantUpperOutOfBounds");
         Method dynamicBounds = TestWrapper.class.getMethod(
                 "testDynamicBounds", int.class, int.class, int.class);
         Method primitiveTypes = TestWrapper.class.getMethod("testPrimitiveArrayTypes");
@@ -64,8 +70,9 @@ public class TestPEAArrayLengthBoundsAndTypes {
                 "testObjectArrayTypes", String.class);
         Method failedCheckcast = TestWrapper.class.getMethod("testFailedArrayCheckcast");
         Method[] targets = {length0, length1, length127, length128, length129,
-                dynamicLength, negative, multi, constantBounds, constantOutOfBounds,
-                dynamicBounds, primitiveTypes, objectTypes, failedCheckcast};
+                dynamicLength, negative, multi, constantBounds,
+                constantLowerOutOfBounds, constantUpperOutOfBounds, dynamicBounds,
+                primitiveTypes, objectTypes, failedCheckcast};
 
         PEATestUtils.behaviorRun(WRAPPER, targets)
                 .maxArrayLength(ARRAY_CAP)
@@ -83,8 +90,12 @@ public class TestPEAArrayLengthBoundsAndTypes {
                     length129, dynamicLength, negative, dynamicBounds}) {
                 assertOriginalArrayRetained(run, target);
             }
-            assertConstantOutOfBounds(run, constantOutOfBounds);
+            assertConstantOutOfBounds(run, constantLowerOutOfBounds, 11);
+            assertConstantOutOfBounds(run, constantUpperOutOfBounds, 14);
+            assertDynamicBoundsFallbacks(run, dynamicBounds);
             assertMultiArrayConservative(run, multi);
+            assertGetClassFolded(run, primitiveTypes);
+            assertGetClassFolded(run, objectTypes);
             assertFailedCheckcast(run, failedCheckcast);
         }
     }
@@ -112,6 +123,8 @@ public class TestPEAArrayLengthBoundsAndTypes {
         after.assertAbsent(ARRAY_LENGTH);
         Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
                 target + ": no lowered cap-eligible allocation");
+        after.assertAbsent(DEOPTIMIZE);
+        run.finalIR(target).assertAbsent(LOWERED_DEOPTIMIZE);
     }
 
     private static void assertOriginalArrayRetained(PEATestUtils.RunResult run, Method target)
@@ -146,8 +159,8 @@ public class TestPEAArrayLengthBoundsAndTypes {
                 target + ": PEA does not synthesize a multiarray materialization");
     }
 
-    private static void assertConstantOutOfBounds(PEATestUtils.RunResult run, Method target)
-            throws Exception {
+    private static void assertConstantOutOfBounds(
+            PEATestUtils.RunResult run, Method target, int expectedBCI) throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = first.before();
@@ -162,49 +175,144 @@ public class TestPEAArrayLengthBoundsAndTypes {
         after.assertRetainsExactlyOriginalAllocations(before);
         Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
                 target + ": no allocation survives the exact deoptimization path");
+        assertUnconditionalFallback(after, expectedBCI);
+        assertLoweredFallback(run.finalIR(target), 1);
 
-        PEATestUtils.DeoptBundle bundle =
-                after.deoptBundleAtCall("llvm.experimental.deoptimize.i64", 0);
+        PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(DEOPTIMIZE_I64, 0);
         Asserts.assertEquals(bundle.virtualObjects().size(), 1,
                 target + ": exact failing access carries one virtual array descriptor");
-        Asserts.assertEquals(bundle.virtualObject(0).kind(),
+        bundle.assertVirtualObjectIds(0);
+        PEATestUtils.VirtualObjectDescriptor descriptor = bundle.virtualObject(0);
+        Asserts.assertEquals(descriptor.kind(),
                 PEATestUtils.DescriptorKind.ARRAY,
                 target + ": deoptimization reconstructs the array before throwing");
+        Asserts.assertEquals(descriptor.elements().size(), 1,
+                target + ": exact one-element array state is reconstructed");
+        PEATestUtils.VirtualObjectEntry element = descriptor.elements().values()
+                .iterator().next();
+        Asserts.assertEquals(element.basicType(), PEATestUtils.DeoptBasicType.INT,
+                target + ": exact int[] element kind");
+        Asserts.assertEquals(element.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
+                target + ": exact preserved old element value");
+        Asserts.assertEquals(element.value().operand(), "i32 66",
+                target + ": failing access preserves the old element");
+    }
+
+    private static void assertDynamicBoundsFallbacks(
+            PEATestUtils.RunResult run, Method target) throws Exception {
+        PEATestUtils.IRBody after = run.report(target).finalAfter();
+        assertConditionalBoundsFallback(after, 0, 26);
+        assertConditionalBoundsFallback(after, 1, 32);
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        assertConditionalBoundsStructure(finalIR, 0);
+        assertConditionalBoundsStructure(finalIR, 1);
+        assertLoweredFallback(finalIR, 2);
+
+        PEATestUtils.DeoptBundle first =
+                after.deoptBundleAtCall(DEOPTIMIZE_I64, 0);
+        first.assertVirtualObjectIds(0);
+        Asserts.assertEquals(first.virtualObject(0).kind(),
+                PEATestUtils.DescriptorKind.ARRAY,
+                target + ": first bounds fallback carries virtual array state");
+        PEATestUtils.DeoptBundle second =
+                after.deoptBundleAtCall(DEOPTIMIZE_I64, 1);
+        Asserts.assertEquals(second.virtualObjects().size(), 0,
+                target + ": second bounds fallback uses the first access materialization");
+
+        PEATestUtils.IRBlock firstSuccess = after.blockContaining("load atomic i32", 0);
+        firstSuccess.assertAbsent(DEOPTIMIZE);
+        firstSuccess.assertOccurrenceCount("store atomic i32", 4);
+        PEATestUtils.IRBlock secondSuccess = after.blockContaining("store atomic i32", 4);
+        secondSuccess.assertAbsent(DEOPTIMIZE);
+        secondSuccess.assertOccurrenceCount("store atomic i32", 1);
+    }
+
+    private static void assertGetClassFolded(
+            PEATestUtils.RunResult run, Method target) throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        PEATestUtils.PEARound first = report.round(0);
+        first.before().assertOccurrenceCount(GET_CLASS, 1);
+        Asserts.assertEquals(first.effectCount("ReplaceCall", GET_CLASS), 1L,
+                target + ": exact getClass call is replaced");
+        Asserts.assertEquals(first.effectCount("Materialize"), 0L,
+                target + ": getClass folding does not materialize the array");
+        report.finalAfter().assertAbsent(GET_CLASS);
+        run.finalIR(target).assertAbsent(GET_CLASS);
     }
 
     private static void assertFailedCheckcast(PEATestUtils.RunResult run, Method target)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.PEARound first = report.round(0);
+        PEATestUtils.IRBody before = first.before();
         PEATestUtils.IRBody after = report.finalAfter();
         Asserts.assertEquals(before.allocations().size(), 1,
                 target + ": one source array reaches the incompatible checkcast");
-        PEATestUtils.AllocationKey original = before.allocations().get(0).key();
+        Asserts.assertEquals(first.neverEscapes(), 1,
+                target + ": exact incompatible cast keeps the source array virtual");
+        Asserts.assertEquals(first.effectCount("EliminateAllocation"), 1L,
+                target + ": exact incompatible type eliminates the allocation");
+        Asserts.assertEquals(first.effectCount("Materialize"), 0L,
+                target + ": incompatible cast uses deoptimization reconstruction");
+        after.assertRetainsExactlyOriginalAllocations(before);
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0,
+                target + ": no allocation survives the isolated cast fallback");
+        assertUnconditionalFallback(after, 5);
+        assertLoweredFallback(run.finalIR(target), 1);
 
-        List<PEATestUtils.AllocationKey> retained =
-                after.allocations().stream().map(PEATestUtils.AllocationSite::key).toList();
-        Asserts.assertTrue(retained.isEmpty() || retained.equals(List.of(original)),
-                target + ": an incompatible exact checkcast may fold or conservatively retain "
-                        + "only its OrigAlloc");
-        Set<PEATestUtils.AllocationKey> source = new HashSet<>(
-                before.allocations().stream().map(PEATestUtils.AllocationSite::key).toList());
-        Asserts.assertTrue(source.containsAll(retained),
-                target + ": incompatible checkcast must not synthesize a new allocation BCI");
-        if (retained.isEmpty()) {
-            Asserts.assertEquals(report.round(0).effectCount("EliminateAllocation"), 1L,
-                    target + ": exact incompatible type eliminates the allocation");
-            PEATestUtils.DeoptBundle bundle =
-                    after.deoptBundleAtCall("llvm.experimental.deoptimize.i64", 0);
-            Asserts.assertEquals(bundle.virtualObjects().size(), 1,
-                    target + ": failing checkcast carries one virtual array descriptor");
-            Asserts.assertEquals(bundle.virtualObject(0).kind(),
-                    PEATestUtils.DescriptorKind.ARRAY,
-                    target + ": ClassCastException deoptimization reconstructs the array");
-        } else {
-            after.assertRetainsExactlyOriginalAllocations(before, original);
+        PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(DEOPTIMIZE_I64, 0);
+        bundle.assertVirtualObjectIds(0);
+        Asserts.assertEquals(bundle.virtualObject(0).kind(),
+                PEATestUtils.DescriptorKind.ARRAY,
+                target + ": ClassCastException fallback reconstructs the exact array");
+    }
+
+    private static void assertUnconditionalFallback(
+            PEATestUtils.IRBody body, int expectedBCI) {
+        body.assertOccurrenceCount(DEOPTIMIZE_I64_CALL, 1);
+        Asserts.assertEquals(body.callOccurrencesAtBCI(DEOPTIMIZE_I64, expectedBCI),
+                List.of(0), body.methodId() + ": exact unconditional fallback BCI");
+        PEATestUtils.IRBlock fallback = body.blockContaining(DEOPTIMIZE_I64_CALL, 0);
+        fallback.assertOccurrenceCount(DEOPTIMIZE_I64_CALL, 1);
+        fallback.assertOccurrenceCount("ret i64", 1);
+        fallback.assertAbsent("br i1");
+    }
+
+    private static void assertConditionalBoundsFallback(
+            PEATestUtils.IRBody body, int compareOccurrence, int expectedBCI) {
+        assertConditionalBoundsStructure(body, compareOccurrence);
+        Asserts.assertEquals(body.callOccurrencesAtBCI(DEOPTIMIZE_I64, expectedBCI).size(),
+                1, body.methodId() + ": exact conditional bounds fallback BCI");
+        int deoptOccurrence = body.callOccurrencesAtBCI(
+                DEOPTIMIZE_I64, expectedBCI).get(0);
+        PEATestUtils.IRBlock fallback = body.blockContaining(
+                DEOPTIMIZE_I64_CALL, deoptOccurrence);
+        fallback.assertOccurrenceCount(DEOPTIMIZE_I64_CALL, 1);
+        fallback.assertOccurrenceCount("ret i64", 1);
+        fallback.assertAbsent("store atomic");
+        fallback.assertAbsent("load atomic");
+    }
+
+    private static void assertConditionalBoundsStructure(
+            PEATestUtils.IRBody body, int compareOccurrence) {
+        PEATestUtils.IRBlock bounds =
+                body.blockContaining(BOUNDS_COMPARE, compareOccurrence);
+        bounds.assertOccurrenceCount(BOUNDS_COMPARE, 1);
+        bounds.assertOccurrenceCount("br i1", 1);
+        bounds.assertAbsent(DEOPTIMIZE);
+        bounds.assertAbsent(LOWERED_DEOPTIMIZE);
+    }
+
+    private static void assertLoweredFallback(
+            PEATestUtils.IRBody body, int expectedCount) {
+        body.assertOccurrenceCount(LOWERED_DEOPTIMIZE, expectedCount);
+        for (int occurrence = 0; occurrence < expectedCount; occurrence++) {
+            PEATestUtils.IRBlock fallback =
+                    body.blockContaining(LOWERED_DEOPTIMIZE, occurrence);
+            fallback.assertOccurrenceCount(LOWERED_DEOPTIMIZE, 1);
+            fallback.assertAbsent("store atomic");
+            fallback.assertAbsent("load atomic");
         }
-        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), retained.size(),
-                target + ": lowering agrees with the truthful PEA fallback");
     }
 
     public static class TestWrapper {
@@ -244,8 +352,10 @@ public class TestPEAArrayLengthBoundsAndTypes {
 
             digest = check(digest, testConstantBounds(), 0x434F4E53L,
                     "constant valid bounds");
-            digest = check(digest, testConstantOutOfBounds(), 0x424F554EL,
-                    "constant invalid bounds");
+            digest = check(digest, testConstantLowerOutOfBounds(), 0x4C4F5745L,
+                    "constant lower bound");
+            digest = check(digest, testConstantUpperOutOfBounds(), 0x55505045L,
+                    "constant upper bound");
             int[][] bounds = {
                     {0, 0, 101}, {2, 2, 202}, {3, 1, 303},
                     {-1, 0, 404}, {4, 0, 505}, {0, -1, 606}, {0, 4, 707}
@@ -335,23 +445,26 @@ public class TestPEAArrayLengthBoundsAndTypes {
                     && array.length == 2 ? 0x434F4E53L : 0;
         }
 
-        public static long testConstantOutOfBounds() {
+        public static long testConstantLowerOutOfBounds() {
             int[] array = new int[1];
             array[0] = 0x42;
-            int catches = 0;
             try {
                 int ignored = array[-1];
                 return ignored;
             } catch (ArrayIndexOutOfBoundsException expected) {
-                catches++;
+                return array[0] == 0x42 ? 0x4C4F5745L : 0;
             }
+        }
+
+        public static long testConstantUpperOutOfBounds() {
+            int[] array = new int[1];
+            array[0] = 0x42;
             try {
                 array[array.length] = 0x55;
                 return 0;
             } catch (ArrayIndexOutOfBoundsException expected) {
-                catches++;
+                return array[0] == 0x42 ? 0x55505045L : 0;
             }
-            return catches == 2 && array[0] == 0x42 ? 0x424F554EL : 0;
         }
 
         public static long testDynamicBounds(int loadIndex, int storeIndex, int value) {
