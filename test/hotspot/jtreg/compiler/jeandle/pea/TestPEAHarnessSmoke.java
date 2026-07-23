@@ -465,11 +465,14 @@ public class TestPEAHarnessSmoke {
                         + "ptr elementtype(ptr addrspace(1) (ptr, ptr)) @new_instance, "
                         + "i32 2, i32 0, ptr %klass, ptr %thread)",
                 "call void %fp(ptr @new_array)",
+                "call void inttoptr (i64 139956031309536 to ptr)"
+                        + "(ptr addrspace(1) %object, ptr %card)",
                 "store i32 1, ptr %out",
                 "call void @resultless.lowered.neighbor()",
                 "ret i32 1");
         Asserts.assertEquals(body.loweredAllocCount(), 3,
-                "direct and statepoint allocation callees are counted exactly");
+                "direct and statepoint allocation callees are counted exactly"
+                        + " while constant-expression indirect calls are skipped");
     }
 
     private static void testSyntheticParser(Method noArgs, Method complex, Method decoy) {

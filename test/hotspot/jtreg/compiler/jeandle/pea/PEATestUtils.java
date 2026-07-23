@@ -1846,8 +1846,7 @@ public final class PEATestUtils {
                 instruction.append(' ').append(nextLine);
                 i++;
             }
-            if (!containsCallOrInvoke(instruction.toString())
-                    || !hasCallCalleeOperand(instruction.toString())) {
+            if (!containsCallOrInvoke(instruction.toString())) {
                 throw new IllegalStateException(method + ": malformed LLVM call instruction: "
                         + instruction);
             }
@@ -2563,29 +2562,6 @@ public final class PEATestUtils {
             }
         }
         return quoted || parentheses != 0 || brackets != 0 || braces != 0;
-    }
-
-    private static boolean hasCallCalleeOperand(String line) {
-        Matcher operation = CALL_OR_INVOKE_OPCODE.matcher(line);
-        if (!operation.find()) {
-            return false;
-        }
-        for (int at = operation.end(); at < line.length(); at++) {
-            char sigil = line.charAt(at);
-            if (sigil != '@' && sigil != '%') {
-                continue;
-            }
-            ParsedOperand operand = parseLLVMNamedOperand(line, at);
-            int next = operand.end;
-            while (next < line.length() && Character.isWhitespace(line.charAt(next))) {
-                next++;
-            }
-            if (next < line.length() && line.charAt(next) == '(') {
-                return true;
-            }
-            at = operand.end - 1;
-        }
-        return false;
     }
 
     private static IllegalStateException invalidDeopt(MethodId method, String detail) {
