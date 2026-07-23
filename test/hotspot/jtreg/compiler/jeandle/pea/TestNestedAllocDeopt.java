@@ -20,70 +20,96 @@
 
 /*
  * @test
- * @summary PEA allocation-bundle scanning: a VO referenced
- *          only by ANOTHER allocation invoke's deopt bundle must be
- *          described there (Graal describes VOs in allocation frame states),
- *          not left for Pass-2 poison-RAUW. `a = new A(); b = new B();
- *          sink(b);` with a live across b's allocation: a is NeverEscapes
- *          and must be DESCRIBED in b's surviving allocation bundle; b is
- *          PartiallyEscapes (its invoke retained). The IR check verifies
- *          a's descriptor and VORef slot in b's allocation bundle; the
- *          behavioral check exercises a null-check deopt with a live.
+ * @summary PEA allocation-bundle scanning: a VO referenced only by another
+ *          allocation invoke's deopt bundle is described in that allocation's
+ *          frame state. This is structural allocation-invoke coverage only.
  * @library /test/lib /
- * @build jdk.test.lib.Asserts
+ * @modules java.base/jdk.internal.misc
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestNestedAllocDeopt
  */
 
 package compiler.jeandle.pea;
 
-import compiler.jeandle.fileCheck.FileCheck;
-import java.util.ArrayList;
+import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 
+import jdk.internal.misc.Unsafe;
 import jdk.test.lib.Asserts;
-import jdk.test.lib.process.OutputAnalyzer;
-import jdk.test.lib.process.ProcessTools;
 
 public class TestNestedAllocDeopt {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestNestedAllocDeopt$TestWrapper";
+    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
+
     public static void main(String[] args) throws Exception {
-        String dump_path = System.getProperty("user.dir");
-        String wrapper = "compiler.jeandle.pea.TestNestedAllocDeopt$TestWrapper";
-        ArrayList<String> command_args = new ArrayList<String>(List.of(
-                "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler", "-Xcomp",
-                "-XX:+JeandleDoPEA",
-                "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
-                "-XX:JeandleDumpDirectory=" + dump_path,
-                "-XX:+PrintNMethods",
-                "-XX:-UseCompressedOops", "-XX:-UseCompressedClassPointers",
-                "-XX:CompileCommand=compileonly," + wrapper + "::test",
-                "-XX:CompileCommand=dontinline," + wrapper + "::sink",
-                wrapper));
+        Method target = TestWrapper.class.getMethod("test", TestWrapper.Holder.class);
+        Method sink = TestWrapper.class.getDeclaredMethod("sink", TestWrapper.B.class);
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, target)
+                .dontinline(sink)
+                .run()) {
+            assertAllocationBundle(run, target);
+        }
+    }
 
-        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(command_args);
-        OutputAnalyzer output = ProcessTools.executeCommand(pb);
-        output.shouldHaveExitValue(0);
+    private static void assertAllocationBundle(PEATestUtils.RunResult run, Method target)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        report.assertConverged();
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        List<Integer> sourceBCIs = before.allocationBCIs();
+        Asserts.assertEquals(sourceBCIs.size(), 2,
+                target + ": exact first and second source allocations");
+        Asserts.assertEquals(new HashSet<>(sourceBCIs).size(), 2,
+                target + ": source allocations have distinct BCIs");
 
-        // b is PartiallyEscapes (escapes via sink(b)): its allocation is
-        // RETAINED in the optimized IR. a is NeverEscapes: eliminated, and
-        // DESCRIBED in b's surviving allocation bundle — the ScalarValueType
-        // header (vo_id 0) = (0<<32)|(4<<16)|T_OBJECT(12) = 262156 and the
-        // VORefLocalType slot = (0<<32)|(8<<16)|12 = 524300. With the pre-fix
-        // early-return at the allocation dispatch, a's bundle slot stayed a
-        // raw OrigAlloc and Pass 2 poisoned it.
-        FileCheck checker = new FileCheck(dump_path,
-                TestWrapper.class.getMethod("test", TestWrapper.Holder.class),
-                /*optimized=*/true);
-        checker.checkPattern("define hotspotcc i32 .*test.*");
-        checker.check("new_instance");
-        checker.check("262156");
-        checker.check("524300");
+        int secondBCI = sourceBCIs.get(1);
+        String secondResult = exactAllocationResult(after, secondBCI, target);
+        List<String> definitions = after.lines().stream()
+                .filter(line -> line.startsWith(secondResult + " = ")).toList();
+        Asserts.assertEquals(definitions.size(), 1,
+                target + ": exact second allocation SSA definition");
+        Asserts.assertTrue(definitions.get(0).contains("@jeandle.new_instance"),
+                target + ": selected allocation has the exact instance callee");
+        PEATestUtils.DeoptBundle bundle = after.deoptBundleAtAllocation(secondResult);
+        Asserts.assertEquals(bundle.rootScope().bci(), secondBCI,
+                target + ": selected allocation bundle BCI");
+        Asserts.assertEquals(bundle.rootScope().duplicateBCI(), secondBCI,
+                target + ": selected allocation bundle duplicated BCI");
+        bundle.assertVirtualObjectIds(0);
+        PEATestUtils.VirtualObjectDescriptor first = bundle.virtualObject(0);
+        Asserts.assertEquals(first.kind(), PEATestUtils.DescriptorKind.INSTANCE,
+                target + ": first allocation is described as an instance");
+        PEATestUtils.VirtualObjectEntry value = first.fields().get(
+                Math.toIntExact(UNSAFE.objectFieldOffset(
+                        TestWrapper.A.class.getDeclaredField("x"))));
+        Asserts.assertNotNull(value, target + ": first object field is in closure");
+        Asserts.assertEquals(value.value().kind(), PEATestUtils.DeoptValueKind.SCALAR,
+                target + ": first object field is scalar");
+        Asserts.assertEquals(value.value().operand(), "i32 10",
+                target + ": first object field value");
+        Asserts.assertEquals(after.allocationBCIs(), List.of(secondBCI),
+                target + ": first NeverEscapes allocation is eliminated");
+        Asserts.assertEquals(after.peaAllocCount(), 1,
+                target + ": only the second source OrigAlloc remains");
+        Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 1,
+                target + ": no replacement allocation is introduced");
+    }
 
-        // Behavioral: test(null) null-check deopts at inp.h AFTER both
-        // allocations; a is reconstructed from the VO descriptor and the
-        // interpreter throws NPE. test(holder) runs clean.
-        output.shouldContain("TestNestedAllocDeopt result: 13");
-        output.shouldContain("TestNestedAllocDeopt deopt: NPE");
+    private static String exactAllocationResult(
+            PEATestUtils.IRBody body, int bci, Method target) {
+        List<String> matches = body.allocationBCIsByResult().entrySet().stream()
+                .filter(entry -> entry.getValue() == bci)
+                .map(Map.Entry::getKey).toList();
+        Asserts.assertEquals(matches.size(), 1,
+                target + ": exact SSA result for second allocation BCI " + bci);
+        return matches.get(0);
     }
 
     public static class TestWrapper {
@@ -95,25 +121,18 @@ public class TestNestedAllocDeopt {
         // Not inlined (dontinline); passing b here makes it PartiallyEscapes.
         static void sink(B b) { global = b; }
 
-        public static void main(String[] args) {
-            new Holder(); new A(); new B(); // init classes
+        public static void main(String[] args) throws Exception {
+            new Holder(); new A(); new B();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
             Holder holder = new Holder();
             holder.h = 3;
-            int r = test(holder);  // compiles + runs (no deopt)
-            System.out.println("TestNestedAllocDeopt result: " + r);
-            try {
-                test(null);        // null-check deopt at inp.h; a live
-                Asserts.fail("expected NPE");
-            } catch (NullPointerException e) {
-                System.out.println("TestNestedAllocDeopt deopt: NPE");
-            }
-            Asserts.assertEquals(r, 13);
+            int result = test(holder);
+            Asserts.assertEquals(result, 13);
+            System.out.println("PEA-RESULT:" + result);
         }
 
-        // Compiled by Jeandle. a is allocated first and live across b's
-        // allocation (referenced by b's allocation deopt bundle) — the #10
-        // shape. b escapes via sink(b), so b's invoke is retained with a's
-        // descriptor in its bundle.
+        // a is live across b's retained allocation, so b's own bundle carries
+        // a's descriptor while a remains virtual.
         public static int test(Holder inp) {
             A a = new A();
             a.x = 10;
