@@ -118,7 +118,11 @@ public final class PEATestUtils {
             "^(?:" + LLVM_LOCAL_NAME + "\\s*=\\s*)?"
                     + "(?:(?:musttail|notail|tail)\\s+)?(call|invoke)\\b");
     private static final Pattern ASSIGNED_INSTRUCTION = Pattern.compile(
-            "^" + LLVM_LOCAL_NAME + "\\s*=");
+            "^(" + LLVM_LOCAL_NAME + ")\\s*=");
+    private static final Pattern ASSIGNMENT_ONLY = Pattern.compile(
+            "^" + LLVM_LOCAL_NAME + "\\s*=\\s*$");
+    private static final Pattern DEBUG_RECORD = Pattern.compile(
+            "^#dbg_[A-Za-z0-9_]+\\b");
     private static final Pattern UNASSIGNED_INSTRUCTION = Pattern.compile(
             "^(?:(?:musttail|notail|tail)\\s+call|call|invoke|callbr|ret|br|switch|"
                     + "indirectbr|resume|catchswitch|catchret|cleanupret|unreachable|"
@@ -1526,8 +1530,6 @@ public final class PEATestUtils {
     public static final class IRBody {
         private static final String LLVM_LABEL_NAME =
                 "(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
-        private static final Pattern PEA_ALLOCATION = Pattern.compile(
-                "@jeandle\\.new_(?:instance|array)(?=\\s*\\()");
         private static final Pattern LOWERED_ALLOCATION_TARGET = Pattern.compile(
                 "@new_(?:instance|array)\\s*$");
         private static final Pattern DEOPT_BCI = Pattern.compile(
@@ -1593,11 +1595,18 @@ public final class PEATestUtils {
         }
 
         public int peaAllocCount() {
-            return (int) lines.stream().filter(l -> PEA_ALLOCATION.matcher(l).find()).count();
+            return (int) callInstructions().stream()
+                    .map(CompleteCallInstruction::text)
+                    .map(PEATestUtils::calledFunctionName)
+                    .filter(callee -> allocationKind(callee) != null)
+                    .count();
         }
 
         public int loweredAllocCount() {
-            return (int) lines.stream().filter(this::isLoweredAllocation).count();
+            return (int) callInstructions().stream()
+                    .map(CompleteCallInstruction::text)
+                    .filter(this::isLoweredAllocation)
+                    .count();
         }
 
         private boolean isLoweredAllocation(String line) {
@@ -1664,18 +1673,15 @@ public final class PEATestUtils {
         /** Return all Jeandle allocation instructions with typed source identities. */
         public List<AllocationSite> allocations() {
             ArrayList<AllocationSite> result = new ArrayList<>();
-            for (int i = 0; i < lines.size(); i++) {
-                if (!containsCallOrInvoke(lines.get(i))) {
-                    continue;
-                }
-                String instruction = instructionStartingAt(i);
+            for (CompleteCallInstruction call : callInstructions()) {
+                String instruction = call.text();
                 String callee = calledFunctionName(instruction);
                 AllocationKind kind = allocationKind(callee);
                 if (kind == null) {
                     continue;
                 }
-                int assignment = lines.get(i).indexOf(" = ");
-                if (assignment <= 1 || lines.get(i).charAt(0) != '%') {
+                Matcher assignment = ASSIGNED_INSTRUCTION.matcher(instruction);
+                if (!assignment.find()) {
                     throw new AssertionError(method
                             + ": allocation lacks an SSA result: " + instruction);
                 }
@@ -1686,7 +1692,7 @@ public final class PEATestUtils {
                 }
                 result.add(new AllocationSite(new AllocationKey(kind,
                         Integer.parseInt(matcher.group(1))),
-                        lines.get(i).substring(0, assignment), instruction));
+                        assignment.group(1), instruction));
             }
             return List.copyOf(result);
         }
@@ -1765,11 +1771,8 @@ public final class PEATestUtils {
                         "Exact callee must be a non-empty raw LLVM function name");
             }
             ArrayList<String> matches = new ArrayList<>();
-            for (int i = 0; i < lines.size(); i++) {
-                if (!containsCallOrInvoke(lines.get(i))) {
-                    continue;
-                }
-                String instruction = instructionStartingAt(i);
+            for (CompleteCallInstruction call : callInstructions()) {
+                String instruction = call.text();
                 String callee = calledFunctionName(instruction);
                 if (exactCallee.equals(callee)) {
                     matches.add(instruction);
@@ -1803,20 +1806,59 @@ public final class PEATestUtils {
             return parseDeoptBundle(method, matches.get(0));
         }
 
-        private String instructionStartingAt(int startLine) {
-            StringBuilder instruction = new StringBuilder(lines.get(startLine));
+        private List<CompleteCallInstruction> callInstructions() {
+            ArrayList<CompleteCallInstruction> result = new ArrayList<>();
+            for (int i = 0; i < lines.size(); i++) {
+                String line = cleanInstructionLine(lines.get(i));
+                int nextTokenLine = i + 1;
+                while (nextTokenLine < lines.size()
+                        && cleanInstructionLine(lines.get(nextTokenLine)).isEmpty()) {
+                    nextTokenLine++;
+                }
+                boolean directStart = containsCallOrInvoke(line);
+                boolean splitAssignmentStart = ASSIGNMENT_ONLY.matcher(line).matches()
+                        && nextTokenLine < lines.size()
+                        && containsCallOrInvoke(line + " "
+                                + cleanInstructionLine(lines.get(nextTokenLine)));
+                if (!directStart && !splitAssignmentStart) {
+                    continue;
+                }
+                CompleteCallInstruction instruction = instructionStartingAt(i);
+                result.add(instruction);
+                i = instruction.nextLine() - 1;
+            }
+            return List.copyOf(result);
+        }
+
+        private CompleteCallInstruction instructionStartingAt(int startLine) {
+            StringBuilder instruction = new StringBuilder(
+                    cleanInstructionLine(lines.get(startLine)));
             int i = startLine + 1;
-            while (i < lines.size()
-                    && instructionNeedsContinuation(instruction.toString(), lines.get(i))) {
-                instruction.append(' ').append(lines.get(i));
+            while (i < lines.size()) {
+                String nextLine = cleanInstructionLine(lines.get(i));
+                if (nextLine.isEmpty()) {
+                    i++;
+                    continue;
+                }
+                if (!instructionNeedsContinuation(instruction.toString(), nextLine)) {
+                    break;
+                }
+                instruction.append(' ').append(nextLine);
                 i++;
+            }
+            if (!containsCallOrInvoke(instruction.toString())
+                    || !hasCallCalleeOperand(instruction.toString())) {
+                throw new IllegalStateException(method + ": malformed LLVM call instruction: "
+                        + instruction);
             }
             if (hasUnbalancedInstructionDelimiters(instruction.toString())) {
                 throw new IllegalStateException(method + ": unterminated LLVM instruction: "
                         + instruction);
             }
-            return instruction.toString();
+            return new CompleteCallInstruction(instruction.toString(), i);
         }
+
+        private record CompleteCallInstruction(String text, int nextLine) {}
 
         public IRBlock blockContaining(String substring, int occurrence) {
             int position = occurrencePosition(substring, occurrence);
@@ -2473,10 +2515,7 @@ public final class PEATestUtils {
 
     private static boolean instructionNeedsContinuation(
             String instruction, String nextLine) {
-        if (hasUnbalancedInstructionDelimiters(instruction)) {
-            return true;
-        }
-        if (!hasCallCalleeOperand(instruction)) {
+        if (!containsCallOrInvoke(instruction)) {
             return true;
         }
         return !isDefiniteInstructionBoundary(nextLine);
@@ -2485,6 +2524,7 @@ public final class PEATestUtils {
     private static boolean isDefiniteInstructionBoundary(String line) {
         String folded = fold(line);
         return folded.equals("}") || IRBody.BLOCK_LABEL.matcher(folded).matches()
+                || DEBUG_RECORD.matcher(folded).find()
                 || ASSIGNED_INSTRUCTION.matcher(folded).find()
                 || UNASSIGNED_INSTRUCTION.matcher(folded).find();
     }
@@ -2959,6 +2999,29 @@ public final class PEATestUtils {
 
     private static String fold(String value) {
         return value.replaceAll("\\s+", " ").trim();
+    }
+
+    private static String cleanInstructionLine(String line) {
+        return fold(stripLLVMComment(line));
+    }
+
+    private static String stripLLVMComment(String line) {
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (quoted) {
+                if (ch == '\\') {
+                    i = Math.min(i + 2, line.length() - 1);
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+            } else if (ch == '"') {
+                quoted = true;
+            } else if (ch == ';') {
+                return line.substring(0, i);
+            }
+        }
+        return line;
     }
 
     private static List<String> splitLines(String text) {

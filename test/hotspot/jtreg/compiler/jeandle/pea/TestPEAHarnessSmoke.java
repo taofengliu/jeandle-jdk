@@ -62,6 +62,8 @@ public class TestPEAHarnessSmoke {
         testTypedAllocationSitesAndRetention(noArgs);
         testMultilineCallAndInvokeParsing(noArgs);
         testCompleteCallInstructionCollection(noArgs);
+        testFlexibleAllocationResultsAndBoundaries(noArgs);
+        testCommentCannotSupplyDeoptBundle(noArgs);
         testBlockLocalExactAssertions(noArgs);
         testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
@@ -348,7 +350,7 @@ public class TestPEAHarnessSmoke {
                 "next:",
                 "%attr = call i32 @attributes.site(\n"
                         + "  i32 3)\n"
-                        + "  #8 noinline\n"
+                        + "  #8 noinline \"tag\"=\"semi;colon\"\n"
                         + "  [ " + deoptBundle(53) + " ]\n"
                         + "  , !dbg !7",
                 "%adjacent = add i32 %attr, 1",
@@ -364,6 +366,62 @@ public class TestPEAHarnessSmoke {
                 "the collector must stop before the adjacent instruction");
         Asserts.assertEquals(body.deoptBundleAtAllocation("%split").rootScope().bci(), 51);
         Asserts.assertEquals(body.deoptBundleAtCall("attributes.site", 0).rootScope().bci(), 53);
+    }
+
+    private static void testFlexibleAllocationResultsAndBoundaries(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "%compact=call ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(61) + " ]",
+                "%split =\n"
+                        + "  call ptr addrspace(1) @jeandle.new_array() [ "
+                        + deoptBundle(63) + " ]",
+                "#dbg_value(ptr %split, !1, !DIExpression(), !2)",
+                "store ptr addrspace(1) %split, ptr %out",
+                "call void @resultless.neighbor()",
+                "%single = add i32 1, 2",
+                "ret i32 %single");
+
+        List<PEATestUtils.AllocationSite> allocations = body.allocations();
+        Asserts.assertEquals(body.peaAllocCount(), 2);
+        Asserts.assertEquals(allocations.size(), 2);
+        Asserts.assertEquals(allocations.get(0).result(), "%compact");
+        Asserts.assertEquals(allocations.get(1).result(), "%split");
+        Asserts.assertEquals(allocations.get(1).key(), new PEATestUtils.AllocationKey(
+                PEATestUtils.AllocationKind.ARRAY, 63));
+        for (PEATestUtils.AllocationSite allocation : allocations) {
+            Asserts.assertFalse(allocation.instruction().contains("#dbg_value"));
+            Asserts.assertFalse(allocation.instruction().contains("store ptr"));
+            Asserts.assertFalse(allocation.instruction().contains("resultless.neighbor"));
+            Asserts.assertFalse(allocation.instruction().contains("%single"));
+        }
+        Asserts.assertEquals(body.deoptBundleAtAllocation("%compact").rootScope().bci(), 61);
+        Asserts.assertEquals(body.deoptBundleAtAllocation("%split").rootScope().bci(), 63);
+
+        PEATestUtils.IRBody neighbors = bodyWithInstructions(id,
+                "%beforeStore=call ptr addrspace(1) @jeandle.new_instance() [ "
+                        + deoptBundle(65) + " ]",
+                "store i32 1, ptr %out",
+                "%beforeCall=call ptr addrspace(1) @jeandle.new_array() [ "
+                        + deoptBundle(66) + " ]",
+                "call void @resultless.neighbor()",
+                "ret i32 1");
+        List<PEATestUtils.AllocationSite> neighborAllocations = neighbors.allocations();
+        Asserts.assertEquals(neighborAllocations.size(), 2);
+        Asserts.assertFalse(neighborAllocations.get(0).instruction().contains("store i32"));
+        Asserts.assertFalse(neighborAllocations.get(1).instruction()
+                .contains("resultless.neighbor"));
+    }
+
+    private static void testCommentCannotSupplyDeoptBundle(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody body = bodyWithInstructions(id,
+                "call void @comment.site()",
+                "; misleading " + deoptBundle(67),
+                "store i32 1, ptr %out",
+                "ret i32 1");
+        expectFailure("comment cannot supply a deopt bundle",
+                () -> body.deoptBundleAtCall("comment.site", 0));
     }
 
     private static void testBlockLocalExactAssertions(Method method) {
@@ -392,9 +450,11 @@ public class TestPEAHarnessSmoke {
     private static void testLoweredAllocationCounting(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
         PEATestUtils.IRBody body = bodyWithInstructions(id,
-                "%direct = call ptr addrspace(1) @new_instance(ptr %klass, ptr %thread)",
-                "%array = invoke token (i64, i32, ptr, i32, i32, ...)"
-                        + " @llvm.experimental.gc.statepoint.p0("
+                "%direct=call ptr addrspace(1)\n"
+                        + "  @new_instance(ptr %klass, ptr %thread)",
+                "%array =\n"
+                        + "  invoke token (i64, i32, ptr, i32, i32, ...)\n"
+                        + "  @llvm.experimental.gc.statepoint.p0("
                         + "i64 1, i32 0, "
                         + "ptr elementtype(ptr addrspace(1) (ptr, i32, ptr)) @new_array, "
                         + "i32 3, i32 0, ptr %arrayKlass, i32 7, ptr %thread)"
@@ -405,6 +465,8 @@ public class TestPEAHarnessSmoke {
                         + "ptr elementtype(ptr addrspace(1) (ptr, ptr)) @new_instance, "
                         + "i32 2, i32 0, ptr %klass, ptr %thread)",
                 "call void %fp(ptr @new_array)",
+                "store i32 1, ptr %out",
+                "call void @resultless.lowered.neighbor()",
                 "ret i32 1");
         Asserts.assertEquals(body.loweredAllocCount(), 3,
                 "direct and statepoint allocation callees are counted exactly");
