@@ -102,7 +102,7 @@ public class TestPEAMergedAllocationIdentity {
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
         PEATestUtils.PEARound first = report.round(0);
-        assertRound0Stats(report, target, 3, 0, 0);
+        assertRound0Stats(report, target, 2, 0, 0);
 
         Asserts.assertEquals(first.before().peaAllocCount(), 2,
                 target + ": two source allocations before PEA");
