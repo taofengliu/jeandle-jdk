@@ -37,6 +37,7 @@
 #include "asm/macroAssembler.hpp"
 #include "ci/ciEnv.hpp"
 #include "ci/ciInstanceKlass.hpp"
+#include "ci/ciUtilities.inline.hpp"
 #include "code/vmreg.inline.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
@@ -695,11 +696,14 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
     // should_reexecute flag goes first (explicitly set by intrinsic lowering to match C2 behavior).
     // Pushed as i64 on the frontend side so it can't be mistaken for a duplicated-bci marker
     // (see JeandleAbstractInterpreter::deopt_args), so read it with the wide-constant accessor.
+    assert(location != record->location_end(), "must be in range");
     bool forced_reexecute = (StackMapUtil::getConstantUlong(stackmaps, *(location++)) != 0);
     num_deopts--;
 
     // bci goes next in deopt operands
+    assert(location != record->location_end(), "must be in range");
     bci = (location++)->getSmallConstant();
+    assert(location != record->location_end(), "must be in range");
     guarantee(bci == (int)((location++)->getSmallConstant()), "duplicated bci must match");
     num_deopts -= 2;
 
@@ -883,7 +887,9 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
         Klass* klass = (Klass*)klass_raw;
         const bool is_array =
             klass->is_typeArray_klass() || klass->is_objArray_klass();
-        ciKlass* ci_k = ciEnv::current()->get_klass_for_klass(klass);
+
+        VM_ENTRY_MARK;
+        ciKlass* ci_k = ciEnv::current()->get_klass(klass);
         assert(ci_k != nullptr && ci_k->is_loaded(),
                "PEA VO klass must be loaded");
         ConstantOopWriteValue* klass_sv = new ConstantOopWriteValue(

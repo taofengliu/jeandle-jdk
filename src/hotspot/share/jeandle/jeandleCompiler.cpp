@@ -134,7 +134,7 @@ void JeandleCompiler::initialize() {
       assert(DynamicLibrary::SearchForAddressOfSymbol(routine_entry.first().data()) == nullptr, "overlapping symbol");
     }
 #endif
-    register_jeandle_vm_callbacks();
+    JeandleVMCallback::register_callbacks();
     set_state(initialized);
   }
 }

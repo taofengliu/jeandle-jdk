@@ -113,6 +113,37 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_dlog10:
     case vmIntrinsics::_dexp:
 
+    // min/max: no CPU gating needed. llvm.smin/smax always lower to a
+    // compare+select/cmov sequence and llvm.minimum/maximum always lower to
+    // a NaN/signed-zero-correct sequence on every target Jeandle supports;
+    // neither ever falls back to a libcall the way llvm.floor/ceil/rint can.
+    // Math and StrictMath share the same vmIntrinsics ID space and identical
+    // javadoc-specified semantics here (strictfp has no effect on min/max),
+    // so one lowering covers both.
+    case vmIntrinsics::_min:
+    case vmIntrinsics::_max:
+    case vmIntrinsics::_min_strict:
+    case vmIntrinsics::_max_strict:
+    case vmIntrinsics::_minF:
+    case vmIntrinsics::_maxF:
+    case vmIntrinsics::_minD:
+    case vmIntrinsics::_maxD:
+    case vmIntrinsics::_minF_strict:
+    case vmIntrinsics::_maxF_strict:
+    case vmIntrinsics::_minD_strict:
+    case vmIntrinsics::_maxD_strict:
+
+    // fmaD/fmaF: no separate cpu_supports_fma() gate needed. Unlike
+    // rounding/popcount (which have no shared-infrastructure flag check),
+    // vmIntrinsics::is_disabled_by_flags() already requires UseFMA for these
+    // two IDs and runs unconditionally after is_supported() in
+    // try_lower_intrinsic(), so a hardware-less target is rejected there.
+    // (apply_vm_flag_feature_overrides() also strips the LLVM "fma" target
+    // feature when UseFMA is off, so even a hypothetical direct call here
+    // would still lower correctly, just via a libcall instead of hardware.)
+    case vmIntrinsics::_fmaD:
+    case vmIntrinsics::_fmaF:
+
     // getClass
     case vmIntrinsics::_getClass:
 
@@ -152,6 +183,12 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_numberOfTrailingZeros_i:
     case vmIntrinsics::_numberOfTrailingZeros_l:
 
+    // reverseBytes: full-width variants are direct bswap; narrow variants need
+    // explicit zero/sign-extension semantics.
+    case vmIntrinsics::_reverseBytes_i:
+    case vmIntrinsics::_reverseBytes_l:
+    case vmIntrinsics::_reverseBytes_s:
+    case vmIntrinsics::_reverseBytes_c:
     // addExact
     case vmIntrinsics::_addExactI:
     case vmIntrinsics::_addExactL:
@@ -214,6 +251,36 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
       return emit_llvm_builtin(llvm::Intrinsic::abs,
                                 {_interp->_ir_builder.getInt1(false)});
 
+    // Math/StrictMath.min|max(int,int): plain two's-complement signed min/max,
+    // identical for both classes.
+    case vmIntrinsics::_min:
+    case vmIntrinsics::_min_strict:
+      return emit_llvm_builtin(llvm::Intrinsic::smin);
+    case vmIntrinsics::_max:
+    case vmIntrinsics::_max_strict:
+      return emit_llvm_builtin(llvm::Intrinsic::smax);
+
+    // Math/StrictMath.min|max(float|double,...): llvm.minimum/maximum
+    // implement IEEE-754-2019 minimum/maximum (NaN propagates, -0.0 < +0.0),
+    // matching the Math.{min,max} javadoc contract exactly.
+    case vmIntrinsics::_minF:
+    case vmIntrinsics::_minF_strict:
+    case vmIntrinsics::_minD:
+    case vmIntrinsics::_minD_strict:
+      return emit_llvm_builtin(llvm::Intrinsic::minimum);
+    case vmIntrinsics::_maxF:
+    case vmIntrinsics::_maxF_strict:
+    case vmIntrinsics::_maxD:
+    case vmIntrinsics::_maxD_strict:
+      return emit_llvm_builtin(llvm::Intrinsic::maximum);
+
+    // Math.fma(float|double,...): llvm.fma is always a correctly-rounded
+    // single-rounding fused multiply-add (never contracted like
+    // llvm.fmuladd), matching the Math.fma javadoc contract.
+    case vmIntrinsics::_fmaD:
+    case vmIntrinsics::_fmaF:
+      return emit_llvm_builtin(llvm::Intrinsic::fma);
+
     case vmIntrinsics::_bitCount_i:
     case vmIntrinsics::_bitCount_l:
       return lower_bit_count(id);
@@ -224,6 +291,16 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_numberOfTrailingZeros_i:
     case vmIntrinsics::_numberOfTrailingZeros_l:
       return lower_count_zeros(id, llvm::Intrinsic::cttz);
+
+    // Keep full-width variants as direct IR instead of relying on fallback
+    // invoke inlining to recover llvm.bswap.
+    case vmIntrinsics::_reverseBytes_i:
+    case vmIntrinsics::_reverseBytes_l:
+      return emit_llvm_builtin(llvm::Intrinsic::bswap);
+    // char/short need a narrow swap plus zero/sign extension (see handler).
+    case vmIntrinsics::_reverseBytes_c:
+    case vmIntrinsics::_reverseBytes_s:
+      return lower_reverse_bytes_narrow(id);
 
     // Dual-path libm (JeandleUseHotspotIntrinsics selects the path)
     // TODO/FIXME: LLVM's `llvm.sin`, `llvm.cos`, etc. do **not** guarantee
@@ -636,6 +713,24 @@ bool JeandleIntrinsicLowering::lower_count_zeros(vmIntrinsics::ID id,
   } else {
     _interp->_jvm->ipush(call);
   }
+  return true;
+}
+
+// ---- lower_reverse_bytes_narrow ----
+// Character.reverseBytes(char) / Short.reverseBytes(short). The value sits on
+// the operand stack as a computational int, but only the low 16 bits are
+// meaningful. Swap those bits as i16, then restore Java's zero/sign extension.
+bool JeandleIntrinsicLowering::lower_reverse_bytes_narrow(vmIntrinsics::ID id) {
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  bool is_char = (id == vmIntrinsics::_reverseBytes_c);
+
+  llvm::Value* arg = _interp->_jvm->ipop();
+  llvm::Value* narrow = builder.CreateTrunc(arg, builder.getInt16Ty());
+  llvm::Value* swapped =
+      builder.CreateIntrinsic(builder.getInt16Ty(), llvm::Intrinsic::bswap, {narrow});
+  llvm::Value* result = is_char ? builder.CreateZExt(swapped, builder.getInt32Ty())
+                                : builder.CreateSExt(swapped, builder.getInt32Ty());
+  _interp->_jvm->ipush(result);
   return true;
 }
 
