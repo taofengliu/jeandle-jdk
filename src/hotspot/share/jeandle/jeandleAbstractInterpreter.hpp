@@ -485,7 +485,12 @@ class JeandleAbstractInterpreter : public StackObj {
   void monitorenter();
   void monitorexit();
 
+  // Assert that an object is non-null: continue on the non-null path and
+  // route the null path to the null-check failure handler.
   void null_check(llvm::Value* obj);
+  // Assert that an object is null: keep the null path and deoptimize the
+  // unexpected non-null path.
+  void null_assert(llvm::Value* obj);
 
   void zero_check(llvm::Value* divisor);
 

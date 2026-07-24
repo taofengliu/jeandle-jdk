@@ -2367,9 +2367,7 @@ void JeandleAbstractInterpreter::checkcast() {
   ciKlass* ci_super_klass = _bytecodes.get_klass(will_link);
 
   if (!will_link) {
-    uncommon_trap(Deoptimization::Reason_unloaded,
-                  Deoptimization::Action_reinterpret);
-    _block->set(JeandleBasicBlock::always_uncommon_trap);
+    null_assert(obj);
     return;
   }
 
@@ -2404,9 +2402,9 @@ void JeandleAbstractInterpreter::instanceof(int klass_index) {
   ciKlass* ci_super_klass = _bytecodes.get_klass(will_link);
 
   if (!will_link) {
-    uncommon_trap(Deoptimization::Reason_unloaded,
-                  Deoptimization::Action_reinterpret);
-    _block->set(JeandleBasicBlock::always_uncommon_trap);
+    null_assert(obj);
+    _jvm->apop(); // Object was already fetched by raw_peek().
+    _jvm->ipush(JeandleType::int_const(_ir_builder, 0));
     return;
   }
 
@@ -3674,6 +3672,29 @@ void JeandleAbstractInterpreter::null_check(llvm::Value* obj) {
 
   _ir_builder.SetInsertPoint(null_check_pass);
   _block->set_tail_llvm_block(null_check_pass);
+}
+
+void JeandleAbstractInterpreter::null_assert(llvm::Value* obj) {
+  assert(obj->getType() == llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace), "must be a java object");
+
+  int cur_bci = _bytecodes.cur_bci();
+  llvm::BasicBlock* null_assert_pass = llvm::BasicBlock::Create(*_context,
+                                                                 "bci_" + std::to_string(cur_bci) + "_null_assert_pass",
+                                                                 _llvm_func);
+  llvm::BasicBlock* null_assert_fail = llvm::BasicBlock::Create(*_context,
+                                                                 "bci_" + std::to_string(cur_bci) + "_null_assert_fail",
+                                                                 _llvm_func);
+  llvm::Value* is_null = _ir_builder.CreateIsNull(obj);
+  _ir_builder.CreateCondBr(is_null, null_assert_pass, null_assert_fail);
+
+  // The type-flow path says the operand must be null, so only an unexpected
+  // non-null value deoptimizes and makes this compilation not entrant.
+  uncommon_trap(Deoptimization::Reason_null_assert,
+                Deoptimization::Action_make_not_entrant,
+                null_assert_fail);
+
+  _ir_builder.SetInsertPoint(null_assert_pass);
+  _block->set_tail_llvm_block(null_assert_pass);
 }
 
 void JeandleAbstractInterpreter::zero_check(llvm::Value* divisor) {
