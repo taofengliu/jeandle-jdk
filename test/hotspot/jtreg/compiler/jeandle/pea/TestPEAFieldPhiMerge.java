@@ -1,0 +1,427 @@
+/*
+ * Copyright (c) 2026, the Jeandle-JDK Authors. All Rights Reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+/*
+ * @test
+ * @summary PEA turns a never-escaping allocation's per-field uses into scalar
+ *          PHIs across 2/3/4-way merges, including reference fields (null vs
+ *          oop) and nested VORef fields (Case C); every PHI stays complete
+ * @library /test/lib /
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
+ * @run main/othervm -XX:-UseJeandleCompiler
+ *      compiler.jeandle.pea.TestPEAFieldPhiMerge
+ */
+
+package compiler.jeandle.pea;
+
+import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import jdk.test.lib.Asserts;
+
+public class TestPEAFieldPhiMerge {
+    private static final String WRAPPER =
+            "compiler.jeandle.pea.TestPEAFieldPhiMerge$TestWrapper";
+    private static final String LLVM_NAME =
+            "(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
+    private static final Pattern BLOCK_LABEL = Pattern.compile(
+            "^(" + LLVM_NAME + "):(?:\\s*;.*)?$");
+    private static final Pattern BLOCK_WITH_PREDECESSORS = Pattern.compile(
+            "^(" + LLVM_NAME + "):\\s*; preds = (.+)$");
+    private static final Pattern LLVM_BLOCK_REFERENCE = Pattern.compile(
+            "%(" + LLVM_NAME + ")");
+    private static final Pattern PHI_INCOMING_BLOCK = Pattern.compile(
+            ",\\s*%(" + LLVM_NAME + ")\\s*\\]");
+
+    public static void main(String[] args) throws Exception {
+        assertPhiParserContracts();
+
+        Method scalar = TestWrapper.class.getMethod("scalarFieldPhi",
+                boolean.class, int.class, int.class, long.class, long.class);
+        Method ref = TestWrapper.class.getMethod("refFieldPhi",
+                boolean.class, TestWrapper.Node.class, TestWrapper.Node.class);
+        Method nullOop = TestWrapper.class.getMethod("nullVsOopRefPhi", boolean.class);
+        Method sw3 = TestWrapper.class.getMethod("switchThreeFieldPhi", int.class);
+        Method sw4 = TestWrapper.class.getMethod("switchFourFieldPhi", int.class);
+        Method multi = TestWrapper.class.getMethod("multiFieldIndependentPhi",
+                boolean.class, int.class, int.class, int.class, int.class);
+        Method nested = TestWrapper.class.getMethod("nestedVORefPhi", boolean.class);
+        Method[] targets = {scalar, ref, nullOop, sw3, sw4, multi, nested};
+
+        PEATestUtils.behaviorRun(WRAPPER, targets).runPEAOnOffEquivalent();
+
+        // Case C (nestedVORefPhi) needs more than the default 2 outer iterations
+        // to reach a transform-idle fixpoint (round 0 materializes both virtuals
+        // at the merge, round 1 synthesizes the synthetic VO, round 2 settles),
+        // so request 4 for the shape run. The behavior run keeps the default to
+        // validate the production setting. See Jeandle-PEA-Lessons-Learned.md §15.
+        try (PEATestUtils.RunResult run =
+                PEATestUtils.shapeRun(WRAPPER, targets).peaIterations(4).run()) {
+            assertNeverEscapeMerge(run, scalar);
+            assertNeverEscapeMerge(run, ref);
+            assertNullVsOop(run, nullOop);
+            assertNeverEscapeMerge(run, sw3);
+            assertNeverEscapeMerge(run, sw4);
+            assertNeverEscapeMerge(run, multi);
+            assertNeverEscapeMerge(run, nested);
+        }
+    }
+
+    private static void assertNullVsOop(PEATestUtils.RunResult run, Method target)
+            throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        // The RefHolder stays NeverEscape (eliminated). Its `ref` field is a
+        // [VirtualRef(n), null] merge; merging a virtual ref with a non-virtual
+        // (null) materializes the inner Node n at the predecessor. This matches
+        // Graal's mergeObjectEntry, which ensureMaterialized's the inner virtual
+        // rather than keeping both objects virtual (as Case C would for two
+        // compatible virtuals — see nestedVORefPhi).
+        Asserts.assertEquals(before.allocationBCIs().size(), 2,
+                target + ": holder plus inner node source allocations");
+        Asserts.assertEquals(after.allocationBCIs().size(), 1,
+                target + ": holder eliminated, inner node retained");
+        Asserts.assertTrue(before.allocationBCIs().containsAll(after.allocationBCIs()),
+                target + ": retained allocation is a source allocation");
+        Asserts.assertTrue(report.round(0).neverEscapes() >= 1,
+                target + ": holder classified NeverEscape");
+        Asserts.assertTrue(report.round(0).partiallyEscapes() >= 1,
+                target + ": inner node materialized at the field merge");
+        after.assertAbsent("poison");
+        report.assertConverged();
+        assertVerifierShape(run, report, target);
+    }
+
+    private static void assertNeverEscapeMerge(PEATestUtils.RunResult run,
+                                               Method target) throws Exception {
+        PEATestUtils.PEAReport report = run.report(target);
+        PEATestUtils.IRBody before = report.round0Before();
+        PEATestUtils.IRBody after = report.finalAfter();
+        Asserts.assertTrue(!before.allocationBCIs().isEmpty(),
+                target + ": method has at least one source allocation");
+        int sourceCount = before.allocationBCIs().size();
+        Asserts.assertTrue(after.allocationBCIs().isEmpty(),
+                target + ": NeverEscape field-PHI merge eliminates all allocations");
+        after.assertAbsent("jeandle.new_instance");
+        after.assertAbsent("poison");
+        Asserts.assertEquals(report.round(0).effectCount("EliminateAllocation"),
+                (long) sourceCount, target + ": every source allocation eliminated");
+        report.assertConverged();
+        assertVerifierShape(run, report, target);
+    }
+
+    private static void assertVerifierShape(PEATestUtils.RunResult run,
+                                            PEATestUtils.PEAReport report,
+                                            Method target) throws Exception {
+        for (PEATestUtils.PEARound round : report.rounds()) {
+            round.after().assertAbsent("poison");
+            assertCompletePhis(round.after(), target);
+        }
+        PEATestUtils.IRBody finalIR = run.finalIR(target);
+        finalIR.assertAbsent("poison");
+        assertCompletePhis(finalIR, target);
+    }
+
+    private static void assertCompletePhis(PEATestUtils.IRBody body, Method target) {
+        validateCompletePhis(body.lines(), target.toString());
+    }
+
+    private static void validateCompletePhis(List<String> lines, String context) {
+        Map<String, Integer> currentPredecessors = null;
+        String currentBlock = null;
+        for (String line : lines) {
+            Matcher anyBlock = BLOCK_LABEL.matcher(line);
+            if (anyBlock.matches()) {
+                currentBlock = anyBlock.group(1);
+                currentPredecessors = null;
+            }
+            Matcher block = BLOCK_WITH_PREDECESSORS.matcher(line);
+            if (block.matches()) {
+                currentPredecessors = blockReferences(block.group(2));
+                continue;
+            }
+            if (!line.contains(" = phi ")) {
+                continue;
+            }
+            if (currentPredecessors == null) {
+                throw new IllegalStateException(context
+                        + ": PHI outside a block with printed predecessors: " + line);
+            }
+            Map<String, Integer> incomingBlocks = new HashMap<>();
+            Matcher incoming = PHI_INCOMING_BLOCK.matcher(line);
+            while (incoming.find()) {
+                incomingBlocks.merge(incoming.group(1), 1, Integer::sum);
+            }
+            if (!incomingBlocks.equals(currentPredecessors)) {
+                throw new IllegalStateException(context + ": PHI in block " + currentBlock
+                        + " has incoming predecessors " + incomingBlocks
+                        + ", expected " + currentPredecessors + ": " + line);
+            }
+        }
+    }
+
+    private static Map<String, Integer> blockReferences(String text) {
+        Map<String, Integer> result = new HashMap<>();
+        Matcher reference = LLVM_BLOCK_REFERENCE.matcher(text);
+        while (reference.find()) {
+            result.merge(reference.group(1), 1, Integer::sum);
+        }
+        if (result.isEmpty()) {
+            throw new IllegalStateException("Printed predecessor list has no block reference: "
+                    + text);
+        }
+        return result;
+    }
+
+    private static void assertPhiParserContracts() {
+        List<String> complete = List.of(
+                "merge: ; preds = %left, %left, %\"right path\"",
+                "%value = phi i32 [ 1, %left ], [ 2, %\"right path\" ], [ 3, %left ]");
+        validateCompletePhis(complete, "complete synthetic PHI");
+
+        List<String> duplicateOneMissingOne = List.of(
+                "merge: ; preds = %left, %left, %\"right path\"",
+                "%value = phi i32 [ 1, %left ], [ 2, %left ], [ 3, %left ]");
+        boolean rejected = false;
+        try {
+            validateCompletePhis(duplicateOneMissingOne,
+                    "duplicate-one-missing-one synthetic PHI");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "PHI parser must reject equal-size predecessor multisets with a missing block");
+
+        List<String> missingPrintedPredecessors = List.of(
+                "with_preds: ; preds = %left, %right",
+                "%good = phi i32 [ 1, %left ], [ 2, %right ]",
+                "plain:",
+                "%stale = phi i32 [ 1, %left ], [ 2, %right ]");
+        rejected = false;
+        try {
+            validateCompletePhis(missingPrintedPredecessors,
+                    "new-block predecessor reset synthetic PHI");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "PHI parser must reset predecessor information at every block label");
+    }
+
+    public static class TestWrapper {
+        private static final String EXPECTED_DIGEST = "6bac4ea7fed7154c";
+
+        public static class Node {
+            int x;
+        }
+
+        public static class ScalarHolder {
+            int i;
+            long j;
+        }
+
+        public static class RefHolder {
+            Node ref;
+        }
+
+        public static class TwoField {
+            int a;
+            int b;
+        }
+
+        public static class Wrapper {
+            Node child;
+        }
+
+        public static void main(String[] args) throws Exception {
+            new Node();
+            new ScalarHolder();
+            new RefHolder();
+            new TwoField();
+            new Wrapper();
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+
+            long digest = 0x254F0D7CDB10CBF1L;
+            for (int seed : new int[] {0, 9}) {
+                int ai = seed + 1;
+                int bi = seed + 2;
+                long aj = seed + 100L;
+                long bj = seed + 200L;
+                int a1 = seed + 3;
+                int a2 = seed + 4;
+                int b1 = seed + 5;
+                int b2 = seed + 6;
+
+                Node extA = new Node();
+                extA.x = seed + 11;
+                Node extB = new Node();
+                extB.x = seed + 22;
+
+                for (boolean which : new boolean[] {false, true}) {
+                    int r = scalarFieldPhi(which, ai, bi, aj, bj);
+                    int exp = (which ? ai : bi) * 31 + (int) (which ? aj : bj);
+                    Asserts.assertEquals(r, exp, "scalarFieldPhi");
+                    digest = mix(digest, r);
+                }
+                for (boolean which : new boolean[] {false, true}) {
+                    int r = refFieldPhi(which, extA, extB);
+                    Asserts.assertEquals(r, which ? extA.x : extB.x, "refFieldPhi");
+                    digest = mix(digest, r);
+                }
+                for (boolean which : new boolean[] {false, true}) {
+                    int r = nullVsOopRefPhi(which);
+                    Asserts.assertEquals(r, which ? 7 : -1, "nullVsOopRefPhi");
+                    digest = mix(digest, r);
+                }
+                for (int sel : new int[] {0, 1, 2}) {
+                    int r = switchThreeFieldPhi(sel);
+                    Asserts.assertEquals(r, sel == 0 ? 10 : sel == 1 ? 20 : 30,
+                            "switchThreeFieldPhi");
+                    digest = mix(digest, r);
+                }
+                for (int sel : new int[] {0, 1, 2, 3}) {
+                    int r = switchFourFieldPhi(sel);
+                    Asserts.assertEquals(r, sel == 0 ? 11 : sel == 1 ? 22
+                            : sel == 2 ? 33 : 44, "switchFourFieldPhi");
+                    digest = mix(digest, r);
+                }
+                for (boolean which : new boolean[] {false, true}) {
+                    int r = multiFieldIndependentPhi(which, a1, a2, b1, b2);
+                    Asserts.assertEquals(r, which ? a1 * 31 + a2 : b1 * 31 + b2,
+                            "multiFieldIndependentPhi");
+                    digest = mix(digest, r);
+                }
+                for (boolean which : new boolean[] {false, true}) {
+                    int r = nestedVORefPhi(which);
+                    Asserts.assertEquals(r, which ? 1 : 2, "nestedVORefPhi");
+                    digest = mix(digest, r);
+                }
+            }
+
+            String payload = Long.toUnsignedString(digest, 16);
+            Asserts.assertEquals(payload, EXPECTED_DIGEST, "behavior digest");
+            System.out.println("PEA-RESULT:" + payload);
+        }
+
+        public static int scalarFieldPhi(boolean which, int ai, int bi, long aj, long bj) {
+            ScalarHolder h = new ScalarHolder();
+            if (which) {
+                h.i = ai;
+                h.j = aj;
+            } else {
+                h.i = bi;
+                h.j = bj;
+            }
+            return h.i * 31 + (int) h.j;
+        }
+
+        public static int refFieldPhi(boolean which, Node a, Node b) {
+            RefHolder h = new RefHolder();
+            if (which) {
+                h.ref = a;
+            } else {
+                h.ref = b;
+            }
+            return h.ref.x;
+        }
+
+        public static int nullVsOopRefPhi(boolean which) {
+            RefHolder h = new RefHolder();
+            if (which) {
+                Node n = new Node();
+                n.x = 7;
+                h.ref = n;
+            } else {
+                h.ref = null;
+            }
+            return h.ref == null ? -1 : h.ref.x;
+        }
+
+        public static int switchThreeFieldPhi(int sel) {
+            ScalarHolder h = new ScalarHolder();
+            switch (sel) {
+                case 0:
+                    h.i = 10;
+                    break;
+                case 1:
+                    h.i = 20;
+                    break;
+                default:
+                    h.i = 30;
+            }
+            return h.i;
+        }
+
+        public static int switchFourFieldPhi(int sel) {
+            ScalarHolder h = new ScalarHolder();
+            switch (sel) {
+                case 0:
+                    h.i = 11;
+                    break;
+                case 1:
+                    h.i = 22;
+                    break;
+                case 2:
+                    h.i = 33;
+                    break;
+                default:
+                    h.i = 44;
+            }
+            return h.i;
+        }
+
+        public static int multiFieldIndependentPhi(boolean which,
+                                                   int a1, int a2, int b1, int b2) {
+            TwoField h = new TwoField();
+            if (which) {
+                h.a = a1;
+                h.b = a2;
+            } else {
+                h.a = b1;
+                h.b = b2;
+            }
+            return h.a * 31 + h.b;
+        }
+
+        public static int nestedVORefPhi(boolean which) {
+            Wrapper w = new Wrapper();
+            if (which) {
+                Node a = new Node();
+                a.x = 1;
+                w.child = a;
+            } else {
+                Node b = new Node();
+                b.x = 2;
+                w.child = b;
+            }
+            return w.child.x;
+        }
+
+        private static long mix(long digest, int value) {
+            return Long.rotateLeft(digest ^ Integer.toUnsignedLong(value), 23)
+                    * 0x9E3779B97F4A7C15L;
+        }
+    }
+}
