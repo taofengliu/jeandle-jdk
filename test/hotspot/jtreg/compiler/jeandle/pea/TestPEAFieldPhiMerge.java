@@ -32,30 +32,15 @@
 package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import jdk.test.lib.Asserts;
 
 public class TestPEAFieldPhiMerge {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEAFieldPhiMerge$TestWrapper";
-    private static final String LLVM_NAME =
-            "(?:[-A-Za-z$._0-9]+|\"(?:[^\"\\\\]|\\\\.)*\")";
-    private static final Pattern BLOCK_LABEL = Pattern.compile(
-            "^(" + LLVM_NAME + "):(?:\\s*;.*)?$");
-    private static final Pattern BLOCK_WITH_PREDECESSORS = Pattern.compile(
-            "^(" + LLVM_NAME + "):\\s*; preds = (.+)$");
-    private static final Pattern LLVM_BLOCK_REFERENCE = Pattern.compile(
-            "%(" + LLVM_NAME + ")");
-    private static final Pattern PHI_INCOMING_BLOCK = Pattern.compile(
-            ",\\s*%(" + LLVM_NAME + ")\\s*\\]");
 
     public static void main(String[] args) throws Exception {
-        assertPhiParserContracts();
+        PEATestUtils.assertPhiParserContracts();
 
         Method scalar = TestWrapper.class.getMethod("scalarFieldPhi",
                 boolean.class, int.class, int.class, long.class, long.class);
@@ -137,97 +122,11 @@ public class TestPEAFieldPhiMerge {
                                             Method target) throws Exception {
         for (PEATestUtils.PEARound round : report.rounds()) {
             round.after().assertAbsent("poison");
-            assertCompletePhis(round.after(), target);
+            PEATestUtils.assertCompletePhis(round.after(), target.toString());
         }
         PEATestUtils.IRBody finalIR = run.finalIR(target);
         finalIR.assertAbsent("poison");
-        assertCompletePhis(finalIR, target);
-    }
-
-    private static void assertCompletePhis(PEATestUtils.IRBody body, Method target) {
-        validateCompletePhis(body.lines(), target.toString());
-    }
-
-    private static void validateCompletePhis(List<String> lines, String context) {
-        Map<String, Integer> currentPredecessors = null;
-        String currentBlock = null;
-        for (String line : lines) {
-            Matcher anyBlock = BLOCK_LABEL.matcher(line);
-            if (anyBlock.matches()) {
-                currentBlock = anyBlock.group(1);
-                currentPredecessors = null;
-            }
-            Matcher block = BLOCK_WITH_PREDECESSORS.matcher(line);
-            if (block.matches()) {
-                currentPredecessors = blockReferences(block.group(2));
-                continue;
-            }
-            if (!line.contains(" = phi ")) {
-                continue;
-            }
-            if (currentPredecessors == null) {
-                throw new IllegalStateException(context
-                        + ": PHI outside a block with printed predecessors: " + line);
-            }
-            Map<String, Integer> incomingBlocks = new HashMap<>();
-            Matcher incoming = PHI_INCOMING_BLOCK.matcher(line);
-            while (incoming.find()) {
-                incomingBlocks.merge(incoming.group(1), 1, Integer::sum);
-            }
-            if (!incomingBlocks.equals(currentPredecessors)) {
-                throw new IllegalStateException(context + ": PHI in block " + currentBlock
-                        + " has incoming predecessors " + incomingBlocks
-                        + ", expected " + currentPredecessors + ": " + line);
-            }
-        }
-    }
-
-    private static Map<String, Integer> blockReferences(String text) {
-        Map<String, Integer> result = new HashMap<>();
-        Matcher reference = LLVM_BLOCK_REFERENCE.matcher(text);
-        while (reference.find()) {
-            result.merge(reference.group(1), 1, Integer::sum);
-        }
-        if (result.isEmpty()) {
-            throw new IllegalStateException("Printed predecessor list has no block reference: "
-                    + text);
-        }
-        return result;
-    }
-
-    private static void assertPhiParserContracts() {
-        List<String> complete = List.of(
-                "merge: ; preds = %left, %left, %\"right path\"",
-                "%value = phi i32 [ 1, %left ], [ 2, %\"right path\" ], [ 3, %left ]");
-        validateCompletePhis(complete, "complete synthetic PHI");
-
-        List<String> duplicateOneMissingOne = List.of(
-                "merge: ; preds = %left, %left, %\"right path\"",
-                "%value = phi i32 [ 1, %left ], [ 2, %left ], [ 3, %left ]");
-        boolean rejected = false;
-        try {
-            validateCompletePhis(duplicateOneMissingOne,
-                    "duplicate-one-missing-one synthetic PHI");
-        } catch (IllegalStateException expected) {
-            rejected = true;
-        }
-        Asserts.assertTrue(rejected,
-                "PHI parser must reject equal-size predecessor multisets with a missing block");
-
-        List<String> missingPrintedPredecessors = List.of(
-                "with_preds: ; preds = %left, %right",
-                "%good = phi i32 [ 1, %left ], [ 2, %right ]",
-                "plain:",
-                "%stale = phi i32 [ 1, %left ], [ 2, %right ]");
-        rejected = false;
-        try {
-            validateCompletePhis(missingPrintedPredecessors,
-                    "new-block predecessor reset synthetic PHI");
-        } catch (IllegalStateException expected) {
-            rejected = true;
-        }
-        Asserts.assertTrue(rejected,
-                "PHI parser must reset predecessor information at every block label");
+        PEATestUtils.assertCompletePhis(finalIR, target.toString());
     }
 
     public static class TestWrapper {
