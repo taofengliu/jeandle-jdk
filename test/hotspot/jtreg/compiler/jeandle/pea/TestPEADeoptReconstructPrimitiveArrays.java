@@ -115,7 +115,7 @@ public class TestPEADeoptReconstructPrimitiveArrays {
             int baseOffset, int indexScale, PEATestUtils.DeoptBasicType type,
             String operandPrefix, List<String> exactOperands) throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
         List<Integer> sourceBCIs = before.allocationBCIs();

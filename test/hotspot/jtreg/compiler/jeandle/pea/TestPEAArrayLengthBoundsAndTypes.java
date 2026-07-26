@@ -85,7 +85,7 @@ public class TestPEAArrayLengthBoundsAndTypes {
                 .maxArrayLength(ARRAY_CAP)
                 .run()) {
             for (Method target : targets) {
-                run.report(target).assertConverged();
+                run.report(target).assertFinalTransformIdle();
             }
             for (Method target : new Method[] {
                     length0, length1, length127, length128, constantBounds,

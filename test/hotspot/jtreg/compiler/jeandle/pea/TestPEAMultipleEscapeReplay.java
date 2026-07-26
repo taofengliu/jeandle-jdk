@@ -96,7 +96,7 @@ public class TestPEAMultipleEscapeReplay {
         Asserts.assertTrue(report.round(0).effectCount("Materialize", "[VO=0]") >= 1,
                 target + ": object materialized at least once");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

@@ -74,7 +74,7 @@ public class TestDuringCallDeoptIdentity {
             PEATestUtils.RunResult run, Method target, Method callee)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();

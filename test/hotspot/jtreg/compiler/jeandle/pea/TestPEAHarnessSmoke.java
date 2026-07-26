@@ -721,6 +721,9 @@ public class TestPEAHarnessSmoke {
                 stats(first, 0, 0, 0),
                 after(first, 1),
                 function(first, "%twice = add i32 %x, %x", "ret i32 %twice"),
+                summary(extra, 1, "fixpoint"),
+                summary(overloaded, 1, "iteration-cap"),
+                summary(first, 2, "fixpoint"),
                 "");
 
         PEATestUtils.PEAReport report = PEATestUtils.PEAReport.parse(
@@ -731,6 +734,19 @@ public class TestPEAHarnessSmoke {
         Asserts.assertEquals(report.report(first).round(1).neverEscapes(), 0);
         Asserts.assertEquals(report.report(first).effects("EliminateAllocation").size(), 1);
         Asserts.assertEquals(report.report(overloaded).effects("EliminateAllocation").size(), 1);
+        Asserts.assertEquals(report.report(first).stopReason(),
+                PEATestUtils.PEAStopReason.FIXPOINT);
+        Asserts.assertEquals(report.report(overloaded).stopReason(),
+                PEATestUtils.PEAStopReason.ITERATION_CAP);
+        Asserts.assertEquals(report.report(first).transformChangedRoundCount(), 1);
+        Asserts.assertEquals(report.report(first).transformIdleRoundCount(), 1);
+        report.report(first).assertFinalTransformIdle();
+        report.report(first).assertStoppedAtFixpoint();
+        report.report(overloaded).assertStoppedAtIterationCap();
+        expectFailure("fixpoint assertion rejects iteration cap",
+                () -> report.report(overloaded).assertStoppedAtFixpoint());
+        expectFailure("iteration-cap assertion rejects fixpoint",
+                () -> report.report(first).assertStoppedAtIterationCap());
 
         PEATestUtils.IRBody before = report.report(first).round0Before();
         PEATestUtils.IRBody after = report.report(first).finalAfter();
@@ -749,6 +765,7 @@ public class TestPEAHarnessSmoke {
 
     private static void testMalformedTranscripts(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.MethodId other = PEATestUtils.MethodId.osr(method);
         String body = function(id, "ret i32 1");
         String stat = stats(id, 0, 0, 0);
 
@@ -767,14 +784,40 @@ public class TestPEAHarnessSmoke {
                 String.join("\n", before(id, 0), body,
                         after(id, 0, false), body), id));
         PEATestUtils.PEAReport.parse(String.join("\n",
-                before(id, 0), body, after(id, 0), body), id)
-                .report(id).assertConverged();
+                before(id, 0), body, after(id, 0), body,
+                summary(id, 1, "fixpoint")), id)
+                .report(id).assertFinalTransformIdle();
         expectFailure("gapped rounds", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat, after(id, 0), body,
                         before(id, 2), body, stat, after(id, 2), body), id));
-        expectFailure("non-converged report", () -> PEATestUtils.PEAReport.parse(
+        expectFailure("active final transform", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, stat,
-                        after(id, 0, false), body), id).report(id).assertConverged());
+                        after(id, 0, false), body, summary(id, 1, "iteration-cap")), id)
+                .report(id).assertFinalTransformIdle());
+        expectFailure("fixpoint requires an idle final transform",
+                () -> PEATestUtils.PEAReport.parse(
+                        String.join("\n", before(id, 0), body, stat,
+                                after(id, 0, false), body, summary(id, 1, "fixpoint")), id));
+        expectFailure("missing summary", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, after(id, 0), body), id));
+        expectFailure("duplicate summary", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, after(id, 0), body,
+                        summary(id, 1, "fixpoint"), summary(id, 1, "fixpoint")), id));
+        expectFailure("unknown summary stop reason", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, after(id, 0), body,
+                        summary(id, 1, "unknown")), id));
+        expectFailure("summary round mismatch", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, after(id, 0), body,
+                        summary(id, 2, "fixpoint")), id));
+        expectFailure("malformed summary before valid summary", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, after(id, 0), body,
+                        ";; PEA-SUMMARY function " + id.llvmFunctionName()
+                                + " rounds=1",
+                        summary(id, 1, "fixpoint")), id));
+        expectFailure("interleaved summary before after marker", () -> PEATestUtils.PEAReport.parse(
+                String.join("\n", before(id, 0), body, stat,
+                        summary(other, 1, "fixpoint"), after(id, 0), body,
+                        summary(id, 1, "fixpoint")), id));
     }
 
     private static void testLockReplayParser(Method noArgs, Method complex) {
@@ -824,7 +867,9 @@ public class TestPEAHarnessSmoke {
                 stats(first, 0, 0, 0),
                 lockReplay(first, laterRound),
                 after(first, 1),
-                function(first, "ret i32 1"));
+                function(first, "ret i32 1"),
+                summary(overloaded, 1, "iteration-cap"),
+                summary(first, 2, "fixpoint"));
 
         PEATestUtils.PEAReport reports = PEATestUtils.PEAReport.parse(
                 transcript, first, overloaded);
@@ -921,6 +966,7 @@ public class TestPEAHarnessSmoke {
         lines.addAll(List.of(replays));
         lines.add(after(id, 0));
         lines.add(function(id, "ret i32 1"));
+        lines.add(summary(id, 1, "fixpoint"));
         PEATestUtils.PEAReport.parse(String.join("\n", lines), id);
     }
 
@@ -1224,6 +1270,11 @@ public class TestPEAHarnessSmoke {
                 + " transform_idle=" + transformIdle;
     }
 
+    private static String summary(PEATestUtils.MethodId id, int rounds, String stop) {
+        return ";; PEA-SUMMARY function " + id.llvmFunctionName()
+                + " rounds=" + rounds + " stop=" + stop;
+    }
+
     private static String stats(PEATestUtils.MethodId id, int never, int partial, int always) {
         return ";; PEA stats @" + id.llvmFunctionName() + ": NeverEscapes=" + never
                 + " PartiallyEscapes=" + partial + " AlwaysEscapes=" + always;
@@ -1254,7 +1305,7 @@ public class TestPEAHarnessSmoke {
         String body = function(id, instructions);
         String transcript = String.join("\n",
                 before(id, 0), body, stats(id, 0, 0, 0),
-                after(id, 0), body);
+                after(id, 0), body, summary(id, 1, "fixpoint"));
         return PEATestUtils.PEAReport.parse(transcript, id).report(id).round0Before();
     }
 

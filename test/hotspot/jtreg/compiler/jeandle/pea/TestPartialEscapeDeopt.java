@@ -76,7 +76,7 @@ public class TestPartialEscapeDeopt {
             PEATestUtils.RunResult run, Method target, Method requestDeopt)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         List<Integer> sourceBCIs = report.round0Before().allocationBCIs();
         Asserts.assertEquals(sourceBCIs.size(), 1,
                 target + ": one source Point allocation");

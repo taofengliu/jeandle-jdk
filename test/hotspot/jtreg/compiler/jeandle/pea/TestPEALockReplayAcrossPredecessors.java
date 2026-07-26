@@ -108,7 +108,7 @@ public class TestPEALockReplayAcrossPredecessors {
             PEATestUtils.RunResult run, Method target, Method sink,
             List<List<Integer>> expectedReceivers, int expectedPredecessors) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody input = report.round0Before();
         List<Integer> allocationBCIs = input.allocationBCIs();
         Asserts.assertEquals(allocationBCIs.size(), expectedPredecessors + 1,

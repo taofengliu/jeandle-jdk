@@ -81,7 +81,7 @@ public class TestPEALoopAllocationReset {
         after.assertAbsent("poison");
         Asserts.assertTrue(report.maxNeverEscapes() >= 1,
                 target + ": classified NeverEscape in some round");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -103,7 +103,7 @@ public class TestPEALoopAllocationReset {
         after.assertAbsent("poison");
         Asserts.assertTrue(report.maxPartiallyEscapes() >= 1,
                 target + ": carried chain classified PartiallyEscapes");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -116,7 +116,7 @@ public class TestPEALoopAllocationReset {
         Asserts.assertTrue(report.effects("Materialize").size() >= 1,
                 target + ": chain head materialized at the escape");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

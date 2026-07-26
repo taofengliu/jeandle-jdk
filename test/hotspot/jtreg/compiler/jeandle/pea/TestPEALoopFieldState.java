@@ -98,7 +98,7 @@ public class TestPEALoopFieldState {
         // edges leave every loop, so such a rule would defeat loop virtualization).
         Asserts.assertTrue(report.effects("Materialize").isEmpty(),
                 target + ": no loop-exit materialization");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody finalIR = run.finalIR(target);
         finalIR.assertAbsent("jeandle.new_instance");
         finalIR.assertAbsent("poison");

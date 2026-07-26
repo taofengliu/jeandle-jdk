@@ -103,6 +103,9 @@ public final class PEATestUtils {
             "^;; PEA stats @(.*): NeverEscapes=(\\d+) PartiallyEscapes=(\\d+)"
                     + " AlwaysEscapes=(\\d+)$"
     );
+    private static final Pattern SUMMARY = Pattern.compile(
+            "^;; PEA-SUMMARY function (.*?) rounds=(\\S+) stop=(\\S+)$"
+    );
     private static final Pattern EFFECT = Pattern.compile(
             "^PEA: (\\S+) function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
                     + "|[-A-Za-z$._0-9]+))(?:\\s+(.*))?$"
@@ -782,6 +785,20 @@ public final class PEATestUtils {
         }
     }
 
+    /** Why the iterative PEA driver stopped processing a function. */
+    public enum PEAStopReason {
+        FIXPOINT,
+        ITERATION_CAP;
+
+        private static PEAStopReason parse(MethodId method, String value) {
+            return switch (value) {
+                case "fixpoint" -> FIXPOINT;
+                case "iteration-cap" -> ITERATION_CAP;
+                default -> throw malformed(method, "unknown PEA summary stop reason: " + value);
+            };
+        }
+    }
+
     /** One logical consumer's associations within a physical replay batch/path. */
     public record PEALockReplayGroup(int logicalEscape, int batch, int source) {
         public PEALockReplayGroup {
@@ -1025,17 +1042,21 @@ public final class PEATestUtils {
     public static final class PEAReport {
         private final MethodId methodId;
         private final List<PEARound> rounds;
+        private final PEAStopReason stopReason;
         private final Map<MethodId, PEAReport> reports;
 
-        private PEAReport(MethodId methodId, List<PEARound> rounds) {
+        private PEAReport(MethodId methodId, List<PEARound> rounds,
+                          PEAStopReason stopReason) {
             this.methodId = methodId;
             this.rounds = List.copyOf(rounds);
+            this.stopReason = Objects.requireNonNull(stopReason);
             this.reports = Map.of();
         }
 
         private PEAReport(Map<MethodId, PEAReport> reports) {
             this.methodId = null;
             this.rounds = List.of();
+            this.stopReason = null;
             this.reports = Collections.unmodifiableMap(new LinkedHashMap<>(reports));
         }
 
@@ -1077,14 +1098,37 @@ public final class PEATestUtils {
             return rounds;
         }
 
-        public void assertConverged() {
+        public PEAStopReason stopReason() {
+            requireFunctionReport();
+            return stopReason;
+        }
+
+        public int transformChangedRoundCount() {
+            requireFunctionReport();
+            return (int) rounds.stream().filter(round -> !round.transformIdle()).count();
+        }
+
+        public int transformIdleRoundCount() {
+            requireFunctionReport();
+            return (int) rounds.stream().filter(PEARound::transformIdle).count();
+        }
+
+        public void assertFinalTransformIdle() {
             requireFunctionReport();
             PEARound last = rounds.get(rounds.size() - 1);
             if (!last.transformIdle()) {
-                throw new IllegalStateException("PEA did not converge for " + methodId
+                throw new IllegalStateException("PEA final transform is active for " + methodId
                         + ": final round " + last.iteration()
                         + " is not transform-idle");
             }
+        }
+
+        public void assertStoppedAtFixpoint() {
+            assertStopReason(PEAStopReason.FIXPOINT);
+        }
+
+        public void assertStoppedAtIterationCap() {
+            assertStopReason(PEAStopReason.ITERATION_CAP);
         }
 
         public PEARound round(int iteration) {
@@ -1154,13 +1198,72 @@ public final class PEATestUtils {
             }
         }
 
+        private void assertStopReason(PEAStopReason expected) {
+            requireFunctionReport();
+            if (stopReason != expected) {
+                throw new IllegalStateException("PEA stopped for " + methodId
+                        + " because of " + stopReason + ", expected " + expected);
+            }
+        }
+
         private static PEAReport parseFunction(List<String> lines, MethodId method) {
             ArrayList<PEARound> rounds = new ArrayList<>();
             RoundBuilder current = null;
             Capture capture = Capture.NONE;
             String function = method.llvmFunctionName();
+            PEAStopReason stopReason = null;
 
             for (String line : lines) {
+                if (line.startsWith(";; PEA-SUMMARY")) {
+                    Matcher summary = SUMMARY.matcher(line);
+                    if (!summary.matches()) {
+                        throw malformed(method, "malformed PEA summary: " + line);
+                    }
+                    if (!summary.group(1).equals(function)) {
+                        if (current != null && !current.afterSeen) {
+                            throw malformed(method,
+                                    "interleaved summary before after marker");
+                        }
+                        if (current != null) {
+                            rounds.add(current.finish(method));
+                            current = null;
+                        }
+                        capture = Capture.NONE;
+                        continue;
+                    }
+                    capture = Capture.NONE;
+                    if (stopReason != null) {
+                        throw malformed(method, "duplicate PEA summary");
+                    }
+                    if (current != null) {
+                        if (!current.afterSeen) {
+                            throw malformed(method, "PEA summary before after marker for round "
+                                    + current.iteration);
+                        }
+                        rounds.add(current.finish(method));
+                        current = null;
+                    }
+                    int summaryRounds;
+                    try {
+                        summaryRounds = Integer.parseInt(summary.group(2));
+                    } catch (NumberFormatException e) {
+                        throw malformed(method, "PEA summary round count overflows int: "
+                                + summary.group(2));
+                    }
+                    if (summaryRounds != rounds.size()) {
+                        throw malformed(method, "PEA summary round count mismatch: expected "
+                                + rounds.size() + ", got " + summaryRounds);
+                    }
+                    stopReason = PEAStopReason.parse(method, summary.group(3));
+                    if (stopReason == PEAStopReason.FIXPOINT
+                            && (rounds.isEmpty()
+                            || !rounds.get(rounds.size() - 1).transformIdle())) {
+                        throw malformed(method,
+                                "fixpoint summary requires an idle final transform");
+                    }
+                    continue;
+                }
+
                 Matcher marker = MARKER.matcher(line);
                 if (marker.matches()) {
                     String markerFunction = marker.group(3);
@@ -1175,6 +1278,10 @@ public final class PEATestUtils {
                         }
                         capture = Capture.NONE;
                         continue;
+                    }
+
+                    if (stopReason != null) {
+                        throw malformed(method, "PEA marker after summary");
                     }
 
                     int iteration = Integer.parseInt(marker.group(2));
@@ -1291,7 +1398,10 @@ public final class PEATestUtils {
             if (rounds.isEmpty()) {
                 throw malformed(method, "no exact PEA rounds found");
             }
-            return new PEAReport(method, rounds);
+            if (stopReason == null) {
+                throw malformed(method, "missing PEA summary");
+            }
+            return new PEAReport(method, rounds, stopReason);
         }
     }
 

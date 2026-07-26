@@ -70,7 +70,7 @@ public class TestPEAObjectArrayScalarReplacement {
                 configure(PEATestUtils.shapeRun(WRAPPER, targets), materialize, publish)
                         .run()) {
             for (Method target : targets) {
-                run.report(target).assertConverged();
+                run.report(target).assertFinalTransformIdle();
             }
             assertNeverEscape(run, nullExternal, 1);
             assertNeverEscape(run, virtualChild, 2);

@@ -71,7 +71,7 @@ public class TestSymbolicIndexStorePEA {
 
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, targets).run()) {
             for (Method target : targets) {
-                run.report(target).assertConverged();
+                run.report(target).assertFinalTransformIdle();
             }
             assertSymbolicStore(run, store);
             assertSymbolicLoad(run, load);

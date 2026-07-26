@@ -60,7 +60,7 @@ public class TestPEASyntheticDeoptReconstruct {
                 .dontinline(requestDeopt)
                 .run()) {
             PEATestUtils.PEAReport report = run.report(target);
-            report.assertConverged();
+            report.assertFinalTransformIdle();
             List<Integer> sourceBCIs = report.round0Before().allocationBCIs();
             Asserts.assertEquals(sourceBCIs.size(), 2,
                     "two source Point allocations feeding the Case-C merge");

@@ -95,7 +95,7 @@ public class TestPEAReentrantAndInterleavedLocks {
                                                 Method target,
                                                 int expectedEnters) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
@@ -125,7 +125,7 @@ public class TestPEAReentrantAndInterleavedLocks {
                                           List<ExpectedLock> expectedLocks,
                                           List<Integer> materializedVOs) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();

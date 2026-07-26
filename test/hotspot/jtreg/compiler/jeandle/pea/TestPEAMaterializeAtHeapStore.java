@@ -79,7 +79,7 @@ public class TestPEAMaterializeAtHeapStore {
                 target + ": object materialized before the publishing store");
         after.assertLineCount(REF_STORE, allocationCount);
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
     }
 
     private static void assertDistinctAllocations(PEATestUtils.IRBody body,

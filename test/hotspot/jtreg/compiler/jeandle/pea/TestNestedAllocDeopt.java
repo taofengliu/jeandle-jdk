@@ -62,7 +62,7 @@ public class TestNestedAllocDeopt {
     private static void assertAllocationBundle(PEATestUtils.RunResult run, Method target)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
         List<Integer> sourceBCIs = before.allocationBCIs();

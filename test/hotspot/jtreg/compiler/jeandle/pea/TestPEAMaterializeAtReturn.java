@@ -76,7 +76,7 @@ public class TestPEAMaterializeAtReturn {
         after.assertAbsent("poison");
         Asserts.assertTrue(after.lineCount(INT_STORE) + after.lineCount(REF_STORE) >= 1,
                 target + ": at least one field replay store survives");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
     }
 
     private static void assertThrow(PEATestUtils.RunResult run, Method target) throws Exception {
@@ -90,7 +90,7 @@ public class TestPEAMaterializeAtReturn {
                 target + ": exception and payload materialized before the throw");
         after.assertPresent("landingpad");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
     }
 
     private static void assertDistinctAllocations(PEATestUtils.IRBody body,

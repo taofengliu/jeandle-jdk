@@ -102,7 +102,7 @@ public class TestPEATypeChecks {
         Asserts.assertTrue(report.effects("ReplaceCall").size() >= 1
                         || report.effects("EliminateAllocation").size() >= sourceCount,
                 target + ": type check folded or allocation eliminated by PEA");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -116,7 +116,7 @@ public class TestPEATypeChecks {
         Asserts.assertTrue(report.maxPartiallyEscapes() >= 1
                         || !after.allocationBCIs().isEmpty(),
                 target + ": [VirtualRef, null] merge materializes the inner virtual");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -134,7 +134,7 @@ public class TestPEATypeChecks {
         Asserts.assertTrue(report.maxPartiallyEscapes() >= 1,
                 target + ": published receiver classified PartiallyEscapes");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

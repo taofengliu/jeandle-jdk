@@ -86,7 +86,7 @@ public class TestLoopCarriedObjectPEA {
                 target + ": classified NeverEscape in some round");
         Asserts.assertTrue(report.effects("EliminateAllocation").size() >= sourceCount,
                 target + ": every source allocation eliminated by PEA");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -112,7 +112,7 @@ public class TestLoopCarriedObjectPEA {
                 target + ": both allocations classified NeverEscape in some round");
         Asserts.assertTrue(report.effects("EliminateAllocation").size() >= 2,
                 target + ": every source allocation eliminated by PEA");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -128,7 +128,7 @@ public class TestLoopCarriedObjectPEA {
                         || report.maxAlwaysEscapes() >= 1
                         || !after.allocationBCIs().isEmpty(),
                 target + ": identity-observed replacement stays conservative");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

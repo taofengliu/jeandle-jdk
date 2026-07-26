@@ -122,7 +122,7 @@ public class TestPEAMultipleBackedgesAndNestedLoops {
                 target + ": classified NeverEscape in some round");
         Asserts.assertTrue(report.effects("Materialize").isEmpty(),
                 target + ": no over-materialization");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -139,7 +139,7 @@ public class TestPEAMultipleBackedgesAndNestedLoops {
         Asserts.assertEquals(after.allocationBCIs().size(), 1,
                 target + ": only the in-nest Inner allocation is retained");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

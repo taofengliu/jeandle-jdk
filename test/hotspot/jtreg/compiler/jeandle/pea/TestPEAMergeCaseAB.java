@@ -99,7 +99,7 @@ public class TestPEAMergeCaseAB {
         after.assertAbsent("poison");
         Asserts.assertEquals(report.round(0).effectCount("EliminateAllocation"), 1L,
                 target + ": allocation eliminated exactly once");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -118,7 +118,7 @@ public class TestPEAMergeCaseAB {
         PEATestUtils.IRBlock callBlock = after.blockContaining(calleeName, 0);
         callBlock.assertAbsent("jeandle.new_instance");
         callBlock.assertBefore("store atomic i32", 0, calleeName, 0);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

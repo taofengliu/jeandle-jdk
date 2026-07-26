@@ -95,7 +95,7 @@ public class TestNestedVODeopt {
             PEATestUtils.RunResult run, Method target, Method requestDeopt)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
@@ -143,7 +143,7 @@ public class TestNestedVODeopt {
             PEATestUtils.RunResult run, Method target, Method requestDeopt,
             Method consumeInner, Method consumeOuter) throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();

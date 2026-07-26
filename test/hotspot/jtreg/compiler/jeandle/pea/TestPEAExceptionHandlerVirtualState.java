@@ -108,7 +108,7 @@ public class TestPEAExceptionHandlerVirtualState {
                                                      Method throwLeft,
                                                      Method throwRight) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody peaInput = report.round0Before();
         List<Integer> sourceBCIs = peaInput.allocationBCIs();
         Asserts.assertEquals(sourceBCIs.size(), 2,
@@ -252,7 +252,7 @@ public class TestPEAExceptionHandlerVirtualState {
                                                 List<Integer> sourceBCIs,
                                                 boolean expectLocks) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
@@ -303,7 +303,7 @@ public class TestPEAExceptionHandlerVirtualState {
     private static void assertEscapeShape(PEATestUtils.RunResult run, Method target,
                                           Method sink, List<Integer> sourceBCIs) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody after = report.finalAfter();
 

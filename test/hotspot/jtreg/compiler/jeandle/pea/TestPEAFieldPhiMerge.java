@@ -56,11 +56,10 @@ public class TestPEAFieldPhiMerge {
 
         PEATestUtils.behaviorRun(WRAPPER, targets).runPEAOnOffEquivalent();
 
-        // Case C (nestedVORefPhi) needs more than the default 2 outer iterations
-        // to reach a transform-idle fixpoint (round 0 materializes both virtuals
-        // at the merge, round 1 synthesizes the synthetic VO, round 2 settles),
-        // so request 4 for the shape run. The behavior run keeps the default to
-        // validate the production setting. See Jeandle-PEA-Lessons-Learned.md §15.
+        assertNestedDefaultIterations(nested);
+
+        // Four rounds expose the idle probes needed by the driver's strict
+        // fixpoint check without changing the two productive Case-C rounds.
         try (PEATestUtils.RunResult run =
                 PEATestUtils.shapeRun(WRAPPER, targets).peaIterations(4).run()) {
             assertNeverEscapeMerge(run, scalar);
@@ -70,6 +69,63 @@ public class TestPEAFieldPhiMerge {
             assertNeverEscapeMerge(run, sw4);
             assertNeverEscapeMerge(run, multi);
             assertNeverEscapeMerge(run, nested);
+            PEATestUtils.PEAReport nestedReport = run.report(nested);
+            Asserts.assertEquals(nestedReport.roundCount(), 4,
+                    nested + ": diagnostic run reaches strict fixpoint");
+            Asserts.assertEquals(nestedReport.transformChangedRoundCount(), 2,
+                    nested + ": diagnostic cap does not add productive rounds");
+            Asserts.assertEquals(nestedReport.transformIdleRoundCount(), 2,
+                    nested + ": strict fixpoint observes two idle probes");
+            nestedReport.assertStoppedAtFixpoint();
+        }
+    }
+
+    private static void assertNestedDefaultIterations(Method target) throws Exception {
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, target).run()) {
+            PEATestUtils.PEAReport report = run.report(target);
+            Asserts.assertEquals(report.round0Before().allocationBCIs().size(), 3,
+                    target + ": holder and two nested source allocations");
+            Asserts.assertEquals(report.roundCount(), 2,
+                    target + ": default PEA cap");
+            Asserts.assertEquals(report.transformChangedRoundCount(), 2,
+                    target + ": both default rounds are productive");
+            Asserts.assertEquals(report.transformIdleRoundCount(), 0,
+                    target + ": default cap has no trailing idle probe");
+            report.assertStoppedAtIterationCap();
+
+            PEATestUtils.PEARound mergeRound = report.round(0);
+            Asserts.assertEquals(mergeRound.neverEscapes(), 1,
+                    target + ": holder is eliminated in the first round");
+            Asserts.assertEquals(mergeRound.partiallyEscapes(), 2,
+                    target + ": nested children materialize at predecessor exits");
+            Asserts.assertEquals(mergeRound.alwaysEscapes(), 0,
+                    target + ": no source allocation always escapes");
+            Asserts.assertEquals(mergeRound.effectCount("Materialize"), 2L,
+                    target + ": both nested children materialize");
+            mergeRound.uniqueEffect("Materialize", "[VO=1]");
+            mergeRound.uniqueEffect("Materialize", "[VO=2]");
+            Asserts.assertEquals(mergeRound.effectCount("Materialize", "[VO=0]"), 0L,
+                    target + ": holder remains virtual");
+            mergeRound.uniqueEffect("EliminateAllocation", "[VO=0]");
+
+            PEATestUtils.PEARound caseCRound = report.round(1);
+            Asserts.assertEquals(caseCRound.neverEscapes(), 2,
+                    target + ": explicit object PHI enables Case C");
+            Asserts.assertEquals(caseCRound.partiallyEscapes(), 0,
+                    target + ": Case C keeps both children virtual");
+            Asserts.assertEquals(caseCRound.alwaysEscapes(), 0,
+                    target + ": Case C has no escaping allocation");
+            Asserts.assertEquals(caseCRound.effectCount("EliminateAllocation"), 2L,
+                    target + ": Case C eliminates both child allocations");
+            caseCRound.uniqueEffect("EliminateAllocation", "[VO=0]");
+            caseCRound.uniqueEffect("EliminateAllocation", "[VO=1]");
+            Asserts.assertEquals(caseCRound.effectCount("CreatePHI"), 1L,
+                    target + ": Case C creates the scalar field PHI");
+            Asserts.assertEquals(caseCRound.effectCount("Materialize"), 0L,
+                    target + ": Case C does not materialize either child");
+
+            report.finalAfter().assertAbsent("jeandle.new_instance");
+            assertVerifierShape(run, report, target);
         }
     }
 
@@ -95,7 +151,7 @@ public class TestPEAFieldPhiMerge {
         Asserts.assertTrue(report.round(0).partiallyEscapes() >= 1,
                 target + ": inner node materialized at the field merge");
         after.assertAbsent("poison");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 
@@ -113,7 +169,7 @@ public class TestPEAFieldPhiMerge {
         after.assertAbsent("poison");
         Asserts.assertEquals(report.round(0).effectCount("EliminateAllocation"),
                 (long) sourceCount, target + ": every source allocation eliminated");
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         assertVerifierShape(run, report, target);
     }
 

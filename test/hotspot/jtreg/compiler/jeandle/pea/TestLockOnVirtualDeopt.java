@@ -73,7 +73,7 @@ public class TestLockOnVirtualDeopt {
             PEATestUtils.RunResult run, Method target, Method requestDeopt)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();

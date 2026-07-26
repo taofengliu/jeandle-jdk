@@ -270,7 +270,7 @@ public class TestLoopExitEHVirtualObject {
 
     private static void assertNeverEscapeShape(PEATestUtils.RunResult run, Method target) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
@@ -298,7 +298,7 @@ public class TestLoopExitEHVirtualObject {
     private static void assertConditionalEscapeShape(PEATestUtils.RunResult run, Method target,
                                                      Method sink) {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();

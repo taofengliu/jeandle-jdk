@@ -99,7 +99,7 @@ public class TestPEALockMaterializationCascade {
                                     int replayEnterCount, boolean callEscape)
             throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.IRBody input = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
         List<Integer> allocationBCIs = input.allocationBCIs();

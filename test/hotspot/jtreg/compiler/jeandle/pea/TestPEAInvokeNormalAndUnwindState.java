@@ -79,7 +79,7 @@ public class TestPEAInvokeNormalAndUnwindState {
                 target + ": distinct p and q allocation BCIs");
 
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertConverged();
+        report.assertFinalTransformIdle();
         PEATestUtils.PEARound first = report.round(0);
         Asserts.assertTrue(first.hasStats(), target + ": round-0 PEA stats");
         Asserts.assertEquals(first.neverEscapes(), 1,
