@@ -25,13 +25,14 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      compiler.jeandle.pea.TestPEAHarnessSmoke --parser-only
+ * @run main/othervm -XX:-UseJeandleCompiler
  *      compiler.jeandle.pea.TestPEAHarnessSmoke
  */
 
 package compiler.jeandle.pea;
 
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
@@ -48,6 +49,8 @@ import jdk.test.whitebox.WhiteBox;
 public class TestPEAHarnessSmoke {
     private static final String WRAPPER =
             "compiler.jeandle.pea.TestPEAHarnessSmoke$TestWrapper";
+    private static final String OSR_WRAPPER =
+            "compiler.jeandle.pea.TestPEAHarnessSmoke$OSRIdentityWrapper";
 
     public static void main(String[] args) throws Exception {
         Method noArgs = TestWrapper.class.getMethod("test");
@@ -56,7 +59,7 @@ public class TestPEAHarnessSmoke {
         Method decoy = TestWrapper.class.getMethod("testExtra");
 
         testMethodIds(noArgs, complex, decoy);
-        testMethodIdRunsModesAndStructuralSoundness(noArgs);
+        testPoisonIdentifierRecognition(noArgs);
         testCallableOperandBoundaries(noArgs);
         testSyntheticParser(noArgs, complex, decoy);
         testTypedDeoptParser(noArgs);
@@ -80,6 +83,7 @@ public class TestPEAHarnessSmoke {
             System.out.println("TestPEAHarnessSmoke: parser OK");
             return;
         }
+        testMethodIdRunsModesAndStructuralSoundness(noArgs);
         testExecutableDirectivesAndMaxArrayLength(noArgs);
         testActiveFrameArgumentChecks(decoy);
         testNotCompilableFailsFast();
@@ -153,16 +157,18 @@ public class TestPEAHarnessSmoke {
         expectFailure("tiered and Xcomp modes", () -> PEATestUtils.behaviorRun(WRAPPER, normal)
                 .tieredCompilation().xcomp());
 
-        PEATestUtils.RunBuilder osrRun = PEATestUtils.behaviorRun(WRAPPER, osr);
-        Path osrDump = Files.createTempDirectory("jeandle-pea-osr-command-");
-        try {
-            List<String> osrCommand = (List<String>) invokePrivate(osrRun, "command",
-                    new Class<?>[] {Path.class}, osrDump);
+        Method osrMethod = OSRIdentityWrapper.class.getMethod("loop");
+        Method requestDeopt = OSRIdentityWrapper.class.getDeclaredMethod("requestDeopt");
+        PEATestUtils.MethodId osrTarget = PEATestUtils.MethodId.osr(osrMethod);
+        try (PEATestUtils.RunResult osrRun = PEATestUtils.behaviorRun(OSR_WRAPPER, osrTarget)
+                .dontinline(requestDeopt)
+                .extraFlags("-XX:CompileThreshold=1000")
+                .run()) {
+            List<String> osrCommand = osrRun.command();
             Asserts.assertTrue(osrCommand.contains("-XX:+UseOnStackReplacement"));
-        } finally {
-            deleteTree(osrDump);
+            Asserts.assertTrue(osrCommand.contains("-XX:-UseCompressedOops"));
+            Asserts.assertTrue(osrCommand.contains("-XX:-UseCompressedClassPointers"));
         }
-        testOSRMethodIdConfirmation();
 
         PEATestUtils.IRBody complete = bodyWithInstructions(normal,
                 "merge: ; preds = %left, %right",
@@ -194,40 +200,25 @@ public class TestPEAHarnessSmoke {
                 quotedPoisonText, "quoted poison text structural smoke");
     }
 
-    private static Object invokePrivate(Object receiver, String name, Class<?>[] parameterTypes,
-                                        Object... arguments) throws Exception {
-        Method method = receiver.getClass().getDeclaredMethod(name, parameterTypes);
-        method.setAccessible(true);
-        try {
-            return method.invoke(receiver, arguments);
-        } catch (InvocationTargetException failure) {
-            Throwable cause = failure.getCause();
-            if (cause instanceof Exception exception) {
-                throw exception;
-            }
-            if (cause instanceof Error error) {
-                throw error;
-            }
-            throw failure;
-        }
-    }
-
-    private static void testOSRMethodIdConfirmation() throws Exception {
-        ProcessBuilder process = ProcessTools.createLimitedTestJavaProcessBuilder(
-                "-Xbootclasspath/a:.",
-                "-XX:+UnlockDiagnosticVMOptions",
-                "-XX:+WhiteBoxAPI",
-                "-Xbatch",
-                "-XX:-TieredCompilation",
-                "-XX:+UseOnStackReplacement",
-                "-XX:CompileThreshold=1000",
-                "-XX:+UseJeandleCompiler",
-                "-XX:-UseCompressedOops",
-                "-XX:-UseCompressedClassPointers",
-                OSRIdentityWrapper.class.getName());
-        OutputAnalyzer output = ProcessTools.executeCommand(process);
-        output.shouldHaveExitValue(0);
-        output.shouldContain("PEATestUtils OSR MethodId confirmation: OK");
+    private static void testPoisonIdentifierRecognition(Method target) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(target);
+        PEATestUtils.IRBody globalPoison = bodyWithInstructions(id,
+                "%value = call i32 @poison()",
+                "ret i32 1");
+        PEATestUtils.assertStructuralSoundness(globalPoison, "global poison identifier smoke");
+        PEATestUtils.IRBody localPoison = bodyWithInstructions(id,
+                "%poison = add i32 0, 1",
+                "ret i32 %poison");
+        PEATestUtils.assertStructuralSoundness(localPoison, "local poison identifier smoke");
+        PEATestUtils.IRBody labelPoison = bodyWithInstructions(id,
+                "poison:",
+                "ret i32 1");
+        PEATestUtils.assertStructuralSoundness(labelPoison, "label poison identifier smoke");
+        PEATestUtils.IRBody metadataPoison = bodyWithInstructions(id,
+                "ret i32 1, !poison !0",
+                "!poison = !{}");
+        PEATestUtils.assertStructuralSoundness(metadataPoison,
+                "named metadata poison identifier smoke");
     }
 
     private static void testTypedDeoptParser(Method method) {
@@ -1561,22 +1552,21 @@ public class TestPEAHarnessSmoke {
     }
 
     public static class OSRIdentityWrapper {
+        private static PEATestUtils.MethodId osrTarget;
+        private static PEATestUtils.ActiveFrameDeoptEvidence deoptEvidence;
+
         public static void main(String[] args) throws Exception {
             Method target = OSRIdentityWrapper.class.getDeclaredMethod("loop");
-            loop();
-            WhiteBox whiteBox = WhiteBox.getWhiteBox();
-            Asserts.assertTrue(whiteBox.isMethodCompiled(target, true),
-                    "loop must have an OSR nmethod before exact confirmation");
-            PEATestUtils.MethodId id = PEATestUtils.MethodId.osr(target);
-            PEATestUtils.confirmLevel4(id);
-            Method uncompiled = OSRIdentityWrapper.class.getDeclaredMethod("uncompiled");
-            PEATestUtils.MethodId uncompiledOSR = PEATestUtils.MethodId.osr(uncompiled);
-            RuntimeException deoptFailure = Asserts.assertThrows(RuntimeException.class,
-                    () -> PEATestUtils.deoptimizeActiveFrame(uncompiledOSR, 0));
-            Asserts.assertTrue(deoptFailure.getMessage().contains(
-                    uncompiledOSR.llvmFunctionName()),
-                    "OSR deoptimization precondition must report the exact identity");
-            System.out.println("PEATestUtils OSR MethodId confirmation: OK");
+            osrTarget = PEATestUtils.MethodId.osr(target);
+            int result = loop();
+            Asserts.assertEquals(deoptEvidence.target(), osrTarget);
+            Asserts.assertEquals(deoptEvidence.compilationLevel(), 4);
+            Asserts.assertEquals(deoptEvidence.markedNMethods(), 1);
+            Asserts.assertTrue(deoptEvidence.frameDeoptimized());
+            Asserts.assertFalse(WhiteBox.getWhiteBox().isMethodCompiled(target, true),
+                    "OSR nmethod must be unpacked before active-frame helper returns");
+            Asserts.assertEquals(result, 705_506_480);
+            System.out.println("PEA-RESULT:" + result);
         }
 
         public static int loop() {
@@ -1584,11 +1574,20 @@ public class TestPEAHarnessSmoke {
             for (int i = 0; i < 100_000; i++) {
                 result += i;
             }
+            for (int i = 0; i < 1_024; i++) {
+                result += i;
+                if (i == 512) {
+                    requestDeopt();
+                }
+            }
+            Asserts.assertNotNull(deoptEvidence,
+                    "loop must deoptimize an active OSR level-4 frame");
             return result;
         }
 
-        public static int uncompiled() {
-            return 0;
+        private static void requestDeopt() {
+            PEATestUtils.confirmLevel4(osrTarget);
+            deoptEvidence = PEATestUtils.deoptimizeActiveFrame(osrTarget, 1);
         }
     }
 }

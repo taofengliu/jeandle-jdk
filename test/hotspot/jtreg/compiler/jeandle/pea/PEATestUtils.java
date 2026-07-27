@@ -679,7 +679,11 @@ public final class PEATestUtils {
         }
     }
 
-    /** Compile the exact descriptor-qualified targets selected by the parent runner. */
+    /**
+     * Compile the exact normal-entry descriptor-qualified targets selected by the parent
+     * runner. OSR targets must be naturally triggered by their child wrapper and then
+     * confirmed with {@link #confirmLevel4(MethodId...)}.
+     */
     public static void compileConfiguredTargetsAtLevel4() throws Exception {
         String configured = System.getProperty(CONFIGURED_TARGETS_PROPERTY);
         if (configured == null || configured.isEmpty()) {
@@ -735,7 +739,12 @@ public final class PEATestUtils {
         }
     }
 
-    /** Immutable evidence that one compiled target's active frame was marked. */
+    /**
+     * Immutable evidence that one compiled target was deoptimized. For a normal
+     * nmethod, {@code frameDeoptimized} records WhiteBox's active-frame observation.
+     * For an OSR nmethod, it records that the OSR nmethod was synchronously unpacked
+     * and is no longer compiled when the deoptimization VM operation returns.
+     */
     public record ActiveFrameDeoptEvidence(
             MethodId target, int frameDepth, int compilationLevel,
             int markedNMethods, boolean frameDeoptimized) {
@@ -750,9 +759,11 @@ public final class PEATestUtils {
     }
 
     /**
-     * Mark one exact level-4 nmethod and prove the requested active frame is
-     * deoptimized without globally deoptimizing unrelated frames. The frame
-     * depth is relative to this helper's caller.
+     * Mark one exact level-4 nmethod and prove it was deoptimized without globally
+     * deoptimizing unrelated frames. For a normal nmethod, the frame depth is relative
+     * to this helper's caller. OSR nmethods are synchronously unpacked by the
+     * deoptimization VM operation, so their evidence is their disappearance from the
+     * OSR compiled-method table when this helper returns.
      */
     public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
             Method target, int frameDepth) {
@@ -780,10 +791,17 @@ public final class PEATestUtils {
             throw new RuntimeException("Expected exactly one marked nmethod for "
                     + target + ", got " + markedNMethods);
         }
-        boolean frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 1);
+        boolean frameDeoptimized;
+        if (target.isOSR()) {
+            frameDeoptimized = !whiteBox.isMethodCompiled(target.method(), true);
+        } else {
+            frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 1);
+        }
         if (!frameDeoptimized) {
-            throw new RuntimeException("Frame at depth " + frameDepth
-                    + " was not deoptimized for " + target);
+            throw new RuntimeException(target.isOSR()
+                    ? "OSR nmethod remained compiled after deoptimization for " + target
+                    : "Frame at depth " + frameDepth
+                            + " was not deoptimized for " + target);
         }
         return new ActiveFrameDeoptEvidence(
                 target, frameDepth, level,
@@ -3433,7 +3451,7 @@ public final class PEATestUtils {
     private static final Pattern PHI_INCOMING_BLOCK = Pattern.compile(
             ",\\s*%(" + LLVM_BLOCK_NAME + ")\\s*\\]");
     private static final Pattern POISON_TOKEN = Pattern.compile(
-            "(?<![-A-Za-z$._0-9])poison(?![-A-Za-z$._0-9])");
+            "(?<![-A-Za-z$._0-9%@!])poison(?![-A-Za-z$._0-9:])");
 
     /**
      * Verify that every PHI in the body carries exactly the incoming blocks printed in
