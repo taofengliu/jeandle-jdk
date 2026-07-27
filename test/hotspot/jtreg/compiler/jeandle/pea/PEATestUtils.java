@@ -3452,6 +3452,21 @@ public final class PEATestUtils {
             ",\\s*%(" + LLVM_BLOCK_NAME + ")\\s*\\]");
     private static final Pattern POISON_TOKEN = Pattern.compile(
             "(?<![-A-Za-z$._0-9%@!])poison(?![-A-Za-z$._0-9:])");
+    private static final Pattern CONSTANT_BRANCH = Pattern.compile(
+            "^br\\s+i1\\s+(true|false),\\s+label\\s+%("
+                    + LLVM_BLOCK_NAME + "),\\s+label\\s+%(" + LLVM_BLOCK_NAME + ")");
+    private static final Pattern SWITCH_HEADER = Pattern.compile(
+            "^switch\\s+i\\d+\\s+(-?\\d+|true|false),\\s+label\\s+%("
+                    + LLVM_BLOCK_NAME + ")\\s*\\[");
+    private static final Pattern SWITCH_CASE = Pattern.compile(
+            "\\bi\\d+\\s+(-?\\d+|true|false),\\s+label\\s+%("
+                    + LLVM_BLOCK_NAME + ")");
+    private static final Pattern LLVM_LABEL_REFERENCE = Pattern.compile(
+            "\\blabel\\s+%(" + LLVM_BLOCK_NAME + ")");
+    private static final Pattern TERMINATOR_START = Pattern.compile(
+            "^(?:" + LLVM_LOCAL_NAME + "\\s*=\\s*)?"
+                    + "(?:invoke|callbr|ret|br|switch|indirectbr|resume|catchswitch|"
+                    + "catchret|cleanupret|unreachable)\\b");
 
     /**
      * Verify that every PHI in the body carries exactly the incoming blocks printed in
@@ -3508,6 +3523,111 @@ public final class PEATestUtils {
                 "PHI parser must reset predecessor information at every block label");
     }
 
+    /** Self-test of the structural-soundness parsers; call once per test main. */
+    public static void assertStructuralParserContracts() {
+        assertPhiParserContracts();
+
+        List<String> deadConstantBranch = List.of(
+                "entry:",
+                "br i1 false, label %dead, label %live",
+                "dead: ; preds = %entry",
+                "call void @consume(ptr poison)",
+                "ret void",
+                "live: ; preds = %entry",
+                "ret void");
+        validateNoLivePoison(deadConstantBranch, "dead constant branch", "synthetic");
+
+        List<String> poisonUsedOnlyInDeadBlock = List.of(
+                "entry:",
+                "%unused = freeze ptr poison",
+                "br i1 false, label %dead, label %live",
+                "dead: ; preds = %entry",
+                "call void @consume(ptr %unused)",
+                "ret void",
+                "live: ; preds = %entry",
+                "ret void");
+        validateNoLivePoison(poisonUsedOnlyInDeadBlock,
+                "poison used only in dead block", "synthetic");
+
+        List<String> deadPhiIncoming = List.of(
+                "entry:",
+                "br i1 false, label %dead, label %live",
+                "dead: ; preds = %entry",
+                "br label %merge",
+                "live: ; preds = %entry",
+                "br label %merge",
+                "merge: ; preds = %dead, %live",
+                "%value = phi i32 [ poison, %dead ], [ 7, %live ]",
+                "ret i32 %value");
+        validateNoLivePoison(deadPhiIncoming, "dead PHI incoming", "synthetic");
+
+        List<String> constantSwitch = List.of(
+                "entry:",
+                "switch i32 7, label %default [",
+                "i32 7, label %selected",
+                "i32 9, label %dead",
+                "]",
+                "dead: ; preds = %entry",
+                "call void @consume(ptr poison)",
+                "ret void",
+                "selected: ; preds = %entry",
+                "ret void",
+                "default: ; preds = %entry",
+                "ret void");
+        validateNoLivePoison(constantSwitch, "constant switch", "synthetic");
+
+        List<String> selectedPoison = List.of(
+                "entry:",
+                "br i1 true, label %live, label %clean",
+                "clean: ; preds = %entry",
+                "ret void",
+                "live: ; preds = %entry",
+                "call void @consume(ptr poison)",
+                "ret void");
+        boolean rejected = false;
+        try {
+            validateNoLivePoison(selectedPoison,
+                    "selected constant branch", "synthetic");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "poison parser must reject poison in a selected constant successor");
+
+        List<String> selectedPhiIncoming = List.of(
+                "entry:",
+                "br i1 true, label %live, label %dead",
+                "dead: ; preds = %entry",
+                "br label %merge",
+                "live: ; preds = %entry",
+                "br label %merge",
+                "merge: ; preds = %dead, %live",
+                "%value = phi i32 [ 7, %dead ], [ poison, %live ]",
+                "ret i32 %value");
+        rejected = false;
+        try {
+            validateNoLivePoison(selectedPhiIncoming,
+                    "selected PHI incoming", "synthetic");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "poison parser must reject poison on a reachable PHI edge");
+
+        List<String> reachablePoison = List.of(
+                "entry:",
+                "call void @consume(ptr poison)",
+                "ret void");
+        rejected = false;
+        try {
+            validateNoLivePoison(reachablePoison, "reachable poison", "synthetic");
+        } catch (IllegalStateException expected) {
+            rejected = true;
+        }
+        Asserts.assertTrue(rejected,
+                "poison parser must reject poison in an ordinary reachable block");
+    }
+
     private static void validateCompletePhis(List<String> lines, String context) {
         Map<String, Integer> currentPredecessors = null;
         String currentBlock = null;
@@ -3556,29 +3676,224 @@ public final class PEATestUtils {
     }
 
     private static void assertNoLivePoison(IRBody body, String context) {
-        List<String> lines = body.lines();
+        validateNoLivePoison(body.lines(), context, body.methodId().toString());
+    }
+
+    private static void validateNoLivePoison(List<String> lines, String context,
+                                             String method) {
+        StructuralReachability reachability = structuralReachability(lines);
         for (int i = 0; i < lines.size(); i++) {
+            if (!reachability.lines().contains(i)) {
+                continue;
+            }
             String instruction = withoutInlineComment(lines.get(i));
-            if (!containsPoison(instruction)) {
+            String reachableInstruction = withoutUnreachablePhiIncoming(
+                    instruction, reachability.blocks());
+            if (!containsPoison(reachableInstruction)) {
                 continue;
             }
             Matcher assignment = ASSIGNED_INSTRUCTION.matcher(instruction);
-            if (!assignment.find() || isUsedAfter(lines, assignment.group(1), i)) {
+            if (!assignment.find()
+                    || isUsedAfter(lines, assignment.group(1), i,
+                            reachability.lines())) {
                 throw new IllegalStateException(context + ": live poison in "
-                        + body.methodId() + ": " + instruction);
+                        + method + ": " + instruction);
             }
         }
     }
+
+    private static StructuralReachability structuralReachability(List<String> lines) {
+        LinkedHashMap<String, List<Integer>> blocks = new LinkedHashMap<>();
+        String currentBlock = null;
+        boolean unlabeledInstruction = false;
+        for (int i = 0; i < lines.size(); i++) {
+            Matcher label = BLOCK_LABEL.matcher(lines.get(i));
+            if (label.matches()) {
+                currentBlock = label.group(1);
+                if (blocks.putIfAbsent(currentBlock, new ArrayList<>()) != null) {
+                    throw new IllegalStateException(
+                            "Duplicate block label in structural parser: " + currentBlock);
+                }
+            }
+            if (currentBlock != null) {
+                blocks.get(currentBlock).add(i);
+            } else {
+                String line = fold(withoutInlineComment(lines.get(i)));
+                unlabeledInstruction |= !line.isEmpty()
+                        && !line.startsWith("define ") && !line.equals("{");
+            }
+        }
+        if (blocks.isEmpty() || unlabeledInstruction) {
+            return allReachable(lines, blocks.keySet());
+        }
+
+        HashSet<String> reachableBlocks = new HashSet<>();
+        ArrayList<String> worklist = new ArrayList<>();
+        worklist.add(blocks.keySet().iterator().next());
+        for (int next = 0; next < worklist.size(); next++) {
+            String block = worklist.get(next);
+            if (!reachableBlocks.add(block)) {
+                continue;
+            }
+            for (String successor : structuralSuccessors(
+                    lines, blocks.get(block), blocks.keySet())) {
+                if (blocks.containsKey(successor) && !reachableBlocks.contains(successor)) {
+                    worklist.add(successor);
+                }
+            }
+        }
+
+        HashSet<Integer> reachableLines = new HashSet<>();
+        for (String block : reachableBlocks) {
+            reachableLines.addAll(blocks.get(block));
+        }
+        return new StructuralReachability(reachableLines, reachableBlocks);
+    }
+
+    private static StructuralReachability allReachable(
+            List<String> lines, Set<String> blocks) {
+        HashSet<Integer> allLines = new HashSet<>();
+        for (int i = 0; i < lines.size(); i++) {
+            allLines.add(i);
+        }
+        return new StructuralReachability(allLines, new HashSet<>(blocks));
+    }
+
+    private static Set<String> structuralSuccessors(List<String> lines,
+                                                    List<Integer> blockLines,
+                                                    Set<String> allBlocks) {
+        int terminatorAt = -1;
+        for (int i = 0; i < blockLines.size(); i++) {
+            String line = fold(withoutInlineComment(lines.get(blockLines.get(i))));
+            if (TERMINATOR_START.matcher(line).find()) {
+                terminatorAt = i;
+            }
+        }
+        if (terminatorAt < 0) {
+            return allBlocks;
+        }
+
+        String terminator = fold(blockLines.subList(terminatorAt, blockLines.size())
+                .stream().map(lines::get)
+                .map(PEATestUtils::withoutInlineComment)
+                .collect(Collectors.joining("\n")));
+
+        Matcher branch = CONSTANT_BRANCH.matcher(terminator);
+        if (branch.find()) {
+            String selected = branch.group(
+                    Boolean.parseBoolean(branch.group(1)) ? 2 : 3);
+            return allBlocks.contains(selected) ? Set.of(selected) : allBlocks;
+        }
+
+        Matcher switchHeader = SWITCH_HEADER.matcher(terminator);
+        if (switchHeader.find()) {
+            String selectedValue = normalizeIntegerConstant(switchHeader.group(1));
+            String selectedBlock = switchHeader.group(2);
+            Matcher switchCase = SWITCH_CASE.matcher(
+                    terminator.substring(switchHeader.end()));
+            while (switchCase.find()) {
+                if (normalizeIntegerConstant(switchCase.group(1)).equals(selectedValue)) {
+                    selectedBlock = switchCase.group(2);
+                    break;
+                }
+            }
+            return allBlocks.contains(selectedBlock)
+                    ? Set.of(selectedBlock) : allBlocks;
+        }
+
+        HashSet<String> successors = new HashSet<>();
+        Matcher reference = LLVM_LABEL_REFERENCE.matcher(terminator);
+        while (reference.find()) {
+            successors.add(reference.group(1));
+        }
+        if (!allBlocks.containsAll(successors)) {
+            return allBlocks;
+        }
+        return successors;
+    }
+
+    private static String withoutUnreachablePhiIncoming(
+            String instruction, Set<String> reachableBlocks) {
+        if (!instruction.contains(" = phi ") || !containsPoison(instruction)) {
+            return instruction;
+        }
+        ArrayList<int[]> unreachableIncoming = new ArrayList<>();
+        Matcher incoming = PHI_INCOMING_BLOCK.matcher(instruction);
+        while (incoming.find()) {
+            if (reachableBlocks.contains(incoming.group(1))) {
+                continue;
+            }
+            int close = incoming.end() - 1;
+            int open = matchingOpeningSquare(instruction, close);
+            if (open < 0) {
+                return instruction;
+            }
+            unreachableIncoming.add(new int[] {open, close + 1});
+        }
+        StringBuilder reachable = new StringBuilder(instruction);
+        for (int i = unreachableIncoming.size() - 1; i >= 0; i--) {
+            int[] range = unreachableIncoming.get(i);
+            reachable.replace(range[0], range[1], "[ 0, %unreachable ]");
+        }
+        return reachable.toString();
+    }
+
+    private static int matchingOpeningSquare(String text, int close) {
+        if (close < 0 || close >= text.length() || text.charAt(close) != ']') {
+            return -1;
+        }
+        ArrayList<Integer> openings = new ArrayList<>();
+        boolean quoted = false;
+        for (int i = 0; i <= close; i++) {
+            char ch = text.charAt(i);
+            if (quoted) {
+                if (ch == '\\') {
+                    i++;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+            } else if (ch == '[') {
+                openings.add(i);
+            } else if (ch == ']') {
+                if (openings.isEmpty()) {
+                    return -1;
+                }
+                int open = openings.remove(openings.size() - 1);
+                if (i == close) {
+                    return open;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static String normalizeIntegerConstant(String value) {
+        return switch (value) {
+            case "true" -> "1";
+            case "false" -> "0";
+            default -> value;
+        };
+    }
+
+    private record StructuralReachability(Set<Integer> lines, Set<String> blocks) {}
 
     private static boolean containsPoison(String line) {
         return POISON_TOKEN.matcher(withoutQuotedText(line)).find();
     }
 
-    private static boolean isUsedAfter(List<String> lines, String value, int definition) {
+    private static boolean isUsedAfter(List<String> lines, String value, int definition,
+                                       Set<Integer> reachableLines) {
         Pattern exactLocalUse = Pattern.compile(
                 "(?<![-A-Za-z$._0-9])" + Pattern.quote(value)
                         + "(?![-A-Za-z$._0-9])");
         for (int i = definition + 1; i < lines.size(); i++) {
+            if (!reachableLines.contains(i)) {
+                continue;
+            }
             String instruction = withoutInlineComment(lines.get(i));
             if (exactLocalUse.matcher(instruction).find()) {
                 return true;
