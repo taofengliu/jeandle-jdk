@@ -727,15 +727,14 @@ JeandleStackMap* JeandleCompiledCode::parse_stackmap(StackMapParser& stackmaps,
   // Record-level VO id -> ObjectValue map for PEA virtual-object (VO)
   // descriptors, shared by the caller (resolve_reloc_info) across every scope
   // parsed from this stackmap record. PEA emits ALL VO descriptors into the
-  // ROOT scope's VO section — the deopt-point-level object pool — and scopes
-  // are parsed outermost-first, so a ScalarValueType descriptor is always
-  // registered before any VORefType slot (in any scope) that references it.
-  // A VORef FIELD may forward-reference a VO described later (or form a cycle
-  // a.f=b, b.g=a); those are deferred into deferred_voref_fields (also
-  // record-level) and resolved once the whole VO section is parsed (every
-  // descriptor's ObjectValue is created and registered before any field value
-  // is resolved — C2 debugInfo.cpp:68-94 model).
-  // Resolve every deferred VORef field now that all descriptors are parsed.
+  // ROOT scope's VO section — the deopt-point-level object pool. Each
+  // ScalarValueType registers its ObjectValue before parsing its fields, so
+  // self and backward VORef fields resolve immediately. Only references to a
+  // descriptor not registered yet (forward references, including cycles) are
+  // recorded in deferred_voref_fields and resolved after their targets have
+  // been parsed.
+  // Resolve every deferred VORef field now that all target descriptors for
+  // this scope have been registered.
   // Called before each scope return (end-of-scope and the MethodType marker).
   auto flush_deferred_voref_fields = [&]() {
     for (int i = 0; i < deferred_voref_fields.length(); i++) {
