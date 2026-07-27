@@ -51,6 +51,8 @@ public class TestPEAHarnessSmoke {
             "compiler.jeandle.pea.TestPEAHarnessSmoke$TestWrapper";
     private static final String OSR_WRAPPER =
             "compiler.jeandle.pea.TestPEAHarnessSmoke$OSRIdentityWrapper";
+    private static final String NORMAL_DEOPT_WRAPPER =
+            "compiler.jeandle.pea.TestPEAHarnessSmoke$NormalDeoptIdentityWrapper";
 
     public static void main(String[] args) throws Exception {
         Method noArgs = TestWrapper.class.getMethod("test");
@@ -86,6 +88,7 @@ public class TestPEAHarnessSmoke {
         testMethodIdRunsModesAndStructuralSoundness(noArgs);
         testExecutableDirectivesAndMaxArrayLength(noArgs);
         testActiveFrameArgumentChecks(decoy);
+        testNormalActiveFrameOverloads();
         testNotCompilableFailsFast();
         testDumpPairing(noArgs, complex);
         testRealShapeRun(noArgs, complex, decoy);
@@ -116,6 +119,24 @@ public class TestPEAHarnessSmoke {
                 "__jeandle_osr." + first.llvmFunctionName());
         Asserts.assertNotEquals(first.llvmFunctionName(), overloaded.llvmFunctionName());
         Asserts.assertNotEquals(first.dumpStem(), extra.dumpStem());
+    }
+
+    private static void testNormalActiveFrameOverloads() throws Exception {
+        Method methodTarget = NormalDeoptIdentityWrapper.class.getMethod(
+                "methodTarget", int.class);
+        Method methodIdTarget = NormalDeoptIdentityWrapper.class.getMethod(
+                "methodIdTarget", int.class);
+        Method requestMethod = NormalDeoptIdentityWrapper.class.getDeclaredMethod(
+                "requestMethod");
+        Method requestMethodId = NormalDeoptIdentityWrapper.class.getDeclaredMethod(
+                "requestMethodId");
+        try (PEATestUtils.RunResult ignored = PEATestUtils.behaviorRun(
+                NORMAL_DEOPT_WRAPPER, methodTarget, methodIdTarget)
+                .dontinline(requestMethod)
+                .dontinline(requestMethodId)
+                .run()) {
+            // The child validates both overloads against separate active nmethods.
+        }
     }
 
     private static void testMethodIdRunsModesAndStructuralSoundness(Method target)
@@ -1548,6 +1569,64 @@ public class TestPEAHarnessSmoke {
 
         public static int target() {
             return 1;
+        }
+    }
+
+    public static class NormalDeoptIdentityWrapper {
+        private static Method methodTargetMethod;
+        private static PEATestUtils.MethodId methodIdTargetId;
+        private static PEATestUtils.ActiveFrameDeoptEvidence methodEvidence;
+        private static PEATestUtils.ActiveFrameDeoptEvidence methodIdEvidence;
+
+        public static void main(String[] args) throws Exception {
+            new Point();
+            methodTargetMethod = NormalDeoptIdentityWrapper.class.getMethod(
+                    "methodTarget", int.class);
+            methodIdTargetId = PEATestUtils.MethodId.of(
+                    NormalDeoptIdentityWrapper.class.getMethod(
+                            "methodIdTarget", int.class));
+            PEATestUtils.compileConfiguredTargetsAtLevel4();
+
+            Asserts.assertEquals(methodTarget(7), 10,
+                    "Method overload target resumes after deoptimization");
+            assertEvidence(methodEvidence, PEATestUtils.MethodId.of(methodTargetMethod));
+            Asserts.assertEquals(methodIdTarget(11), 16,
+                    "MethodId overload target resumes after deoptimization");
+            assertEvidence(methodIdEvidence, methodIdTargetId);
+            System.out.println("PEA-RESULT:10,16");
+        }
+
+        public static int methodTarget(int seed) {
+            Point point = new Point();
+            point.x = seed;
+            return point.x + requestMethod();
+        }
+
+        public static int methodIdTarget(int seed) {
+            Point point = new Point();
+            point.x = seed;
+            return point.x + requestMethodId();
+        }
+
+        private static int requestMethod() {
+            methodEvidence = PEATestUtils.deoptimizeActiveFrame(methodTargetMethod, 2);
+            return 3;
+        }
+
+        private static int requestMethodId() {
+            methodIdEvidence = PEATestUtils.deoptimizeActiveFrame(methodIdTargetId, 2);
+            return 5;
+        }
+
+        private static void assertEvidence(
+                PEATestUtils.ActiveFrameDeoptEvidence evidence,
+                PEATestUtils.MethodId target) {
+            Asserts.assertNotNull(evidence, target + ": missing active-frame evidence");
+            Asserts.assertEquals(evidence.target(), target);
+            Asserts.assertEquals(evidence.frameDepth(), 2);
+            Asserts.assertEquals(evidence.compilationLevel(), 4);
+            Asserts.assertEquals(evidence.markedNMethods(), 1);
+            Asserts.assertTrue(evidence.frameDeoptimized());
         }
     }
 

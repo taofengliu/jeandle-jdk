@@ -767,11 +767,16 @@ public final class PEATestUtils {
      */
     public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
             Method target, int frameDepth) {
-        return deoptimizeActiveFrame(MethodId.of(target), frameDepth);
+        return deoptimizeActiveFrameImpl(MethodId.of(target), frameDepth);
     }
 
     /** Mark one exact normal or OSR level-4 nmethod for active-frame deoptimization. */
     public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
+            MethodId target, int frameDepth) {
+        return deoptimizeActiveFrameImpl(target, frameDepth);
+    }
+
+    private static ActiveFrameDeoptEvidence deoptimizeActiveFrameImpl(
             MethodId target, int frameDepth) {
         Objects.requireNonNull(target);
         if (frameDepth < 0) {
@@ -795,7 +800,8 @@ public final class PEATestUtils {
         if (target.isOSR()) {
             frameDeoptimized = !whiteBox.isMethodCompiled(target.method(), true);
         } else {
-            frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 1);
+            // WhiteBox counts both the public overload and this shared implementation.
+            frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 2);
         }
         if (!frameDeoptimized) {
             throw new RuntimeException(target.isOSR()
