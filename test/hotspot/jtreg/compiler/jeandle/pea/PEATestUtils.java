@@ -73,6 +73,7 @@ public final class PEATestUtils {
             "JeandleDumpDirectory",
             "UseCompressedOops",
             "UseCompressedClassPointers",
+            "UseOnStackReplacement",
             "CICompilerCount",
             "CompileCommand",
             "CompileCommandFile",
@@ -216,11 +217,21 @@ public final class PEATestUtils {
 
     /** Create an exact multi-target run with PEA diagnostics and IR dumps. */
     public static RunBuilder shapeRun(String wrapperFQN, Method... targets) {
+        return shapeRun(wrapperFQN, methodIds(targets));
+    }
+
+    /** Create an exact multi-target run with PEA diagnostics and IR dumps. */
+    public static RunBuilder shapeRun(String wrapperFQN, MethodId... targets) {
         return new RunBuilder(wrapperFQN, true, targets);
     }
 
     /** Create an exact multi-target run for behavior comparison. */
     public static RunBuilder behaviorRun(String wrapperFQN, Method... targets) {
+        return behaviorRun(wrapperFQN, methodIds(targets));
+    }
+
+    /** Create an exact multi-target run for behavior comparison. */
+    public static RunBuilder behaviorRun(String wrapperFQN, MethodId... targets) {
         return new RunBuilder(wrapperFQN, false, targets);
     }
 
@@ -239,18 +250,20 @@ public final class PEATestUtils {
         private Integer peaIterations;
         private Integer maxArrayLength;
         private Integer lockingMode;
+        private boolean tieredCompilation;
+        private boolean xcomp;
         private boolean keepDumps;
 
-        private RunBuilder(String wrapperFQN, boolean shape, Method... methods) {
+        private RunBuilder(String wrapperFQN, boolean shape, MethodId... methodIds) {
             this.wrapperFQN = Objects.requireNonNull(wrapperFQN);
             this.shape = shape;
-            if (methods.length == 0) {
+            if (methodIds.length == 0) {
                 throw new IllegalArgumentException("At least one explicit target method is required");
             }
             LinkedHashMap<String, MethodId> unique = new LinkedHashMap<>();
-            for (Method method : methods) {
-                MethodId id = MethodId.of(method);
-                if (!method.getDeclaringClass().getName().equals(wrapperFQN)) {
+            for (MethodId id : methodIds) {
+                Objects.requireNonNull(id);
+                if (!id.method().getDeclaringClass().getName().equals(wrapperFQN)) {
                     throw new IllegalArgumentException("Target " + id
                             + " is not declared by child wrapper " + wrapperFQN);
                 }
@@ -280,6 +293,8 @@ public final class PEATestUtils {
             this.peaIterations = other.peaIterations;
             this.maxArrayLength = other.maxArrayLength;
             this.lockingMode = other.lockingMode;
+            this.tieredCompilation = other.tieredCompilation;
+            this.xcomp = other.xcomp;
             this.keepDumps = other.keepDumps;
         }
 
@@ -324,6 +339,7 @@ public final class PEATestUtils {
 
         public RunBuilder extraFlags(String... flags) {
             for (String flag : flags) {
+                rejectRawExecutionMode(flag);
                 rejectManagedVMFlag(flag);
                 extraFlags.add(flag);
             }
@@ -375,6 +391,27 @@ public final class PEATestUtils {
                 throw new IllegalStateException("LockingMode is already configured");
             }
             lockingMode = mode;
+            return this;
+        }
+
+        /** Run the child with tiered compilation enabled. */
+        public RunBuilder tieredCompilation() {
+            if (xcomp) {
+                throw new IllegalStateException("-Xcomp and tiered compilation are exclusive");
+            }
+            tieredCompilation = true;
+            return this;
+        }
+
+        /** Run a behavior-only child with eager compilation. */
+        public RunBuilder xcomp() {
+            if (shape) {
+                throw new IllegalStateException("-Xcomp is only supported for behavior runs");
+            }
+            if (tieredCompilation) {
+                throw new IllegalStateException("-Xcomp and tiered compilation are exclusive");
+            }
+            xcomp = true;
             return this;
         }
 
@@ -448,7 +485,15 @@ public final class PEATestUtils {
                 command.add("-XX:LockingMode=" + lockingMode);
             }
             command.add("-Xbatch");
-            command.add("-XX:-TieredCompilation");
+            if (!tieredCompilation) {
+                command.add("-XX:-TieredCompilation");
+            }
+            if (xcomp) {
+                command.add("-Xcomp");
+            }
+            if (targets.stream().anyMatch(MethodId::isOSR)) {
+                command.add("-XX:+UseOnStackReplacement");
+            }
             command.add("-XX:+UseJeandleCompiler");
             command.add(peaOn ? "-XX:+JeandleDoPEA" : "-XX:-JeandleDoPEA");
             command.add("-Xlog:jeandle=debug");
@@ -545,21 +590,33 @@ public final class PEATestUtils {
         }
 
         public PEAReport report(Method method) {
+            return report(MethodId.of(method));
+        }
+
+        public PEAReport report(MethodId method) {
             if (!shape) {
                 throw new IllegalStateException("Behavior runs do not collect PEA shape reports");
             }
             if (reports == null) {
                 reports = PEAReport.parse(output.getStderr(), targets.toArray(MethodId[]::new));
             }
-            return reports.report(MethodId.of(method));
+            return reports.report(method);
         }
 
         public IRBody frontendIR(Method method) throws IOException {
-            return PEATestUtils.frontendIR(dumpDir, MethodId.of(method));
+            return frontendIR(MethodId.of(method));
+        }
+
+        public IRBody frontendIR(MethodId method) throws IOException {
+            return PEATestUtils.frontendIR(dumpDir, method);
         }
 
         public IRBody finalIR(Method method) throws IOException {
-            return PEATestUtils.finalIR(dumpDir, MethodId.of(method));
+            return finalIR(MethodId.of(method));
+        }
+
+        public IRBody finalIR(MethodId method) throws IOException {
+            return PEATestUtils.finalIR(dumpDir, method);
         }
 
         private void assertRequestedMethodsCompiled() {
@@ -660,15 +717,21 @@ public final class PEATestUtils {
 
     /** Confirm level 4 in the child and publish one exact parent-visible sentinel per method. */
     public static void confirmLevel4(Method... methods) {
+        confirmLevel4(methodIds(methods));
+    }
+
+    /** Confirm one exact normal or OSR level-4 nmethod in the child. */
+    public static void confirmLevel4(MethodId... methods) {
         WhiteBox whiteBox = WhiteBox.getWhiteBox();
-        for (Method method : methods) {
-            int level = whiteBox.getMethodCompilationLevel(method);
-            if (!whiteBox.isMethodCompiled(method)
+        for (MethodId method : methods) {
+            Objects.requireNonNull(method);
+            int level = whiteBox.getMethodCompilationLevel(method.method(), method.isOSR());
+            if (!whiteBox.isMethodCompiled(method.method(), method.isOSR())
                     || level != FULL_OPTIMIZATION_LEVEL) {
-                throw new RuntimeException(MethodId.of(method) + " compiled at level " + level
+                throw new RuntimeException(method + " compiled at level " + level
                         + ", expected " + FULL_OPTIMIZATION_LEVEL);
             }
-            System.out.println(compiledSentinel(MethodId.of(method)));
+            System.out.println(compiledSentinel(method));
         }
     }
 
@@ -693,31 +756,37 @@ public final class PEATestUtils {
      */
     public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
             Method target, int frameDepth) {
+        return deoptimizeActiveFrame(MethodId.of(target), frameDepth);
+    }
+
+    /** Mark one exact normal or OSR level-4 nmethod for active-frame deoptimization. */
+    public static ActiveFrameDeoptEvidence deoptimizeActiveFrame(
+            MethodId target, int frameDepth) {
         Objects.requireNonNull(target);
         if (frameDepth < 0) {
             throw new IllegalArgumentException("Frame depth must be non-negative");
         }
         WhiteBox whiteBox = WhiteBox.getWhiteBox();
-        int level = whiteBox.getMethodCompilationLevel(target);
-        if (!whiteBox.isMethodCompiled(target)
+        int level = whiteBox.getMethodCompilationLevel(target.method(), target.isOSR());
+        if (!whiteBox.isMethodCompiled(target.method(), target.isOSR())
                 || level != FULL_OPTIMIZATION_LEVEL) {
-            throw new RuntimeException(MethodId.of(target)
+            throw new RuntimeException(target
                     + " must be compiled at level 4 before active-frame deoptimization"
-                    + " (compiled=" + whiteBox.isMethodCompiled(target)
+                    + " (compiled=" + whiteBox.isMethodCompiled(target.method(), target.isOSR())
                     + ", level=" + level + ")");
         }
-        int markedNMethods = whiteBox.deoptimizeMethod(target);
+        int markedNMethods = whiteBox.deoptimizeMethod(target.method(), target.isOSR());
         if (markedNMethods != 1) {
             throw new RuntimeException("Expected exactly one marked nmethod for "
-                    + MethodId.of(target) + ", got " + markedNMethods);
+                    + target + ", got " + markedNMethods);
         }
         boolean frameDeoptimized = whiteBox.isFrameDeoptimized(frameDepth + 1);
         if (!frameDeoptimized) {
             throw new RuntimeException("Frame at depth " + frameDepth
-                    + " was not deoptimized for " + MethodId.of(target));
+                    + " was not deoptimized for " + target);
         }
         return new ActiveFrameDeoptEvidence(
-                MethodId.of(target), frameDepth, level,
+                target, frameDepth, level,
                 markedNMethods, frameDeoptimized);
     }
 
@@ -3334,6 +3403,15 @@ public final class PEATestUtils {
         }
     }
 
+    private static MethodId[] methodIds(Method... methods) {
+        Objects.requireNonNull(methods);
+        MethodId[] result = new MethodId[methods.length];
+        for (int i = 0; i < methods.length; i++) {
+            result[i] = MethodId.of(Objects.requireNonNull(methods[i]));
+        }
+        return result;
+    }
+
     private static String exactResultPayload(String stdout) {
         List<String> results = splitLines(stdout).stream()
                 .filter(line -> line.startsWith(RESULT_SENTINEL)).collect(Collectors.toList());
@@ -3354,6 +3432,8 @@ public final class PEATestUtils {
             "%(" + LLVM_BLOCK_NAME + ")");
     private static final Pattern PHI_INCOMING_BLOCK = Pattern.compile(
             ",\\s*%(" + LLVM_BLOCK_NAME + ")\\s*\\]");
+    private static final Pattern POISON_TOKEN = Pattern.compile(
+            "(?<![-A-Za-z$._0-9])poison(?![-A-Za-z$._0-9])");
 
     /**
      * Verify that every PHI in the body carries exactly the incoming blocks printed in
@@ -3364,6 +3444,14 @@ public final class PEATestUtils {
      */
     public static void assertCompletePhis(IRBody body, String context) {
         validateCompletePhis(body.lines(), context);
+    }
+
+    /** Verify that no live poison value or incomplete PHI reaches the final IR. */
+    public static void assertStructuralSoundness(IRBody body, String context) {
+        Objects.requireNonNull(body);
+        Objects.requireNonNull(context);
+        assertNoLivePoison(body, context);
+        assertCompletePhis(body, context);
     }
 
     /** Self-test of the PHI-completeness parser; call once per test main. */
@@ -3449,6 +3537,85 @@ public final class PEATestUtils {
         return result;
     }
 
+    private static void assertNoLivePoison(IRBody body, String context) {
+        List<String> lines = body.lines();
+        for (int i = 0; i < lines.size(); i++) {
+            String instruction = withoutInlineComment(lines.get(i));
+            if (!containsPoison(instruction)) {
+                continue;
+            }
+            Matcher assignment = ASSIGNED_INSTRUCTION.matcher(instruction);
+            if (!assignment.find() || isUsedAfter(lines, assignment.group(1), i)) {
+                throw new IllegalStateException(context + ": live poison in "
+                        + body.methodId() + ": " + instruction);
+            }
+        }
+    }
+
+    private static boolean containsPoison(String line) {
+        return POISON_TOKEN.matcher(withoutQuotedText(line)).find();
+    }
+
+    private static boolean isUsedAfter(List<String> lines, String value, int definition) {
+        Pattern exactLocalUse = Pattern.compile(
+                "(?<![-A-Za-z$._0-9])" + Pattern.quote(value)
+                        + "(?![-A-Za-z$._0-9])");
+        for (int i = definition + 1; i < lines.size(); i++) {
+            String instruction = withoutInlineComment(lines.get(i));
+            if (exactLocalUse.matcher(instruction).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String withoutInlineComment(String line) {
+        boolean quoted = false;
+        boolean escaped = false;
+        for (int i = 0; i < line.length(); i++) {
+            char current = line.charAt(i);
+            if (quoted) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == '"') {
+                    quoted = false;
+                }
+            } else if (current == '"') {
+                quoted = true;
+            } else if (current == ';') {
+                return line.substring(0, i);
+            }
+        }
+        return line;
+    }
+
+    private static String withoutQuotedText(String line) {
+        StringBuilder result = new StringBuilder(line.length());
+        boolean quoted = false;
+        boolean escaped = false;
+        for (int i = 0; i < line.length(); i++) {
+            char current = line.charAt(i);
+            if (quoted) {
+                result.append(' ');
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == '"') {
+                    quoted = false;
+                }
+            } else {
+                result.append(current);
+                if (current == '"') {
+                    quoted = true;
+                }
+            }
+        }
+        return result.toString();
+    }
+
     private static void rejectManagedVMFlag(String flag) {
         if (flag.startsWith("@")) {
             throw new IllegalArgumentException("Caller may not use an argument file " + flag);
@@ -3460,6 +3627,13 @@ public final class PEATestUtils {
         String optionName = vmOptionName(flag);
         if (optionName != null && MANAGED_VM_OPTIONS.contains(optionName)) {
             throw new IllegalArgumentException("Caller may not override managed VM flag " + flag);
+        }
+    }
+
+    private static void rejectRawExecutionMode(String flag) {
+        if ("-Xcomp".equals(flag) || "-Xint".equals(flag) || "-Xmixed".equals(flag)) {
+            throw new IllegalArgumentException(
+                    "Caller may not override typed execution mode " + flag);
         }
     }
 
