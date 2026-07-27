@@ -109,7 +109,6 @@ public class TestPEADeoptReconstructInstance {
             PEATestUtils.RunResult run, Method target,
             Method requestDeopt, boolean partial) throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        report.assertFinalTransformIdle();
         PEATestUtils.IRBody before = report.round0Before();
         PEATestUtils.IRBody after = report.finalAfter();
         List<Integer> sourceBCIs = before.allocationBCIs();

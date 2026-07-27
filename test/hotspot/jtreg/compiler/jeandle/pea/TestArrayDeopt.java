@@ -55,7 +55,6 @@ public class TestArrayDeopt {
                 .dontinline(requestDeopt)
                 .run()) {
             PEATestUtils.PEAReport report = run.report(target);
-            report.assertFinalTransformIdle();
             Asserts.assertEquals(report.round0Before().allocationBCIs().size(), 1,
                     "one source int[] allocation");
             PEATestUtils.PEARound firstRound = report.round(0);

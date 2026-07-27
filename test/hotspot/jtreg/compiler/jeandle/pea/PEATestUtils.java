@@ -1113,6 +1113,12 @@ public final class PEATestUtils {
             return (int) rounds.stream().filter(PEARound::transformIdle).count();
         }
 
+        /**
+         * Verifies that the final configured iteration was an idle convergence
+         * probe. The default production cap may instead end after a productive
+         * final round, so functional shape tests must not use this as a generic
+         * PEA-success assertion.
+         */
         public void assertFinalTransformIdle() {
             requireFunctionReport();
             PEARound last = rounds.get(rounds.size() - 1);
