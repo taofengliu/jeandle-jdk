@@ -3467,6 +3467,16 @@ public final class PEATestUtils {
             "^(?:" + LLVM_LOCAL_NAME + "\\s*=\\s*)?"
                     + "(?:invoke|callbr|ret|br|switch|indirectbr|resume|catchswitch|"
                     + "catchret|cleanupret|unreachable)\\b");
+    private static final Pattern ASSIGNED_OPCODE = Pattern.compile(
+            "^" + LLVM_LOCAL_NAME + "\\s*=\\s*([a-z][a-z0-9.]*)\\b");
+    private static final Set<String> PURE_POISON_OPCODES = Set.of(
+            "add", "fadd", "sub", "fsub", "mul", "fmul", "udiv", "sdiv",
+            "fdiv", "urem", "srem", "frem", "shl", "lshr", "ashr", "and",
+            "or", "xor", "extractelement", "insertelement", "shufflevector",
+            "extractvalue", "insertvalue", "getelementptr", "trunc", "zext",
+            "sext", "fptrunc", "fpext", "fptoui", "fptosi", "uitofp",
+            "sitofp", "ptrtoint", "inttoptr", "bitcast", "addrspacecast",
+            "icmp", "fcmp", "phi", "select");
 
     /**
      * Verify that every PHI in the body carries exactly the incoming blocks printed in
@@ -3539,7 +3549,7 @@ public final class PEATestUtils {
 
         List<String> poisonUsedOnlyInDeadBlock = List.of(
                 "entry:",
-                "%unused = freeze ptr poison",
+                "%unused = getelementptr i8, ptr poison, i64 1",
                 "br i1 false, label %dead, label %live",
                 "dead: ; preds = %entry",
                 "call void @consume(ptr %unused)",
@@ -3626,6 +3636,49 @@ public final class PEATestUtils {
         }
         Asserts.assertTrue(rejected,
                 "poison parser must reject poison in an ordinary reachable block");
+
+        List<String> unusedCallResult = List.of(
+                "entry:",
+                "%result = call i32 @consume(i32 poison)",
+                "ret void");
+        boolean rejectedUnusedCall = rejectsLivePoison(
+                unusedCallResult, "unused side-effecting call result");
+
+        List<String> backwardBackedgeUse = List.of(
+                "entry:",
+                "br label %header",
+                "header: ; preds = %entry, %backedge",
+                "%value = phi i32 [ 0, %entry ], [ %next, %backedge ]",
+                "br i1 %again, label %backedge, label %exit",
+                "backedge: ; preds = %header",
+                "%next = add i32 poison, 1",
+                "br label %header",
+                "exit: ; preds = %header",
+                "ret i32 %value");
+        boolean rejectedBackwardUse = rejectsLivePoison(
+                backwardBackedgeUse, "textually backward backedge use");
+
+        Asserts.assertTrue(rejectedUnusedCall && rejectedBackwardUse,
+                "poison parser must reject unused side-effecting results and "
+                        + "textually backward uses: unusedCall="
+                        + rejectedUnusedCall + ", backwardUse="
+                        + rejectedBackwardUse);
+
+        List<String> usedFrozenPoison = List.of(
+                "entry:",
+                "%value = freeze i32 poison",
+                "ret i32 %value");
+        validateNoLivePoison(
+                usedFrozenPoison, "used frozen poison", "synthetic");
+    }
+
+    private static boolean rejectsLivePoison(List<String> lines, String context) {
+        try {
+            validateNoLivePoison(lines, context, "synthetic");
+            return false;
+        } catch (IllegalStateException expected) {
+            return true;
+        }
     }
 
     private static void validateCompletePhis(List<String> lines, String context) {
@@ -3692,10 +3745,14 @@ public final class PEATestUtils {
             if (!containsPoison(reachableInstruction)) {
                 continue;
             }
+            if (isFreezeInstruction(instruction)) {
+                continue;
+            }
             Matcher assignment = ASSIGNED_INSTRUCTION.matcher(instruction);
             if (!assignment.find()
-                    || isUsedAfter(lines, assignment.group(1), i,
-                            reachability.lines())) {
+                    || !isPurePoisonInstruction(instruction)
+                    || isUsedInReachableInstructions(lines, assignment.group(1),
+                            i, reachability)) {
                 throw new IllegalStateException(context + ": live poison in "
                         + method + ": " + instruction);
             }
@@ -3885,16 +3942,35 @@ public final class PEATestUtils {
         return POISON_TOKEN.matcher(withoutQuotedText(line)).find();
     }
 
-    private static boolean isUsedAfter(List<String> lines, String value, int definition,
-                                       Set<Integer> reachableLines) {
+    private static boolean isPurePoisonInstruction(String instruction) {
+        Matcher opcode = ASSIGNED_OPCODE.matcher(fold(instruction));
+        return opcode.find() && PURE_POISON_OPCODES.contains(opcode.group(1));
+    }
+
+    private static boolean isFreezeInstruction(String instruction) {
+        Matcher opcode = ASSIGNED_OPCODE.matcher(fold(instruction));
+        return opcode.find() && opcode.group(1).equals("freeze");
+    }
+
+    private static boolean isUsedInReachableInstructions(
+            List<String> lines, String value, int definition,
+            StructuralReachability reachability) {
         Pattern exactLocalUse = Pattern.compile(
                 "(?<![-A-Za-z$._0-9])" + Pattern.quote(value)
                         + "(?![-A-Za-z$._0-9])");
-        for (int i = definition + 1; i < lines.size(); i++) {
-            if (!reachableLines.contains(i)) {
+        for (int i = 0; i < lines.size(); i++) {
+            if (!reachability.lines().contains(i)) {
                 continue;
             }
-            String instruction = withoutInlineComment(lines.get(i));
+            String instruction = withoutUnreachablePhiIncoming(
+                    withoutInlineComment(lines.get(i)), reachability.blocks());
+            if (i == definition) {
+                Matcher assignment = ASSIGNED_INSTRUCTION.matcher(instruction);
+                if (!assignment.find()) {
+                    return true;
+                }
+                instruction = instruction.substring(assignment.end());
+            }
             if (exactLocalUse.matcher(instruction).find()) {
                 return true;
             }
