@@ -337,16 +337,14 @@ public class TestPEAStressAndConservativeFallback {
     private static void assertLaterRoundHighCap(
             PEATestUtils.RunResult run, Method target) throws Exception {
         PEATestUtils.PEAReport report = run.report(target);
-        Asserts.assertEquals(report.roundCount(), 4,
-                target + ": productive second round plus two idle observations");
+        Asserts.assertEquals(report.roundCount(), 3,
+                target + ": productive second round plus one unchanged complete round");
         Asserts.assertFalse(report.round(0).transformIdle(),
                 target + ": first round virtualizes the constant guard");
         Asserts.assertFalse(report.round(1).transformIdle(),
                 target + ": second round eliminates the newly non-escaping candidate");
         Asserts.assertTrue(report.round(2).transformIdle(),
-                target + ": first stable transform observation");
-        Asserts.assertTrue(report.round(3).transformIdle(),
-                target + ": stable-delta verification observation");
+                target + ": unchanged complete round reaches the fixpoint");
         PEATestUtils.IRBody before = report.round0Before();
         Asserts.assertEquals(before.allocations().size(), 2,
                 target + ": guard and candidate allocation identities");

@@ -25,8 +25,10 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAHarnessSmoke --parser-only
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAHarnessSmoke
  */
 
@@ -64,6 +66,7 @@ public class TestPEAHarnessSmoke {
         testPoisonIdentifierRecognition(noArgs);
         testCallableOperandBoundaries(noArgs);
         testSyntheticParser(noArgs, complex, decoy);
+        testEffectSequences(noArgs);
         testTypedDeoptParser(noArgs);
         testMalformedDeoptBundles(noArgs);
         testExactAllocationSelection(noArgs);
@@ -73,6 +76,7 @@ public class TestPEAHarnessSmoke {
         testFlexibleAllocationResultsAndBoundaries(noArgs);
         testCommentCannotSupplyDeoptBundle(noArgs);
         testBlockLocalExactAssertions(noArgs);
+        testCrossProcessExactIR(noArgs);
         testExactControlFlowBlocks(noArgs);
         testLoweredAllocationCounting(noArgs);
         testLockReplayParser(noArgs, complex);
@@ -669,6 +673,78 @@ public class TestPEAHarnessSmoke {
                         1));
     }
 
+    private static void testCrossProcessExactIR(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.IRBody firstProcess = bodyWithInstructions(id,
+                "%first = call \"java-klass\"=\"140069760409616\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 140069760409616 to ptr))"
+                        + " [ \"deopt\"(i64 140069760409616, i64 7001) ]",
+                "%second = call \"java-klass\"=\"140069760409744\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 140069760409744 to ptr))"
+                        + " [ \"deopt\"(i64 140069760409744, i64 7001) ]",
+                "ret i32 1");
+        PEATestUtils.IRBody secondProcess = bodyWithInstructions(id,
+                "%first = call \"java-klass\"=\"139839644114960\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 139839644114960 to ptr))"
+                        + " [ \"deopt\"(i64 139839644114960, i64 7001) ]",
+                "%second = call \"java-klass\"=\"139839644115088\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 139839644115088 to ptr))"
+                        + " [ \"deopt\"(i64 139839644115088, i64 7001) ]",
+                "ret i32 1");
+        firstProcess.assertCrossProcessExactEquals(secondProcess,
+                "klass addresses are process-local");
+
+        PEATestUtils.IRBody changedNonKlassConstant = bodyWithInstructions(id,
+                "%first = call \"java-klass\"=\"139839644114960\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 139839644114960 to ptr))"
+                        + " [ \"deopt\"(i64 139839644114960, i64 7002) ]",
+                "%second = call \"java-klass\"=\"139839644115088\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 139839644115088 to ptr))"
+                        + " [ \"deopt\"(i64 139839644115088, i64 7002) ]",
+                "ret i32 1");
+        expectAssertionFailure("non-klass constants remain exact",
+                () -> firstProcess.assertCrossProcessExactEquals(
+                        changedNonKlassConstant, "non-klass constants differ"));
+
+        String firstAddress = "140069760409616";
+        String secondAddress = "139839644114960";
+        expectAssertionFailure("klass digits in an identifier remain exact",
+                () -> klassCollisionBody(id, firstAddress,
+                        "%collision" + firstAddress + " = add i32 1, 2")
+                        .assertCrossProcessExactEquals(
+                                klassCollisionBody(id, secondAddress,
+                                        "%collision" + secondAddress + " = add i32 1, 2"),
+                                "identifier collision"));
+        expectAssertionFailure("klass digits in a quoted string remain exact",
+                () -> klassCollisionBody(id, firstAddress,
+                        "call void asm sideeffect \"" + firstAddress + "\", \"\"()")
+                        .assertCrossProcessExactEquals(
+                                klassCollisionBody(id, secondAddress,
+                                        "call void asm sideeffect \""
+                                                + secondAddress + "\", \"\"()"),
+                                "quoted string collision"));
+        expectAssertionFailure("klass digits in a comment remain exact",
+                () -> klassCollisionBody(id, firstAddress,
+                        "; process-local text " + firstAddress)
+                        .assertCrossProcessExactEquals(
+                                klassCollisionBody(id, secondAddress,
+                                        "; process-local text " + secondAddress),
+                                "comment collision"));
+        expectAssertionFailure("negative klass magnitude remains exact",
+                () -> klassCollisionBody(id, firstAddress,
+                        "call void @negative(i64 -" + firstAddress + ")")
+                        .assertCrossProcessExactEquals(
+                                klassCollisionBody(id, secondAddress,
+                                        "call void @negative(i64 -" + secondAddress + ")"),
+                                "negative integer collision"));
+    }
+
     private static void testExactControlFlowBlocks(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
         PEATestUtils.IRBody body = bodyWithInstructions(id,
@@ -828,22 +904,22 @@ public class TestPEAHarnessSmoke {
                 before(extra, 0),
                 function(extra, "ret i32 99"),
                 stats(extra, 9, 9, 9),
-                effect("Decoy", extra, "ignored=true"),
+                effect("Decoy", extra, 0, "ignored=true"),
                 after(extra, 0),
                 function(extra, "ret i32 99"),
                 before(first, 0),
                 function(first, "%alloc = invoke ptr addrspace(1) @jeandle.new_instance()",
                         "%twice = add i32 %x, %x", "ret i32 %twice"),
                 stats(first, 1, 0, 0),
-                effect("EliminateAllocation", first, "[VO=0]"),
-                effect("ReplaceLoad", first, "value=%x"),
+                effect("EliminateAllocation", first, 0, "[VO=0]"),
+                effect("ReplaceLoad", first, 1, "value=%x"),
                 after(first, 0, false),
                 function(first, "%twice = add i32 %x, %x", "ret i32 %twice"),
                 before(overloaded, 0),
                 function(overloaded, "%alloc = invoke ptr addrspace(1) @jeandle.new_instance()",
                         "ret i32 %arg"),
                 stats(overloaded, 1, 0, 0),
-                effect("EliminateAllocation", overloaded, "[VO=0]"),
+                effect("EliminateAllocation", overloaded, 0, "[VO=0]"),
                 after(overloaded, 0),
                 function(overloaded, "ret i32 %arg"),
                 before(first, 1),
@@ -893,6 +969,89 @@ public class TestPEAHarnessSmoke {
                 "Descriptor-bearing LLVM operands must exercise quoted parsing");
     }
 
+    private static void testEffectSequences(Method method) {
+        PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
+        PEATestUtils.PEARound valid = parseEffectTranscript(id,
+                effectWithoutSequence("Materialize", id,
+                        "[VO=0] block=%left target= seq=3   "
+                                + "%value = call i32 asm \" seq=77 target= seq=88 \", \"\"()"),
+                effectWithSequenceText("CreatePHI", id, "4294967295",
+                        "[VO=1] offset=8"));
+        Asserts.assertEquals(valid.effects().size(), 2);
+        PEATestUtils.PEARound repeatedText = parseEffectTranscript(id,
+                effect("Materialize", id, 1, "[VO=0] block=%left"),
+                effect("Materialize", id, 2, "[VO=0] block=%left"));
+        Asserts.assertEquals(repeatedText.effects().size(), 2,
+                "different effects may have identical diagnostic text");
+        PEATestUtils.PEAReport perRound = parseTwoRoundEffectTranscript(id);
+        Asserts.assertEquals(perRound.round(0).effects().get(0).sequence(), 0L);
+        Asserts.assertEquals(perRound.round(1).effects().get(0).sequence(), 0L);
+        Asserts.assertEquals(parseEffectTranscript(id,
+                "PEA: FutureEffect debug payload without typed grammar")
+                .effects().size(), 0,
+                "unknown future PEA diagnostics remain forward compatible");
+
+        expectFailureContains("known effect missing function", "malformed",
+                () -> parseEffectTranscript(id,
+                        "PEA: ReplaceLoad [VO=0] seq=0"));
+        expectFailureContains("known effect tab boundary missing function", "malformed",
+                () -> parseEffectTranscript(id,
+                        "PEA: ReplaceCall\t[VO=0] seq=0"));
+        expectFailureContains("known effect invalid function", "malformed",
+                () -> parseEffectTranscript(id,
+                        "PEA: Materialize function=not-an-llvm-operand"
+                                + " [VO=0] seq=0"));
+        expectFailureContains("duplicate effect sequence", "duplicate effect sequence",
+                () -> parseEffectTranscript(id,
+                        effect("Materialize", id, 4, "[VO=0] block=%left"),
+                        effect("CreatePHI", id, 4, "[VO=1] offset=8")));
+        expectFailureContains("inverted effect sequence", "strictly increasing",
+                () -> parseEffectTranscript(id,
+                        effect("Materialize", id, 5, "[VO=0] block=%left"),
+                        effect("CreatePHI", id, 4, "[VO=1] offset=8")));
+        expectFailureContains("missing effect sequence", "missing seq=",
+                () -> parseEffectTranscript(id,
+                        effectWithoutSequence("Materialize", id,
+                                "[VO=0] block=%left")));
+        expectFailureContains("malformed effect sequence", "malformed seq=",
+                () -> parseEffectTranscript(id,
+                        effectWithSequenceText("Materialize", id, "invalid",
+                                "[VO=0] block=%left")));
+        expectFailureContains("duplicate effect sequence field", "duplicate seq= field",
+                () -> parseEffectTranscript(id,
+                        effectWithoutSequence("Materialize", id,
+                                "[VO=0] seq=1 block=%left seq=2")));
+        expectFailureContains("misplaced target effect sequence", "must follow target=",
+                () -> parseEffectTranscript(id,
+                        effectWithoutSequence("Materialize", id,
+                                "[VO=0] target=%value seq=1")));
+        expectFailureContains("duplicate pre-target effect sequence",
+                "duplicate seq= field before target=",
+                () -> parseEffectTranscript(id,
+                        effectWithoutSequence("Materialize", id,
+                                "[VO=0] seq=9 target= seq=10 %value = load i32, ptr %field")));
+        expectFailureContains("non-final targetless effect sequence", "must be final",
+                () -> parseEffectTranscript(id,
+                        effectWithoutSequence("CreatePHI", id,
+                                "[VO=0] seq=1 offset=8")));
+        expectFailureContains("negative effect sequence", "non-negative",
+                () -> parseEffectTranscript(id,
+                        effectWithSequenceText("Materialize", id, "-1",
+                                "[VO=0] block=%left")));
+        expectFailureContains("overflowing effect sequence", "overflows uint32",
+                () -> parseEffectTranscript(id,
+                        effectWithSequenceText("Materialize", id, "4294967296",
+                                "[VO=0] block=%left")));
+        Asserts.assertEquals(valid.effects().get(0).sequence(), 3L);
+        Asserts.assertEquals(valid.effects().get(1).sequence(), 0xFFFF_FFFFL);
+        Asserts.assertEquals(valid.effects().get(0).detail(),
+                "[VO=0] block=%left target=  "
+                        + "%value = call i32 asm \" seq=77 target= seq=88 \", \"\"()",
+                "typed effect detail exactly restores the pre-sequence producer form");
+        Asserts.assertTrue(valid.effects().get(0).detail().contains("seq=77"),
+                "removing seq= preserves the target instruction detail");
+    }
+
     private static void testMalformedTranscripts(Method method) {
         PEATestUtils.MethodId id = PEATestUtils.MethodId.of(method);
         PEATestUtils.MethodId other = PEATestUtils.MethodId.osr(method);
@@ -928,6 +1087,11 @@ public class TestPEAHarnessSmoke {
                 () -> PEATestUtils.PEAReport.parse(
                         String.join("\n", before(id, 0), body, stat,
                                 after(id, 0, false), body, summary(id, 1, "fixpoint")), id));
+        expectFailure("fixpoint requires an unchanged complete final round",
+                () -> PEATestUtils.PEAReport.parse(
+                        String.join("\n", before(id, 0), body,
+                                after(id, 0), function(id, "ret i32 2"),
+                                summary(id, 1, "fixpoint")), id));
         expectFailure("missing summary", () -> PEATestUtils.PEAReport.parse(
                 String.join("\n", before(id, 0), body, after(id, 0), body), id));
         expectFailure("duplicate summary", () -> PEATestUtils.PEAReport.parse(
@@ -983,7 +1147,7 @@ public class TestPEAHarnessSmoke {
                 lockReplay(first, thirdReceiver),
                 lockReplay(first, thirdReceiverAlias),
                 lockReplay(first, otherSource),
-                effect("ReplaceLoad", first, "depth=10"),
+                effect("ReplaceLoad", first, 0, "depth=10"),
                 after(first, 0, false),
                 function(first, "ret i32 1"),
                 before(overloaded, 0),
@@ -1410,7 +1574,43 @@ public class TestPEAHarnessSmoke {
                 + " PartiallyEscapes=" + partial + " AlwaysEscapes=" + always;
     }
 
-    private static String effect(String kind, PEATestUtils.MethodId id, String detail) {
+    private static PEATestUtils.PEARound parseEffectTranscript(
+            PEATestUtils.MethodId id, String... effects) {
+        String body = function(id, "ret i32 1");
+        String transcript = String.join("\n",
+                before(id, 0), body, stats(id, 0, 0, 0),
+                String.join("\n", effects),
+                after(id, 0, false), body,
+                summary(id, 1, "iteration-cap"));
+        return PEATestUtils.PEAReport.parse(transcript, id).report(id).round(0);
+    }
+
+    private static PEATestUtils.PEAReport parseTwoRoundEffectTranscript(
+            PEATestUtils.MethodId id) {
+        String body = function(id, "ret i32 1");
+        String transcript = String.join("\n",
+                before(id, 0), body, stats(id, 0, 0, 0),
+                effect("Materialize", id, 0, "[VO=0] block=%left"),
+                after(id, 0, false), body,
+                before(id, 1), body, stats(id, 0, 0, 0),
+                effect("Materialize", id, 0, "[VO=0] block=%left"),
+                after(id, 1, false), body,
+                summary(id, 2, "iteration-cap"));
+        return PEATestUtils.PEAReport.parse(transcript, id).report(id);
+    }
+
+    private static String effect(
+            String kind, PEATestUtils.MethodId id, int sequence, String detail) {
+        return effectWithSequenceText(kind, id, Integer.toString(sequence), detail);
+    }
+
+    private static String effectWithSequenceText(
+            String kind, PEATestUtils.MethodId id, String sequence, String detail) {
+        return effectWithoutSequence(kind, id, detail) + " seq=" + sequence;
+    }
+
+    private static String effectWithoutSequence(
+            String kind, PEATestUtils.MethodId id, String detail) {
         return "PEA: " + kind + " function=@\"" + id.llvmFunctionName() + "\" " + detail;
     }
 
@@ -1437,6 +1637,17 @@ public class TestPEAHarnessSmoke {
                 before(id, 0), body, stats(id, 0, 0, 0),
                 after(id, 0), body, summary(id, 1, "fixpoint"));
         return PEATestUtils.PEAReport.parse(transcript, id).report(id).round0Before();
+    }
+
+    private static PEATestUtils.IRBody klassCollisionBody(
+            PEATestUtils.MethodId id, String address, String collision) {
+        return bodyWithInstructions(id,
+                "%object = call \"java-klass\"=\"" + address + "\" ptr"
+                        + " @jeandle.new_instance(ptr inttoptr"
+                        + " (i64 " + address + " to ptr))"
+                        + " [ \"deopt\"(i64 " + address + ", i64 7001) ]",
+                collision,
+                "ret i32 1");
     }
 
     private static void expectDeoptFailure(
@@ -1466,6 +1677,15 @@ public class TestPEAHarnessSmoke {
     private static void expectFailure(String label, ThrowingRunnable action) {
         System.out.println("expected parser rejection: " + label + ": "
                 + failureMessage(label, action));
+    }
+
+    private static void expectFailureContains(
+            String label, String expectedText, ThrowingRunnable action) {
+        String message = failureMessage(label, action);
+        Asserts.assertTrue(message.contains(expectedText),
+                label + ": useful failure message must contain '" + expectedText
+                        + "', got: " + message);
+        System.out.println("expected parser rejection: " + label + ": " + message);
     }
 
     private static void expectAssertionFailure(String label, ThrowingRunnable action) {

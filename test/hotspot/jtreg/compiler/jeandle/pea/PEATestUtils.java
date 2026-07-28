@@ -111,6 +111,21 @@ public final class PEATestUtils {
             "^PEA: (\\S+) function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
                     + "|[-A-Za-z$._0-9]+))(?:\\s+(.*))?$"
     );
+    private static final Set<String> KNOWN_TYPED_EFFECT_KINDS = Set.of(
+            "ReplaceLoad",
+            "ReplaceCall",
+            "EliminateStore",
+            "EliminateAllocation",
+            "Materialize",
+            "CreatePHI",
+            "RewriteDeoptBundle");
+    private static final Pattern FINAL_EFFECT_SEQUENCE = Pattern.compile(
+            "(?:^| )seq=(\\S*)$"
+    );
+    private static final Pattern EFFECT_SEQUENCE_FIELD = Pattern.compile(
+            "(?<!\\S)seq=\\S*"
+    );
+    private static final String TARGET_EFFECT_SEQUENCE = "target= seq=";
     private static final Pattern LOCK_REPLAY = Pattern.compile(
             "^PEA: LockReplay function=(@(?:\"(?:\\\\[0-9A-Fa-f]{2}|[^\"\\\\])*\""
                     + "|[-A-Za-z$._0-9]+)) logical_escape=([0-9]+) batch=([0-9]+)"
@@ -828,17 +843,23 @@ public final class PEATestUtils {
                 .descriptorString();
     }
 
-    /** Parsed effect line attributed to an exact LLVM function and PEA round. */
+    /**
+     * Parsed effect attributed to an exact LLVM function and PEA round.
+     * The checked sequence is typed separately and removed from detail.
+     */
     public static final class PEAEffect {
         private final String kind;
         private final String functionName;
         private final int iteration;
+        private final long sequence;
         private final String detail;
 
-        private PEAEffect(String kind, String functionName, int iteration, String detail) {
+        private PEAEffect(String kind, String functionName, int iteration,
+                          long sequence, String detail) {
             this.kind = kind;
             this.functionName = functionName;
             this.iteration = iteration;
+            this.sequence = sequence;
             this.detail = detail;
         }
 
@@ -852,6 +873,10 @@ public final class PEATestUtils {
 
         public int iteration() {
             return iteration;
+        }
+
+        public long sequence() {
+            return sequence;
         }
 
         public String detail() {
@@ -1206,12 +1231,7 @@ public final class PEATestUtils {
             return (int) rounds.stream().filter(PEARound::transformIdle).count();
         }
 
-        /**
-         * Verifies that the final configured iteration was an idle convergence
-         * probe. The default production cap may instead end after a productive
-         * final round, so functional shape tests must not use this as a generic
-         * PEA-success assertion.
-         */
+        /** Verifies that the final configured iteration had an idle PEA transform. */
         public void assertFinalTransformIdle() {
             requireFunctionReport();
             PEARound last = rounds.get(rounds.size() - 1);
@@ -1360,6 +1380,13 @@ public final class PEATestUtils {
                         throw malformed(method,
                                 "fixpoint summary requires an idle final transform");
                     }
+                    if (stopReason == PEAStopReason.FIXPOINT) {
+                        PEARound last = rounds.get(rounds.size() - 1);
+                        if (!last.before().lines().equals(last.after().lines())) {
+                            throw malformed(method,
+                                    "fixpoint summary requires an unchanged complete final round");
+                        }
+                    }
                     continue;
                 }
 
@@ -1469,9 +1496,18 @@ public final class PEATestUtils {
                     if (current == null || current.afterSeen) {
                         throw malformed(method, "effect outside an open round");
                     }
+                    ParsedEffectDetail parsedDetail = parseEffectDetail(
+                            method, current.iteration,
+                            effect.group(3) == null ? "" : effect.group(3));
                     current.effects.add(new PEAEffect(effect.group(1), effectFunction,
-                            current.iteration, effect.group(3) == null ? "" : effect.group(3)));
+                            current.iteration, parsedDetail.sequence(),
+                            parsedDetail.semanticDetail()));
                     continue;
+                }
+                String malformedKind = knownTypedEffectKind(line);
+                if (malformedKind != null) {
+                    throw malformed(method, "malformed " + malformedKind
+                            + " effect line: " + line);
                 }
 
                 if (line.startsWith(";; PEA-DUMP ") || line.startsWith(";; PEA stats @")
@@ -1533,11 +1569,125 @@ public final class PEATestUtils {
                     || !lockReplays.isEmpty())) {
                 throw malformed(method, "missing stats for active round " + iteration);
             }
+            validateEffects(method);
             return new PEARound(iteration,
                     IRBody.fromModuleLines(beforeLines, method),
                     IRBody.fromModuleLines(afterLines, method),
                     never, partial, always, effects, lockReplays, statsSeen, transformIdle);
         }
+
+        private void validateEffects(MethodId method) {
+            HashSet<Long> sequences = new HashSet<>();
+            long previousSequence = -1;
+            for (PEAEffect effect : effects) {
+                if (!sequences.add(effect.sequence())) {
+                    throw malformed(method, "duplicate effect sequence "
+                            + effect.sequence() + " in round " + iteration);
+                }
+                if (effect.sequence() <= previousSequence) {
+                    throw malformed(method, "effect sequences must be strictly increasing"
+                            + " in emitted trace order in round " + iteration
+                            + ": previous=" + previousSequence
+                            + ", current=" + effect.sequence());
+                }
+                previousSequence = effect.sequence();
+            }
+        }
+    }
+
+    private record ParsedEffectDetail(long sequence, String semanticDetail) {}
+
+    private static ParsedEffectDetail parseEffectDetail(
+            MethodId method, int iteration, String detail) {
+        int target = findEffectField(detail, "target=");
+        if (target >= 0) {
+            if (EFFECT_SEQUENCE_FIELD.matcher(detail.substring(0, target)).find()) {
+                throw malformed(method, "duplicate seq= field before target="
+                        + " in round " + iteration + ": " + detail);
+            }
+            if (!detail.startsWith(TARGET_EFFECT_SEQUENCE, target)) {
+                throw malformed(method, "target effect seq= must follow target="
+                        + " in round " + iteration + ": " + detail);
+            }
+            int valueStart = target + TARGET_EFFECT_SEQUENCE.length();
+            int valueEnd = detail.indexOf(' ', valueStart);
+            if (valueEnd < 0 || valueEnd + 1 >= detail.length()) {
+                throw malformed(method, "target effect seq= must precede an instruction"
+                        + " in round " + iteration + ": " + detail);
+            }
+            String semanticDetail = (detail.substring(0, target)
+                    + "target=" + detail.substring(valueEnd + 1)).trim();
+            return parseEffectSequenceValue(
+                    method, iteration, detail.substring(valueStart, valueEnd),
+                    semanticDetail);
+        }
+
+        Matcher sequence = FINAL_EFFECT_SEQUENCE.matcher(detail);
+        if (!sequence.find()) {
+            if (EFFECT_SEQUENCE_FIELD.matcher(detail).find()) {
+                throw malformed(method, "targetless effect seq= must be final"
+                        + " in round " + iteration + ": " + detail);
+            }
+            throw malformed(method, "effect is missing seq= in round "
+                    + iteration + ": " + detail);
+        }
+        String semanticDetail = detail.substring(0, sequence.start()).trim();
+        if (EFFECT_SEQUENCE_FIELD.matcher(semanticDetail).find()) {
+            throw malformed(method, "duplicate seq= field in targetless effect"
+                    + " in round " + iteration + ": " + detail);
+        }
+        return parseEffectSequenceValue(
+                method, iteration, sequence.group(1), semanticDetail);
+    }
+
+    private static ParsedEffectDetail parseEffectSequenceValue(
+            MethodId method, int iteration, String value, String semanticDetail) {
+        long parsed;
+        if (value.startsWith("-")) {
+            throw malformed(method, "effect seq= must be non-negative in round "
+                    + iteration + ": " + value);
+        }
+        if (!value.matches("[0-9]+")) {
+            throw malformed(method, "malformed seq= value in round "
+                    + iteration + ": " + value);
+        }
+        try {
+            parsed = Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw malformed(method, "effect seq= value overflows uint32 in round "
+                    + iteration + ": " + value);
+        }
+        if (parsed > 0xFFFF_FFFFL) {
+            throw malformed(method, "effect seq= value overflows uint32 in round "
+                    + iteration + ": " + value);
+        }
+        return new ParsedEffectDetail(parsed, semanticDetail);
+    }
+
+    private static int findEffectField(String detail, String field) {
+        int from = 0;
+        while (true) {
+            int fieldStart = detail.indexOf(field, from);
+            if (fieldStart < 0) {
+                return -1;
+            }
+            if (fieldStart == 0 || detail.charAt(fieldStart - 1) == ' ') {
+                return fieldStart;
+            }
+            from = fieldStart + field.length();
+        }
+    }
+
+    private static String knownTypedEffectKind(String line) {
+        for (String kind : KNOWN_TYPED_EFFECT_KINDS) {
+            String prefix = "PEA: " + kind;
+            if (line.startsWith(prefix)
+                    && (line.length() == prefix.length()
+                    || Character.isWhitespace(line.charAt(prefix.length())))) {
+                return kind;
+            }
+        }
+        return null;
     }
 
     private static int lockReplayInt(MethodId method, String field, String value) {
@@ -1791,6 +1941,8 @@ public final class PEATestUtils {
                 "\\\"deopt\\\"\\(i64 0, i32 (-?\\d+), i32 \\1(?:,|\\))");
         private static final Pattern BLOCK_LABEL = Pattern.compile(
                 "^(" + LLVM_LABEL_NAME + "):(?: ;.*)?$");
+        private static final Pattern JAVA_KLASS_ATTRIBUTE = Pattern.compile(
+                "\"java-klass\"=\"([0-9]+)\"");
         private final MethodId method;
         private final List<String> lines;
         private final String text;
@@ -1847,6 +1999,136 @@ public final class PEATestUtils {
 
         public List<String> lines() {
             return lines;
+        }
+
+        /**
+         * Compares exact function IR emitted by independent JVM processes.
+         * Runtime klass addresses are identified only by {@code java-klass}
+         * attributes and replaced consistently at each standalone
+         * unsigned-decimal integer token outside quoted text and comments.
+         * All other constants remain exact.
+         */
+        public void assertCrossProcessExactEquals(IRBody other, String context) {
+            Objects.requireNonNull(other);
+            Objects.requireNonNull(context);
+            Asserts.assertEquals(crossProcessExactLines(),
+                    other.crossProcessExactLines(), context);
+        }
+
+        private List<String> crossProcessExactLines() {
+            LinkedHashMap<String, String> replacements = new LinkedHashMap<>();
+            for (String line : lines) {
+                collectJavaKlassAddresses(line, replacements);
+            }
+            if (replacements.isEmpty()) {
+                return lines;
+            }
+
+            ArrayList<String> normalized = new ArrayList<>(lines.size());
+            for (String line : lines) {
+                normalized.add(normalizeJavaKlassAddresses(line, replacements));
+            }
+            return List.copyOf(normalized);
+        }
+
+        private static void collectJavaKlassAddresses(
+                String line, LinkedHashMap<String, String> replacements) {
+            for (int i = 0; i < line.length();) {
+                char current = line.charAt(i);
+                if (current == ';') {
+                    return;
+                }
+                Matcher attribute = JAVA_KLASS_ATTRIBUTE.matcher(line);
+                attribute.region(i, line.length());
+                if (attribute.lookingAt()) {
+                    replacements.computeIfAbsent(attribute.group(1),
+                            ignored -> "<java-klass-" + replacements.size() + ">");
+                    i = attribute.end();
+                } else if (current == '"') {
+                    i = quotedTokenEnd(line, i);
+                } else {
+                    i++;
+                }
+            }
+        }
+
+        private static String normalizeJavaKlassAddresses(
+                String line, Map<String, String> replacements) {
+            StringBuilder normalized = new StringBuilder(line.length());
+            for (int i = 0; i < line.length();) {
+                char current = line.charAt(i);
+                if (current == ';') {
+                    normalized.append(line, i, line.length());
+                    break;
+                }
+
+                Matcher attribute = JAVA_KLASS_ATTRIBUTE.matcher(line);
+                attribute.region(i, line.length());
+                if (attribute.lookingAt()) {
+                    normalized.append("\"java-klass\"=\"")
+                            .append(replacements.get(attribute.group(1))).append('"');
+                    i = attribute.end();
+                    continue;
+                }
+                if (current == '"') {
+                    int end = quotedTokenEnd(line, i);
+                    normalized.append(line, i, end);
+                    i = end;
+                    continue;
+                }
+                if (!Character.isDigit(current)) {
+                    normalized.append(current);
+                    i++;
+                    continue;
+                }
+
+                int end = i + 1;
+                while (end < line.length() && Character.isDigit(line.charAt(end))) {
+                    end++;
+                }
+                String value = line.substring(i, end);
+                String replacement = replacements.get(value);
+                if (replacement != null && isUnsignedDecimalIntegerToken(line, i, end)) {
+                    normalized.append(replacement);
+                } else {
+                    normalized.append(value);
+                }
+                i = end;
+            }
+            return normalized.toString();
+        }
+
+        private static int quotedTokenEnd(String line, int quote) {
+            for (int i = quote + 1; i < line.length(); i++) {
+                char current = line.charAt(i);
+                if (current == '\\' && i + 1 < line.length()) {
+                    i++;
+                } else if (current == '"') {
+                    return i + 1;
+                }
+            }
+            return line.length();
+        }
+
+        private static boolean isUnsignedDecimalIntegerToken(
+                String line, int start, int end) {
+            if (start > 0 && isIntegerTokenNeighbor(line.charAt(start - 1))) {
+                return false;
+            }
+            if (end < line.length()
+                    && (isIntegerTokenNeighbor(line.charAt(end))
+                    || line.charAt(end) == ':')) {
+                return false;
+            }
+            return true;
+        }
+
+        private static boolean isIntegerTokenNeighbor(char value) {
+            return Character.isLetterOrDigit(value)
+                    || value == '-' || value == '+' || value == '$'
+                    || value == '.' || value == '_' || value == '%'
+                    || value == '@' || value == '!' || value == '#'
+                    || value == '\\';
         }
 
         public int peaAllocCount() {

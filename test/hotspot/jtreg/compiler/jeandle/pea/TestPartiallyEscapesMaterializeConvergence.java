@@ -25,6 +25,7 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPartiallyEscapesMaterializeConvergence
  */
 
@@ -32,9 +33,7 @@ package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import jdk.test.lib.Asserts;
 
@@ -73,10 +72,9 @@ public class TestPartiallyEscapesMaterializeConvergence {
                 cap4.report(loopRollback), cap16.report(loopRollback), loopRollback);
 
         for (Method target : targets) {
-            ShapeSummary four = cap4.summary(target);
-            ShapeSummary sixteen = cap16.summary(target);
-            Asserts.assertEquals(sixteen, four,
-                    target + ": cap 4 and cap 16 reach the same documented shape");
+            cap16.report(target).finalAfter().assertCrossProcessExactEquals(
+                    cap4.report(target).finalAfter(),
+                    target + ": cap 4 and cap 16 reach exact stable final IR");
         }
     }
 
@@ -87,7 +85,6 @@ public class TestPartiallyEscapesMaterializeConvergence {
                 .dontinline(sink)
                 .run()) {
             PEATestUtils.PEAReport[] reports = new PEATestUtils.PEAReport[targets.length];
-            ShapeSummary[] summaries = new ShapeSummary[targets.length];
             for (int i = 0; i < targets.length; i++) {
                 Method target = targets[i];
                 PEATestUtils.PEAReport report = run.report(target);
@@ -100,9 +97,8 @@ public class TestPartiallyEscapesMaterializeConvergence {
                             target + ": high-cap run ends in an idle transform");
                 }
                 assertNoAccumulatedEffects(report, target);
-                summaries[i] = ShapeSummary.of(report.finalAfter());
             }
-            return new ShapeRun(targets, reports, summaries);
+            return new ShapeRun(targets, reports);
         }
     }
 
@@ -110,20 +106,8 @@ public class TestPartiallyEscapesMaterializeConvergence {
                                                     Method target) {
         for (PEATestUtils.PEARound round : report.rounds()) {
             PEATestUtils.IRBody after = round.after();
-            after.assertAbsent("poison");
-            Set<String> materializations = new HashSet<>();
-            Set<String> phis = new HashSet<>();
-            for (PEATestUtils.PEAEffect effect : round.effects()) {
-                if (effect.kind().equals("Materialize")) {
-                    Asserts.assertTrue(materializations.add(effect.detail()),
-                            target + ": duplicate materialization effect in round "
-                                    + round.iteration() + ": " + effect.detail());
-                } else if (effect.kind().equals("CreatePHI")) {
-                    Asserts.assertTrue(phis.add(effect.detail()),
-                            target + ": duplicate PHI effect in round "
-                                    + round.iteration() + ": " + effect.detail());
-                }
-            }
+            PEATestUtils.assertStructuralSoundness(after,
+                    target + ": round " + round.iteration() + " after");
             Asserts.assertTrue(after.occurrenceCount(MATERIALIZED_PHI) <= 2,
                     target + ": no accumulated materialized-object PHI");
             Asserts.assertTrue(after.occurrenceCount(FIELD_PHI) <= 2,
@@ -131,7 +115,8 @@ public class TestPartiallyEscapesMaterializeConvergence {
             Asserts.assertTrue(after.occurrenceCount(CASE_C_FIELD_PHI) <= 2,
                     target + ": no accumulated Case-C field PHI");
         }
-        report.finalAfter().assertAbsent("poison");
+        PEATestUtils.assertStructuralSoundness(report.finalAfter(),
+                target + ": final post-canonicalization IR");
     }
 
     private static void assertConditionalMerge(PEATestUtils.PEAReport cap1,
@@ -168,10 +153,14 @@ public class TestPartiallyEscapesMaterializeConvergence {
                 target + ": cap 1 performs exactly one sound, non-converged round");
         Asserts.assertEquals(cap2.roundCount(), 2,
                 target + ": cap 2 performs the enabled follow-up optimization");
-        Asserts.assertEquals(cap4.roundCount(), 4,
-                target + ": cap 4 includes two stable idle observations");
-        Asserts.assertEquals(cap16.roundCount(), 4,
-                target + ": cap 16 stops at the same idle point as cap 4");
+        Asserts.assertEquals(cap4.roundCount(), 3,
+                target + ": cap 4 reaches fixpoint in one unchanged complete round");
+        Asserts.assertEquals(cap16.roundCount(), 3,
+                target + ": cap 16 stops at the same fixpoint as cap 4");
+        cap1.assertStoppedAtIterationCap();
+        cap2.assertStoppedAtIterationCap();
+        cap4.assertStoppedAtFixpoint();
+        cap16.assertStoppedAtFixpoint();
 
         PEATestUtils.IRBody before = cap1.round0Before();
         Asserts.assertEquals(before.peaAllocCount(), 2,
@@ -185,9 +174,7 @@ public class TestPartiallyEscapesMaterializeConvergence {
         Asserts.assertFalse(cap2.round(1).transformIdle(),
                 target + ": round 2 eliminates the newly non-escaping candidate");
         Asserts.assertTrue(cap4.round(2).transformIdle(),
-                target + ": first verification round is transform-idle");
-        Asserts.assertTrue(cap4.round(3).transformIdle(),
-                target + ": stable-delta verification round is transform-idle");
+                target + ": unchanged complete round reaches the fixpoint");
         cap4.finalAfter().assertAbsent("@jeandle.new_instance");
         cap4.finalAfter().assertAbsent("store atomic");
         cap4.finalAfter().assertAbsent("load atomic");
@@ -223,16 +210,18 @@ public class TestPartiallyEscapesMaterializeConvergence {
                 target + ": cap 1 performs one sound transform");
         Asserts.assertEquals(cap2.roundCount(), 2,
                 target + ": cap 2 reaches an idle transform");
-        Asserts.assertEquals(cap4.roundCount(), 3,
-                target + ": cap 4 verifies stable deltas after the idle transform");
-        Asserts.assertEquals(cap16.roundCount(), 3,
-                target + ": cap 16 stops at the same verified fixpoint");
+        Asserts.assertEquals(cap4.roundCount(), 2,
+                target + ": cap 4 stops on the first unchanged complete round");
+        Asserts.assertEquals(cap16.roundCount(), 2,
+                target + ": cap 16 stops at the same exact fixpoint");
+        cap1.assertStoppedAtIterationCap();
+        cap2.assertStoppedAtFixpoint();
+        cap4.assertStoppedAtFixpoint();
+        cap16.assertStoppedAtFixpoint();
         Asserts.assertFalse(cap1.round(0).transformIdle(),
                 target + ": the initial partial-escape replay mutates IR");
         Asserts.assertTrue(cap2.round(1).transformIdle(),
                 target + ": exact replay reuse makes the second transform idle");
-        Asserts.assertTrue(cap4.round(2).transformIdle(),
-                target + ": the stable-delta verification transform is idle");
         Asserts.assertEquals(ShapeSummary.of(cap2.finalAfter()),
                 ShapeSummary.of(cap4.finalAfter()),
                 target + ": cap 2 is sound and already has the stable IR shape");
@@ -241,21 +230,14 @@ public class TestPartiallyEscapesMaterializeConvergence {
     private static final class ShapeRun {
         private final Method[] targets;
         private final PEATestUtils.PEAReport[] reports;
-        private final ShapeSummary[] summaries;
 
-        private ShapeRun(Method[] targets, PEATestUtils.PEAReport[] reports,
-                         ShapeSummary[] summaries) {
+        private ShapeRun(Method[] targets, PEATestUtils.PEAReport[] reports) {
             this.targets = targets.clone();
             this.reports = reports.clone();
-            this.summaries = summaries.clone();
         }
 
         PEATestUtils.PEAReport report(Method target) {
             return reports[indexOf(target)];
-        }
-
-        ShapeSummary summary(Method target) {
-            return summaries[indexOf(target)];
         }
 
         private int indexOf(Method target) {

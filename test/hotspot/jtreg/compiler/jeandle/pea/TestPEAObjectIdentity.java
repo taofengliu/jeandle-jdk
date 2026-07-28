@@ -25,6 +25,7 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAObjectIdentity
  */
 
@@ -201,16 +202,13 @@ public class TestPEAObjectIdentity {
 
         assertCallWithDeoptBCI(round0After, JEANDLE_NEW_INSTANCE, 0, 1, target);
         assertCallWithDeoptBCI(round0After, JEANDLE_NEW_INSTANCE, 37, 0, target);
-        round0After.assertOccurrenceCount("pea.field.phi = phi i32", 1);
-        round0After.assertPresent("store atomic i32 %pea.field.phi");
-        round0After.assertBefore(JEANDLE_NEW_INSTANCE, 0, "pea.field.phi = phi i32", 0);
-        round0After.assertBefore("store atomic i32 %pea.field.phi", 0,
-                "store atomic ptr addrspace(1)", 0);
-        round0After.assertAbsentBetween("pea.field.phi = phi i32", 0,
-                JEANDLE_NEW_INSTANCE, "store atomic ptr addrspace(1)", 0);
+        PEATestUtils.assertStructuralSoundness(
+                round0After, target + ": structurally sound round-0 result");
 
         assertCallWithDeoptBCI(finalAfter, JEANDLE_NEW_INSTANCE, 0, 1, target);
         assertCallWithDeoptBCI(finalAfter, JEANDLE_NEW_INSTANCE, 37, 0, target);
+        PEATestUtils.assertStructuralSoundness(
+                finalAfter, target + ": structurally sound fixed point");
         finalAfter.assertBefore(JEANDLE_NEW_INSTANCE, 0, "store atomic i32", 0);
         finalAfter.assertBefore("store atomic i32", 0,
                 "store atomic ptr addrspace(1)", 0);

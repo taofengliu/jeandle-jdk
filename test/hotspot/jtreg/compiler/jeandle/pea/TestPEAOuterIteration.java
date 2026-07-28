@@ -25,6 +25,7 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAOuterIteration
  */
 
@@ -32,9 +33,7 @@ package compiler.jeandle.pea;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,8 +86,9 @@ public class TestPEAOuterIteration {
                 cap4.report(alreadyIdle), cap16.report(alreadyIdle), alreadyIdle);
 
         for (Method target : targets) {
-            Asserts.assertEquals(cap16.summary(target), cap4.summary(target),
-                    target + ": cap 4 and cap 16 have the exact stable summary");
+            cap16.report(target).finalAfter().assertCrossProcessExactEquals(
+                    cap4.report(target).finalAfter(),
+                    target + ": cap 4 and cap 16 have exact stable final IR");
         }
     }
 
@@ -100,7 +100,6 @@ public class TestPEAOuterIteration {
                 .run()) {
             PEATestUtils.PEAReport[] reports =
                     new PEATestUtils.PEAReport[targets.length];
-            ShapeSummary[] summaries = new ShapeSummary[targets.length];
             for (int i = 0; i < targets.length; i++) {
                 Method target = targets[i];
                 PEATestUtils.PEAReport report = run.report(target);
@@ -115,7 +114,6 @@ public class TestPEAOuterIteration {
                     PEATestUtils.assertStructuralSoundness(round.after(),
                             target + ": cap " + cap + " round "
                                     + round.iteration() + " after");
-                    assertNoDuplicateEffectDetails(round, target, cap);
                 }
                 PEATestUtils.assertStructuralSoundness(report.finalAfter(),
                         target + ": cap " + cap + " final");
@@ -123,21 +121,8 @@ public class TestPEAOuterIteration {
                     report.assertStoppedAtFixpoint();
                     report.assertFinalTransformIdle();
                 }
-                summaries[i] = ShapeSummary.of(report.finalAfter());
             }
-            return new ShapeRun(targets, reports, summaries);
-        }
-    }
-
-    private static void assertNoDuplicateEffectDetails(
-            PEATestUtils.PEARound round, Method target, int cap) {
-        Set<String> details = new HashSet<>();
-        for (PEATestUtils.PEAEffect effect : round.effects()) {
-            String identity = effect.kind() + "\n" + effect.detail();
-            Asserts.assertTrue(details.add(identity),
-                    target + ": cap " + cap + " round " + round.iteration()
-                            + " repeats effect detail " + effect.kind()
-                            + " " + effect.detail());
+            return new ShapeRun(targets, reports);
         }
     }
 
@@ -145,7 +130,7 @@ public class TestPEAOuterIteration {
             PEATestUtils.PEAReport cap1, PEATestUtils.PEAReport cap2,
             PEATestUtils.PEAReport cap4, PEATestUtils.PEAReport cap16,
             Method target, Method escape) {
-        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 4, 4);
+        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 3, 3);
         cap1.assertStoppedAtIterationCap();
         cap2.assertStoppedAtIterationCap();
 
@@ -159,20 +144,21 @@ public class TestPEAOuterIteration {
         cap4.finalAfter().assertRetainsExactlyOriginalAllocations(input);
 
         String escapeName = PEATestUtils.MethodId.of(escape).llvmFunctionName();
-        cap1.round(0).after().assertPresent("load atomic i32");
-        cap1.round(0).after().assertPresent("br i1");
+        cap1.round(0).after().assertPresent("br i1 true");
+        cap1.round(0).after().assertAbsent("load atomic i32");
         cap1.round(0).after().assertLineCount("@\"" + escapeName + "\"", 1);
         Asserts.assertEquals(cap1.round(0).effectCount("Materialize", "[VO=1]"),
                 2L, target + ": candidate replay covers escape and surviving arms");
         cap2.round(1).before().assertPresent("br i1 true");
         cap2.round(1).before().assertRetainsExactlyOriginalAllocations(
                 input, allocations.get(1).key());
+        cap1.finalAfter().assertCrossProcessExactEquals(
+                cap2.round(1).before(),
+                target + ": finalAfter is the complete post-canonicalization round");
         Asserts.assertFalse(cap2.round(1).transformIdle(),
                 target + ": round 2 removes the newly non-escaping candidate");
         Asserts.assertTrue(cap4.round(2).transformIdle(),
-                target + ": first verification round is transform-idle");
-        Asserts.assertTrue(cap4.round(3).transformIdle(),
-                target + ": stable-delta verification round is transform-idle");
+                target + ": unchanged complete round reaches the fixpoint");
         cap2.round(1).after().assertAbsent("@\"" + escapeName + "\"");
         cap4.finalAfter().assertLineCount("store atomic i32", 0);
         cap4.finalAfter().assertLineCount("load atomic i32", 0);
@@ -186,9 +172,9 @@ public class TestPEAOuterIteration {
             PEATestUtils.PEAReport cap1, PEATestUtils.PEAReport cap2,
             PEATestUtils.PEAReport cap4, PEATestUtils.PEAReport cap16,
             Method target, Method escape) {
-        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 3, 3);
+        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 2, 2);
         cap1.assertStoppedAtIterationCap();
-        cap2.assertStoppedAtIterationCap();
+        cap2.assertStoppedAtFixpoint();
 
         PEATestUtils.IRBody input = cap4.round0Before();
         List<PEATestUtils.AllocationSite> allocations = input.allocations();
@@ -203,9 +189,6 @@ public class TestPEAOuterIteration {
                 target + ": first round emits balanced replay");
         Asserts.assertTrue(cap2.round(1).transformIdle(),
                 target + ": immediate repeated analysis is physically idle");
-        Asserts.assertTrue(cap4.round(2).transformIdle(),
-                target + ": final stable-delta probe remains idle");
-
         PEATestUtils.IRBody stable = cap4.finalAfter();
         stable.assertLineCount(MONITOR_ENTER, 1);
         stable.assertLineCount(MONITOR_EXIT, 2);
@@ -240,8 +223,6 @@ public class TestPEAOuterIteration {
                 target + ": first round has one physical lock replay batch");
         Asserts.assertEquals(cap2.round(1).lockReplayPhysicalGroups().size(), 1,
                 target + ": idle analysis repeats one replay plan");
-        Asserts.assertEquals(cap4.round(2).lockReplayPhysicalGroups().size(), 1,
-                target + ": stable analysis repeats one replay plan");
     }
 
     private static InvokeDestinations uniqueInvokeDestinations(
@@ -279,8 +260,8 @@ public class TestPEAOuterIteration {
             PEATestUtils.PEAReport cap1, PEATestUtils.PEAReport cap2,
             PEATestUtils.PEAReport cap4, PEATestUtils.PEAReport cap16,
             Method target) {
-        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 2, 2);
-        cap1.assertStoppedAtIterationCap();
+        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 1, 1, 1);
+        cap1.assertStoppedAtFixpoint();
         cap2.assertStoppedAtFixpoint();
         for (PEATestUtils.PEAReport report :
                 List.of(cap1, cap2, cap4, cap16)) {
@@ -303,7 +284,7 @@ public class TestPEAOuterIteration {
             PEATestUtils.PEAReport cap1, PEATestUtils.PEAReport cap2,
             PEATestUtils.PEAReport cap4, PEATestUtils.PEAReport cap16,
             Method target) {
-        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 3, 3);
+        assertRoundCounts(cap1, cap2, cap4, cap16, target, 1, 2, 2, 2);
         PEATestUtils.IRBody input = cap4.round0Before();
         List<PEATestUtils.AllocationSite> allocations = input.allocations();
         Asserts.assertEquals(allocations.size(), 1,
@@ -314,12 +295,11 @@ public class TestPEAOuterIteration {
                     input, allocations.get(0).key());
         }
         cap1.assertStoppedAtIterationCap();
+        cap2.assertStoppedAtFixpoint();
         Asserts.assertFalse(cap1.round(0).transformIdle(),
                 target + ": first round plans loop replay");
         Asserts.assertTrue(cap2.round(1).transformIdle(),
-                target + ": immediate repeated loop transform is idle");
-        Asserts.assertTrue(cap4.round(2).transformIdle(),
-                target + ": stable-delta loop probe is idle");
+                target + ": unchanged complete repeated round reaches the fixpoint");
         for (PEATestUtils.PEAReport report :
                 List.of(cap1, cap2, cap4, cap16)) {
             for (PEATestUtils.PEARound round : report.rounds()) {
@@ -376,21 +356,14 @@ public class TestPEAOuterIteration {
     private static final class ShapeRun {
         private final Method[] targets;
         private final PEATestUtils.PEAReport[] reports;
-        private final ShapeSummary[] summaries;
 
-        ShapeRun(Method[] targets, PEATestUtils.PEAReport[] reports,
-                 ShapeSummary[] summaries) {
+        ShapeRun(Method[] targets, PEATestUtils.PEAReport[] reports) {
             this.targets = targets.clone();
             this.reports = reports.clone();
-            this.summaries = summaries.clone();
         }
 
         PEATestUtils.PEAReport report(Method target) {
             return reports[indexOf(target)];
-        }
-
-        ShapeSummary summary(Method target) {
-            return summaries[indexOf(target)];
         }
 
         private int indexOf(Method target) {

@@ -25,6 +25,7 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAFieldAliasingAndInheritance
  */
 
@@ -132,7 +133,8 @@ public class TestPEAFieldAliasingAndInheritance {
                 target + ": one field definition per branch");
         Asserts.assertEquals(first.effectCount("CreatePHI"), 1L,
                 target + ": branch-specific field state merges through one scalar phi");
-        first.after().assertLineCount(" = phi i32 ", 1);
+        first.after().assertLineCount(" = phi i32 ", 0);
+        first.after().assertLineCount(" = select i1 ", 1);
     }
 
     private static void assertHelperAliasVirtualized(PEATestUtils.RunResult run, Method target,

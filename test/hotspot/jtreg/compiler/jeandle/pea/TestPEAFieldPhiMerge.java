@@ -26,6 +26,7 @@
  * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.pea.PEATestUtils
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run main/othervm -XX:-UseJeandleCompiler
+ *      -XX:-UseCompressedOops -XX:-UseCompressedClassPointers
  *      compiler.jeandle.pea.TestPEAFieldPhiMerge
  */
 
@@ -58,8 +59,8 @@ public class TestPEAFieldPhiMerge {
 
         assertNestedDefaultIterations(nested);
 
-        // Four rounds expose the idle probes needed by the driver's strict
-        // fixpoint check without changing the two productive Case-C rounds.
+        // Four configured rounds leave enough budget to observe the first
+        // unchanged complete round after the two productive Case-C rounds.
         try (PEATestUtils.RunResult run =
                 PEATestUtils.shapeRun(WRAPPER, targets).peaIterations(4).run()) {
             assertNeverEscapeMerge(run, scalar);
@@ -70,12 +71,12 @@ public class TestPEAFieldPhiMerge {
             assertNeverEscapeMerge(run, multi);
             assertNeverEscapeMerge(run, nested);
             PEATestUtils.PEAReport nestedReport = run.report(nested);
-            Asserts.assertEquals(nestedReport.roundCount(), 4,
-                    nested + ": diagnostic run reaches strict fixpoint");
+            Asserts.assertEquals(nestedReport.roundCount(), 3,
+                    nested + ": diagnostic run reaches the exact fixpoint");
             Asserts.assertEquals(nestedReport.transformChangedRoundCount(), 2,
                     nested + ": diagnostic cap does not add productive rounds");
-            Asserts.assertEquals(nestedReport.transformIdleRoundCount(), 2,
-                    nested + ": strict fixpoint observes two idle probes");
+            Asserts.assertEquals(nestedReport.transformIdleRoundCount(), 1,
+                    nested + ": fixpoint needs one unchanged complete round");
             nestedReport.assertStoppedAtFixpoint();
         }
     }
