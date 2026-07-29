@@ -239,7 +239,7 @@ public class TestPEAStressAndConservativeFallback {
                 before.allocations().get(1).key());
         Asserts.assertTrue(report.round(0).partiallyEscapes() >= 1,
                 target + ": returned deopt graph retains source allocations");
-        Asserts.assertTrue(report.round(0).effectCount("RewriteDeoptBundle") >= 1,
+        Asserts.assertTrue(report.round(0).effectCount("RewriteDeoptPool") >= 1,
                 target + ": active deopt rewrites reconstruction state");
         String callee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
         PEATestUtils.DeoptBundle bundle = after.deoptBundleAtCall(callee, 0);

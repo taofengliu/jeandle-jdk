@@ -118,7 +118,7 @@ public final class PEATestUtils {
             "EliminateAllocation",
             "Materialize",
             "CreatePHI",
-            "RewriteDeoptBundle");
+            "RewriteDeoptPool");
     private static final Pattern FINAL_EFFECT_SEQUENCE = Pattern.compile(
             "(?:^| )seq=(\\S*)$"
     );

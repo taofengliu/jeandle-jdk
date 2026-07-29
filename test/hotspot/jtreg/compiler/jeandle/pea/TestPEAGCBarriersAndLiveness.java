@@ -204,7 +204,7 @@ public class TestPEAGCBarriersAndLiveness {
             throws Exception {
         String callee = PEATestUtils.MethodId.of(checkpoint).llvmFunctionName();
         PEATestUtils.DeoptBundle bundle = body.deoptBundleAtCall(callee, 0);
-        bundle.assertVirtualObjectIds(0, siblingCase ? 2 : 1);
+        bundle.assertVirtualObjectIds(0, 1);
 
         int holderRef = offset(TestWrapper.Holder.class, "ref");
         int holderExternal = offset(TestWrapper.Holder.class, "external");
