@@ -25,6 +25,7 @@
 #include <string>
 
 class ciInstanceKlass;
+class ciKlass;
 class Klass;
 
 // JeandleVMCallback collects the VM callbacks that the LLVM-side optimization
@@ -47,6 +48,15 @@ class JeandleVMCallback : public AllStatic {
   static bool      is_unverified_interface(uintptr_t klass_ptr);
   static bool      is_effectively_final(uintptr_t klass_ptr);
 
+  // Partial escape analysis (PEA) support. Queried by the LLVM-side PEA pass.
+  static int       requires_strict_lock_order();
+  static int       element_basictype_of_array_klass(uintptr_t klass_ptr);
+  static uintptr_t array_element_klass(uintptr_t klass_ptr);
+  static bool      is_value_based(uintptr_t klass_ptr);
+  static int       is_boxed(uintptr_t klass_ptr);
+  static bool      has_finalizer(uintptr_t klass_ptr);
+  static bool      can_virtualize(uintptr_t klass_ptr);
+
   // Constant field folding.
   static int64_t   get_constant_field_value(int oop_id, int offset);
   static int       get_constant_field_info(int oop_id, int offset);
@@ -54,6 +64,10 @@ class JeandleVMCallback : public AllStatic {
   // Oop handles.
   static std::string get_oop_handle_name(int oop_id);
   static uintptr_t   get_oop_klass(int oop_id);
+
+  // Returns the oop id of the java.lang.Class mirror for a VM Klass pointer,
+  // or -1 if unavailable. Used by PEA's foldGetClass.
+  static int get_java_mirror(uintptr_t klass_ptr);
 
   // Inlining.
   static bool      get_inline_callee_ir(uintptr_t callee_method);
