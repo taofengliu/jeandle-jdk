@@ -72,6 +72,10 @@
   product(bool, JeandlePrintInlineTree, false,                              \
           "Print Jeandle inline tree before installing compiled code")      \
                                                                             \
+  product(bool, JeandleDoPEA, true,                                         \
+          "Run Partial Escape Analysis (PEA) in the Jeandle optimization "  \
+          "pipeline")                                                       \
+                                                                            \
 
 // end of JEANDLE_FLAGS
 
