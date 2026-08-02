@@ -1943,6 +1943,10 @@ public final class PEATestUtils {
                 "^(" + LLVM_LABEL_NAME + "):(?: ;.*)?$");
         private static final Pattern JAVA_KLASS_ATTRIBUTE = Pattern.compile(
                 "\"java-klass\"=\"([0-9]+)\"");
+        private static final String DEOPT_BUNDLE_PREFIX = "[ \"deopt\"(";
+        private static final String DEOPT_BUNDLE_SUFFIX = ") ]";
+        private static final Pattern INLINE_SCOPE_METHOD_HEADER = Pattern.compile(
+                "i64 393233, i64 ([0-9]+), i64 [01], i32 (-?[0-9]+), i32 \\2");
         private final MethodId method;
         private final List<String> lines;
         private final String text;
@@ -2004,9 +2008,10 @@ public final class PEATestUtils {
         /**
          * Compares exact function IR emitted by independent JVM processes.
          * Runtime klass addresses are identified only by {@code java-klass}
-         * attributes and replaced consistently at each standalone
-         * unsigned-decimal integer token outside quoted text and comments.
-         * All other constants remain exact.
+         * attributes. Runtime method addresses are identified only as the
+         * method operand following an exact inline-scope marker in a deopt
+         * bundle. Both are replaced consistently; all other constants remain
+         * exact.
          */
         public void assertCrossProcessExactEquals(IRBody other, String context) {
             Objects.requireNonNull(other);
@@ -2016,23 +2021,30 @@ public final class PEATestUtils {
         }
 
         private List<String> crossProcessExactLines() {
-            LinkedHashMap<String, String> replacements = new LinkedHashMap<>();
-            for (String line : lines) {
-                collectJavaKlassAddresses(line, replacements);
+            return crossProcessExactLines(lines);
+        }
+
+        private static List<String> crossProcessExactLines(List<String> sourceLines) {
+            LinkedHashMap<String, String> klassReplacements = new LinkedHashMap<>();
+            LinkedHashMap<String, String> methodReplacements = new LinkedHashMap<>();
+            for (String line : sourceLines) {
+                collectRuntimeAddresses(line, klassReplacements, methodReplacements);
             }
-            if (replacements.isEmpty()) {
-                return lines;
+            if (klassReplacements.isEmpty() && methodReplacements.isEmpty()) {
+                return sourceLines;
             }
 
-            ArrayList<String> normalized = new ArrayList<>(lines.size());
-            for (String line : lines) {
-                normalized.add(normalizeJavaKlassAddresses(line, replacements));
+            ArrayList<String> normalized = new ArrayList<>(sourceLines.size());
+            for (String line : sourceLines) {
+                normalized.add(normalizeRuntimeAddresses(
+                        line, klassReplacements, methodReplacements));
             }
             return List.copyOf(normalized);
         }
 
-        private static void collectJavaKlassAddresses(
-                String line, LinkedHashMap<String, String> replacements) {
+        private static void collectRuntimeAddresses(
+                String line, LinkedHashMap<String, String> klassReplacements,
+                LinkedHashMap<String, String> methodReplacements) {
             for (int i = 0; i < line.length();) {
                 char current = line.charAt(i);
                 if (current == ';') {
@@ -2041,9 +2053,19 @@ public final class PEATestUtils {
                 Matcher attribute = JAVA_KLASS_ATTRIBUTE.matcher(line);
                 attribute.region(i, line.length());
                 if (attribute.lookingAt()) {
-                    replacements.computeIfAbsent(attribute.group(1),
-                            ignored -> "<java-klass-" + replacements.size() + ">");
+                    klassReplacements.computeIfAbsent(attribute.group(1),
+                            ignored -> "<java-klass-" + klassReplacements.size() + ">");
                     i = attribute.end();
+                } else if (current == 'i') {
+                    Matcher scope = inlineScopeMethodHeaderAt(line, i);
+                    if (scope != null) {
+                        methodReplacements.computeIfAbsent(scope.group(1),
+                                ignored -> "<java-method-"
+                                        + methodReplacements.size() + ">");
+                        i = scope.end();
+                    } else {
+                        i++;
+                    }
                 } else if (current == '"') {
                     i = quotedTokenEnd(line, i);
                 } else {
@@ -2052,8 +2074,9 @@ public final class PEATestUtils {
             }
         }
 
-        private static String normalizeJavaKlassAddresses(
-                String line, Map<String, String> replacements) {
+        private static String normalizeRuntimeAddresses(
+                String line, Map<String, String> klassReplacements,
+                Map<String, String> methodReplacements) {
             StringBuilder normalized = new StringBuilder(line.length());
             for (int i = 0; i < line.length();) {
                 char current = line.charAt(i);
@@ -2066,9 +2089,19 @@ public final class PEATestUtils {
                 attribute.region(i, line.length());
                 if (attribute.lookingAt()) {
                     normalized.append("\"java-klass\"=\"")
-                            .append(replacements.get(attribute.group(1))).append('"');
+                            .append(klassReplacements.get(attribute.group(1))).append('"');
                     i = attribute.end();
                     continue;
+                }
+                if (current == 'i') {
+                    Matcher scope = inlineScopeMethodHeaderAt(line, i);
+                    if (scope != null) {
+                        normalized.append(line, i, scope.start(1))
+                                .append(methodReplacements.get(scope.group(1)))
+                                .append(line, scope.end(1), scope.end());
+                        i = scope.end();
+                        continue;
+                    }
                 }
                 if (current == '"') {
                     int end = quotedTokenEnd(line, i);
@@ -2087,7 +2120,7 @@ public final class PEATestUtils {
                     end++;
                 }
                 String value = line.substring(i, end);
-                String replacement = replacements.get(value);
+                String replacement = klassReplacements.get(value);
                 if (replacement != null && isUnsignedDecimalIntegerToken(line, i, end)) {
                     normalized.append(replacement);
                 } else {
@@ -2096,6 +2129,21 @@ public final class PEATestUtils {
                 i = end;
             }
             return normalized.toString();
+        }
+
+        private static Matcher inlineScopeMethodHeaderAt(String line, int index) {
+            Matcher scope = INLINE_SCOPE_METHOD_HEADER.matcher(line);
+            scope.region(index, line.length());
+            if (!scope.lookingAt()) {
+                return null;
+            }
+            int bundleStart = line.lastIndexOf(DEOPT_BUNDLE_PREFIX, index);
+            if (bundleStart < 0) {
+                return null;
+            }
+            int bundleEnd = line.indexOf(DEOPT_BUNDLE_SUFFIX,
+                    bundleStart + DEOPT_BUNDLE_PREFIX.length());
+            return bundleEnd >= scope.end() ? scope : null;
         }
 
         private static int quotedTokenEnd(String line, int quote) {
@@ -3824,6 +3872,7 @@ public final class PEATestUtils {
     /** Self-test of the structural-soundness parsers; call once per test main. */
     public static void assertStructuralParserContracts() {
         assertPhiParserContracts();
+        assertCrossProcessNormalizerContracts();
 
         List<String> deadConstantBranch = List.of(
                 "entry:",
@@ -3958,6 +4007,38 @@ public final class PEATestUtils {
                 "ret i32 %value");
         validateNoLivePoison(
                 usedFrozenPoison, "used frozen poison", "synthetic");
+    }
+
+    private static void assertCrossProcessNormalizerContracts() {
+        List<String> first = List.of(
+                "%object = call \"java-klass\"=\"101010101010\" ptr "
+                        + "inttoptr (i64 101010101010 to ptr)",
+                "call void @poll() [ \"deopt\"(i64 0, i32 7, i32 7, "
+                        + "i64 393233, i64 202020202020, i64 0, i32 11, i32 11) ]");
+        List<String> second = List.of(
+                "%object = call \"java-klass\"=\"303030303030\" ptr "
+                        + "inttoptr (i64 303030303030 to ptr)",
+                "call void @poll() [ \"deopt\"(i64 0, i32 7, i32 7, "
+                        + "i64 393233, i64 404040404040, i64 0, i32 11, i32 11) ]");
+        Asserts.assertEquals(IRBody.crossProcessExactLines(first),
+                IRBody.crossProcessExactLines(second),
+                "cross-process normalizer handles exact klass and inline-method positions");
+
+        List<String> unrelatedFirst = List.of("call void @use(i64 505050505050)");
+        List<String> unrelatedSecond = List.of("call void @use(i64 606060606060)");
+        Asserts.assertNotEquals(IRBody.crossProcessExactLines(unrelatedFirst),
+                IRBody.crossProcessExactLines(unrelatedSecond),
+                "cross-process normalizer preserves unrelated integer constants");
+
+        List<String> collisionFirst = List.of(
+                "call void @ordinary(i64 393233, i64 707070707070, "
+                        + "i64 0, i32 13, i32 13)");
+        List<String> collisionSecond = List.of(
+                "call void @ordinary(i64 393233, i64 808080808080, "
+                        + "i64 0, i32 13, i32 13)");
+        Asserts.assertNotEquals(IRBody.crossProcessExactLines(collisionFirst),
+                IRBody.crossProcessExactLines(collisionSecond),
+                "cross-process normalizer requires exact deopt-bundle context");
     }
 
     private static boolean rejectsLivePoison(List<String> lines, String context) {
