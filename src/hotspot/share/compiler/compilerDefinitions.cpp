@@ -646,6 +646,15 @@ void CompilerConfig::ergo_initialize() {
 #ifdef JEANDLE
 
   if (UseJeandleCompiler) {
+#ifdef COMPILER2
+    if (!DoEscapeAnalysis && JeandleDoPEA) {
+      FLAG_SET_ERGO(JeandleDoPEA, false);
+    }
+    if (!EliminateLocks && JeandleEliminateLocks) {
+      FLAG_SET_ERGO(JeandleEliminateLocks, false);
+    }
+#endif // COMPILER2
+
     // TODO: Support compressed oops in PEA.
     if (JeandleDoPEA) {
       if (FLAG_IS_CMDLINE(UseCompressedOops) && UseCompressedOops) {

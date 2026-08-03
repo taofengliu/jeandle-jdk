@@ -102,6 +102,8 @@ static int jeandle_compilation_count = 0;
 
 static llvm::jeandle::PipelineOptions jeandle_java_pipeline_options() {
   llvm::jeandle::PipelineOptions options;
+  options.PartialEscape.Enable = JeandleDoPEA;
+  options.PartialEscape.EliminateLocks = JeandleEliminateLocks;
   if (Inline) {
     options.Inlining = llvm::jeandle::InlineMode::Default;
   } else if (InlineAccessors) {
@@ -115,6 +117,8 @@ static llvm::jeandle::PipelineOptions jeandle_java_pipeline_options() {
 static llvm::jeandle::PipelineOptions jeandle_runtime_stub_pipeline_options() {
   llvm::jeandle::PipelineOptions options;
   options.Inlining = llvm::jeandle::InlineMode::Disabled;
+  options.PartialEscape.Enable = JeandleDoPEA;
+  options.PartialEscape.EliminateLocks = JeandleEliminateLocks;
   return options;
 }
 
