@@ -190,16 +190,6 @@ bool JeandleCompiler::initialize_commandline_options() {
       "-imp-null-check-page-size=" + std::to_string(os::vm_page_size())
     };
 
-    // Disable PEA by running zero analyze+transform rounds
-    // (PartialEscapeIterative exits early on -jeandle-pea-iterations=0).
-    // Respect an explicit iteration count pinned via JeandleLLVMOptions:
-    // LLVM cl options must not be specified more than once.
-    if (!JeandleDoPEA &&
-        (JeandleLLVMOptions == nullptr ||
-         std::string(JeandleLLVMOptions).find("jeandle-pea-iterations") == std::string::npos)) {
-      argv_string.emplace_back("-jeandle-pea-iterations=0");
-    }
-
     if (JeandleLLVMOptions != nullptr) {
       // Tokenize the user-provided LLVM options string.
       const char* p = JeandleLLVMOptions;
