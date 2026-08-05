@@ -53,7 +53,7 @@ public class TestStripMinedLoopShapes {
         "exclusiveLess", "decreasingArray", "notEqualIncreasing",
         "strideTwoConstant", "arrayLength", "twoRecurrences",
         "withContinue", "withBreak", "withEarlyReturn", "exactBudget",
-        "overBudget"
+        "overBudget", "exclusiveDoWhile", "inclusiveDoWhile"
     };
 
     static long exclusiveLess(int limit) {
@@ -158,6 +158,33 @@ public class TestStripMinedLoopShapes {
         return sum;
     }
 
+    static long exclusiveDoWhile(int limit) {
+        long sum = 0;
+        int count = 0;
+        int i = 0;
+        do {
+            sum += i;
+            count++;
+            i++;
+        } while (i < limit);
+        return (sum << 32) ^ count;
+    }
+
+    static long inclusiveDoWhile(int limit) {
+        if (limit > 1_000_000) {
+            limit = 1_000_000;
+        }
+        long sum = 0;
+        int count = 0;
+        int i = 0;
+        do {
+            sum += i;
+            count++;
+            i++;
+        } while (i <= limit);
+        return (sum << 32) ^ count;
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
             throw new IllegalArgumentException("expected one mode argument");
@@ -190,6 +217,12 @@ public class TestStripMinedLoopShapes {
               refWithEarlyReturn(80, 53));
         check("exactBudget", exactBudget(17), refExactBudget(17));
         check("overBudget", overBudget(17), refOverBudget(17));
+        check("exclusiveDoWhile", exclusiveDoWhile(37),
+              (666L << 32) ^ 37L);
+        check("exclusiveDoWhileOneTrip", exclusiveDoWhile(-5), 1L);
+        check("inclusiveDoWhile", inclusiveDoWhile(37),
+              (703L << 32) ^ 38L);
+        check("inclusiveDoWhileOneTrip", inclusiveDoWhile(-5), 1L);
 
         check("exclusiveLessZeroTrip", exclusiveLess(0), 0);
         check("exclusiveLessOneTrip", exclusiveLess(1), 0);
@@ -346,6 +379,8 @@ public class TestStripMinedLoopShapes {
         Asserts.assertEquals(IRDumpParser.countPolls(afterShortLoop), 1,
             "exactBudget: short-loop elimination must leave only the return poll");
         assertMined(output, "overBudget", "add.sat.i");
+        assertMined(output, "exclusiveDoWhile", "add.sat.i");
+        assertMined(output, "inclusiveDoWhile", "add.sat.i");
     }
 
     private static void assertTrace(String output, String method, String needle) {
@@ -362,7 +397,8 @@ public class TestStripMinedLoopShapes {
         for (String method : List.of("exclusiveLess", "notEqualIncreasing",
                                      "strideTwoConstant", "twoRecurrences",
                                      "withContinue",
-                                     "withEarlyReturn", "overBudget")) {
+                                     "withEarlyReturn", "overBudget",
+                                     "exclusiveDoWhile", "inclusiveDoWhile")) {
             assertTrace(output, method, "strip-mine: wrapped loop");
         }
         assertTrace(output, "strideTwoConstant", "batch-stride=14");
