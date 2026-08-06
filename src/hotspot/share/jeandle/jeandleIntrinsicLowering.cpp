@@ -1061,6 +1061,10 @@ llvm::Value* JeandleIntrinsicLowering::emit_vectorized_mismatch_small(
 
 llvm::Value* JeandleIntrinsicLowering::emit_vectorized_mismatch_medium(
     llvm::Value* a_addr, llvm::Value* b_addr, llvm::Value* byte_length, llvm::Value* scale) {
+
+  // We are generating a loop that does not have any safepoint.
+  _interp->_module.getOrInsertNamedMetadata(llvm::jeandle::Metadata::SkipSafepointCoverageVerifier);
+
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::IRBuilder<>& b = _interp->_ir_builder;
   llvm::Type* i8 = b.getInt8Ty();
