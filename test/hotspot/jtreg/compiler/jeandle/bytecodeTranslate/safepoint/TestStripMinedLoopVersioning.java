@@ -188,7 +188,7 @@ public class TestStripMinedLoopVersioning {
         IRDumpParser.assertContains(section, "inclusive.no_wrap",
             method + ": the fast path must be protected by a no-wrap guard");
         IRDumpParser.assertContains(section, intrinsic,
-            method + ": the outer batch limit must use saturating arithmetic");
+            method + ": the outer batch limit must use an SCEV-friendly clamped min");
         IRDumpParser.assertContains(section, IRDumpParser.POLL_CALL + " #",
             method + ": the relocated outer poll must carry its marker");
 
@@ -219,9 +219,9 @@ public class TestStripMinedLoopVersioning {
         OutputAnalyzer out = runChild(STRUCTURAL_OPTIONS, BUDGET);
         out.shouldHaveExitValue(0);
         assertVersionedAndMined(out.getOutput(), "inclusiveIncreasing",
-                               "sadd.sat.i32");
+                               "llvm.smin");
         assertVersionedAndMined(out.getOutput(), "inclusiveDecreasing",
-                               "ssub.sat.i32");
+                               "llvm.smin");
     }
 
     private static void runTrace() throws Exception {

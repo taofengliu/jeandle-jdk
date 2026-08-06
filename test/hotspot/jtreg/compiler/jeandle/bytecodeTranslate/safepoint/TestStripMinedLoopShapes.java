@@ -339,11 +339,17 @@ public class TestStripMinedLoopShapes {
         return "";
     }
 
-    private static void assertMined(String output, String method, String intrinsic) {
+    private static void assertMined(String output, String method) {
         String section = minedSection(output, method);
         Asserts.assertFalse(section.isEmpty(), method + ": expected a strip-mined outer loop");
-        IRDumpParser.assertContains(section, intrinsic,
-            method + ": strip mining must use a saturating batch limit");
+        // The per-batch inner limit must stay SCEV-friendly regardless of which
+        // clamp a loop takes: signed loops use a residual-distance chunk and
+        // unsigned loops use uadd/usub_sat, but neither uses the SCEV-opaque
+        // sadd_sat/ssub_sat (review finding 5.C.1).
+        IRDumpParser.assertNotContains(section, "sadd.sat",
+            method + ": signed clamp must not use the SCEV-opaque sadd_sat");
+        IRDumpParser.assertNotContains(section, "ssub.sat",
+            method + ": signed clamp must not use the SCEV-opaque ssub_sat");
         IRDumpParser.assertContains(section, IRDumpParser.POLL_CALL + " #",
             method + ": the relocated outer poll must carry the marker attribute");
     }
@@ -362,12 +368,12 @@ public class TestStripMinedLoopShapes {
         out.shouldHaveExitValue(0);
         String output = out.getOutput();
 
-        assertMined(output, "exclusiveLess", "add.sat.i");
-        assertMined(output, "notEqualIncreasing", "add.sat.i");
-        assertMined(output, "strideTwoConstant", "add.sat.i");
-        assertMined(output, "twoRecurrences", "add.sat.i");
-        assertMined(output, "withContinue", "add.sat.i");
-        assertMined(output, "withEarlyReturn", "add.sat.i");
+        assertMined(output, "exclusiveLess");
+        assertMined(output, "notEqualIncreasing");
+        assertMined(output, "strideTwoConstant");
+        assertMined(output, "twoRecurrences");
+        assertMined(output, "withContinue");
+        assertMined(output, "withEarlyReturn");
         assertUnminedWithPoll(output, "decreasingArray");
         assertUnminedWithPoll(output, "arrayLength");
         assertUnminedWithPoll(output, "withBreak");
@@ -378,9 +384,9 @@ public class TestStripMinedLoopShapes {
             output, "After", "SafepointPollElimination", suffix("exactBudget"), 1);
         Asserts.assertEquals(IRDumpParser.countPolls(afterShortLoop), 1,
             "exactBudget: short-loop elimination must leave only the return poll");
-        assertMined(output, "overBudget", "add.sat.i");
-        assertMined(output, "exclusiveDoWhile", "add.sat.i");
-        assertMined(output, "inclusiveDoWhile", "add.sat.i");
+        assertMined(output, "overBudget");
+        assertMined(output, "exclusiveDoWhile");
+        assertMined(output, "inclusiveDoWhile");
     }
 
     private static void assertTrace(String output, String method, String needle) {

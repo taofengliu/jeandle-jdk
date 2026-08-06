@@ -320,7 +320,7 @@ public class TestStripMinedCountedLoop {
     // =========================================================================
     // countedIntRuntimeBound: canonical runtime-bound counted loop. Strip-mined
     // into an outer loop polling every 1000-iteration batch; the inner loop runs
-    // poll-free under the saturating-add clamp.
+    // poll-free under the SCEV-friendly clamped limit.
     // =========================================================================
 
     private static void checkCountedIntRuntimeBoundStructural(String out) {
@@ -328,8 +328,8 @@ public class TestStripMinedCountedLoop {
         checkPipelineShape(out, suffix);
         String wrapped = findStripMiningAfter(out, suffix, ".outer.latch");
         Asserts.assertNotNull(wrapped, suffix + ": expected a strip-mined (.outer.latch) loop nest");
-        IRDumpParser.assertContains(wrapped, "llvm.sadd.sat.i32",
-            suffix + ": outer batch limit must be clamped with a saturating add");
+        IRDumpParser.assertContains(wrapped, "llvm.smin",
+            suffix + ": outer batch limit must be clamped with an SCEV-friendly min");
         IRDumpParser.assertContains(wrapped, MARKED_POLL,
             suffix + ": poll relocated to the outer latch must carry the strip-mined-poll marker");
         // after-strip-mining keeps the relocated outer-latch poll plus the return poll.
@@ -409,8 +409,8 @@ public class TestStripMinedCountedLoop {
         checkPipelineShape(out, suffix);
         String wrapped = findStripMiningAfter(out, suffix, ".outer.latch");
         Asserts.assertNotNull(wrapped, suffix + ": expected a strip-mined (.outer.latch) loop nest");
-        IRDumpParser.assertContains(wrapped, "llvm.sadd.sat.i64",
-            suffix + ": outer batch limit must be clamped with a 64-bit saturating add");
+        IRDumpParser.assertContains(wrapped, "llvm.smin",
+            suffix + ": outer batch limit must be clamped with an SCEV-friendly min");
         Asserts.assertEquals(IRDumpParser.countPolls(pollElimAfter(out, suffix, 1)), 2,
             suffix + ": after-strip-mining must keep exactly the outer-latch and return polls");
     }
@@ -435,8 +435,8 @@ public class TestStripMinedCountedLoop {
         checkPipelineShape(out, suffix);
         String wrapped = findStripMiningAfter(out, suffix, ".outer.latch");
         Asserts.assertNotNull(wrapped, suffix + ": expected the versioned fast path to be strip-mined");
-        IRDumpParser.assertContains(wrapped, "llvm.ssub.sat.i32",
-            suffix + ": decreasing IV must be clamped with a saturating subtract");
+        IRDumpParser.assertContains(wrapped, "llvm.smin",
+            suffix + ": decreasing IV must be clamped with an SCEV-friendly min");
         Asserts.assertEquals(IRDumpParser.countPolls(pollElimAfter(out, suffix, 1)), 3,
             suffix + ": outer-latch poll + slow-path poll + return poll must survive");
     }
