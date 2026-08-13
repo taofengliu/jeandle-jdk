@@ -262,6 +262,39 @@ DEF_JAVA_OP(get_class, 1, llvm::PointerType::get(context, llvm::jeandle::AddrSpa
   ir_builder.CreateRet(mirror);
 JAVA_OP_END
 
+// Thread.currentThread(): load the java.lang.Thread oop for the current thread.
+// Two-level load via the OopHandle stored in JavaThread::_vthread, identical in
+// structure to jeandle.get_class for Klass::_java_mirror:
+//   1. Materialize the current JavaThread* (r15 / x28 / x23) via jeandle.current_thread.
+//   2. Load the OopHandle pointer at JavaThread + vthread_offset  -> oop* in C heap.
+//   3. Dereference the OopHandle to get the Thread oop in the Java heap.
+// _vthread is the value returned by Thread.currentThread(): the mounted virtual
+// thread, otherwise the carrier thread's _threadObj. Matches C2's
+// inline_native_currentThread() -> generate_virtual_thread().
+DEF_JAVA_OP(current_thread_obj, 1,
+            llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace))
+  // Step 1: materialize the current JavaThread* via the existing JavaOp.
+  llvm::Function* current_thread_func = template_module.getFunction("jeandle.current_thread");
+  if (!current_thread_func) {
+    RuntimeDefinedJavaOps::set_failed("jeandle.current_thread is not found in template module");
+    return;
+  }
+  llvm::CallInst* jt = ir_builder.CreateCall(current_thread_func);
+  jt->setCallingConv(llvm::CallingConv::Hotspot_JIT);
+
+  // Step 2: load the OopHandle (oop*) stored at JavaThread + vthread_offset.
+  llvm::Value* vthread_handle_addr = ir_builder.CreateInBoundsGEP(
+      ir_builder.getInt8Ty(), jt,
+      ir_builder.getInt32(in_bytes(JavaThread::vthread_offset())));
+  llvm::Type* c_heap_ptr_ty = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace);
+  llvm::Value* oop_handle = ir_builder.CreateLoad(c_heap_ptr_ty, vthread_handle_addr);
+
+  // Step 3: dereference the OopHandle to get the java.lang.Thread oop in the Java heap.
+  llvm::Type* thread_oop_ty = llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+  llvm::Value* thread_oop = ir_builder.CreateLoad(thread_oop_ty, oop_handle);
+  ir_builder.CreateRet(thread_oop);
+JAVA_OP_END
+
 // Reference.refersTo0 / PhantomReference.refersTo0:
 // Load the referent field and compare with the given object, returning a boolean.
 // No GC barrier is applied (AS_NO_KEEPALIVE semantics): refersTo0 should not keep
@@ -441,6 +474,18 @@ DEF_JAVA_OP(decode_klass, 1, llvm::PointerType::get(context, llvm::jeandle::Addr
   ir_builder.CreateRet(klass_ptr);
 JAVA_OP_END
 
+static inline void insert_patch_size_metadata(
+  llvm::Module &template_module, llvm::LLVMContext &context,
+  const char *patch_type, int patch_size) {
+    llvm::NamedMDNode* patch_node = template_module.getOrInsertNamedMetadata(patch_type);
+    assert(patch_node != nullptr, "invalid patch node");
+    llvm::Metadata* patch_size_md =
+    llvm::ConstantAsMetadata::get(
+      llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),
+      patch_size));
+      patch_node->addOperand(llvm::MDNode::get(context, patch_size_md));
+    }
+
 } // anonymous namespace
 
 const char* RuntimeDefinedJavaOps::_error_msg = nullptr;
@@ -461,6 +506,7 @@ bool RuntimeDefinedJavaOps::define_all(llvm::Module& template_module) {
   define_pre_barrier(template_module);
   define_post_barrier(template_module);
   define_get_class(template_module);
+  define_current_thread_obj(template_module);
   define_reference_refers_to(template_module);
   define_reference_get(template_module);
   define_encode_heap_oop(template_module);
@@ -495,15 +541,14 @@ void RuntimeDefinedJavaOps::define_metadata(llvm::Module& template_module) {
     metadata_node->addOperand(heap_base_register);
   }
 
-  // Static call patch size.
+  // Call patch size info.
   {
-    llvm::NamedMDNode* patch_node = template_module.getOrInsertNamedMetadata(llvm::jeandle::Metadata::StaticCallPatchSize);
-    assert(patch_node != nullptr, "invalid patch node");
-    llvm::Metadata* patch_size_md =
-      llvm::ConstantAsMetadata::get(
-        llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),
-                                  JeandleCompiledCall::call_site_patch_size(JeandleCompiledCall::STATIC_CALL)));
-    patch_node->addOperand(llvm::MDNode::get(context, patch_size_md));
+    insert_patch_size_metadata(template_module, context,
+        llvm::jeandle::Metadata::StaticCallPatchSize,
+        JeandleCompiledCall::call_site_patch_size(JeandleCompiledCall::STATIC_CALL));
+    insert_patch_size_metadata(template_module, context,
+        llvm::jeandle::Metadata::DynamicCallPatchSize,
+        JeandleCompiledCall::call_site_patch_size(JeandleCompiledCall::DYNAMIC_CALL));
   }
 }
 
