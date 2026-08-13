@@ -165,26 +165,45 @@ public final class PEATestUtils {
         private final String llvmFunctionName;
         private final String compileCommandPattern;
         private final boolean osr;
+        // A compilation root's LLVM function is "<name>.root" (OSR root:
+        // "__jeandle_osr.<name>.root"), disambiguating it from a recursive
+        // CHA-devirtualization target that reuses the base name. Callee/inlined
+        // methods use the plain base name, so only the compilation root sets
+        // root=true.
+        private final boolean root;
 
-        private MethodId(Method method, boolean osr) {
+        private MethodId(Method method, boolean osr, boolean root) {
             this.method = Objects.requireNonNull(method);
             this.osr = osr;
+            this.root = root;
             this.jvmDescriptor = MethodType.methodType(
                     method.getReturnType(), method.getParameterTypes()).descriptorString();
             this.dumpStem = method.getDeclaringClass().getName().replace('.', '_')
                     + "_" + method.getName();
             this.llvmFunctionName = (osr ? "__jeandle_osr." : "")
-                    + dumpStem + jvmDescriptor;
+                    + dumpStem + jvmDescriptor + (root ? ".root" : "");
             this.compileCommandPattern = method.getDeclaringClass().getName() + "::"
                     + method.getName() + jvmDescriptor;
         }
 
+        /** Non-root identity for a callee or inlined method (base name only). */
         public static MethodId of(Method method) {
-            return new MethodId(method, false);
+            return new MethodId(method, false, false);
         }
 
+        /** Root identity for a normal (non-OSR) compilation unit. */
+        public static MethodId rootOf(Method method) {
+            return new MethodId(method, false, true);
+        }
+
+        /** Root identity for an OSR compilation unit. */
         public static MethodId osr(Method method) {
-            return new MethodId(method, true);
+            return new MethodId(method, true, true);
+        }
+
+        /** The root-compilation identity for this method (no-op if already a root). */
+        public MethodId asRoot() {
+            return root ? this : new MethodId(method, osr, true);
         }
 
         public Method method() {
@@ -237,7 +256,7 @@ public final class PEATestUtils {
 
     /** Create an exact multi-target run with PEA diagnostics and IR dumps. */
     public static RunBuilder shapeRun(String wrapperFQN, MethodId... targets) {
-        return new RunBuilder(wrapperFQN, true, targets);
+        return new RunBuilder(wrapperFQN, true, rootAll(targets));
     }
 
     /** Create an exact multi-target run for behavior comparison. */
@@ -247,7 +266,7 @@ public final class PEATestUtils {
 
     /** Create an exact multi-target run for behavior comparison. */
     public static RunBuilder behaviorRun(String wrapperFQN, MethodId... targets) {
-        return new RunBuilder(wrapperFQN, false, targets);
+        return new RunBuilder(wrapperFQN, false, rootAll(targets));
     }
 
     /** Builder for one child VM. Every target is explicit and descriptor-qualified. */
@@ -605,7 +624,7 @@ public final class PEATestUtils {
         }
 
         public PEAReport report(Method method) {
-            return report(MethodId.of(method));
+            return report(MethodId.rootOf(method));
         }
 
         public PEAReport report(MethodId method) {
@@ -615,23 +634,23 @@ public final class PEATestUtils {
             if (reports == null) {
                 reports = PEAReport.parse(output.getStderr(), targets.toArray(MethodId[]::new));
             }
-            return reports.report(method);
+            return reports.report(method.asRoot());
         }
 
         public IRBody frontendIR(Method method) throws IOException {
-            return frontendIR(MethodId.of(method));
+            return frontendIR(MethodId.rootOf(method));
         }
 
         public IRBody frontendIR(MethodId method) throws IOException {
-            return PEATestUtils.frontendIR(dumpDir, method);
+            return PEATestUtils.frontendIR(dumpDir, method.asRoot());
         }
 
         public IRBody finalIR(Method method) throws IOException {
-            return finalIR(MethodId.of(method));
+            return finalIR(MethodId.rootOf(method));
         }
 
         public IRBody finalIR(MethodId method) throws IOException {
-            return PEATestUtils.finalIR(dumpDir, method);
+            return PEATestUtils.finalIR(dumpDir, method.asRoot());
         }
 
         private void assertRequestedMethodsCompiled() {
@@ -3761,7 +3780,18 @@ public final class PEATestUtils {
         Objects.requireNonNull(methods);
         MethodId[] result = new MethodId[methods.length];
         for (int i = 0; i < methods.length; i++) {
-            result[i] = MethodId.of(Objects.requireNonNull(methods[i]));
+            result[i] = MethodId.rootOf(Objects.requireNonNull(methods[i]));
+        }
+        return result;
+    }
+
+    // Every target handed to a run is a compilation root, so normalize any
+    // callee-style MethodId to its root identity before building the run.
+    private static MethodId[] rootAll(MethodId[] targets) {
+        Objects.requireNonNull(targets);
+        MethodId[] result = new MethodId[targets.length];
+        for (int i = 0; i < targets.length; i++) {
+            result[i] = Objects.requireNonNull(targets[i]).asRoot();
         }
         return result;
     }

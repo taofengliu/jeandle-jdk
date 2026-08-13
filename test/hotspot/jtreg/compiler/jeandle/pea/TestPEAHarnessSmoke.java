@@ -120,7 +120,7 @@ public class TestPEAHarnessSmoke {
         Asserts.assertFalse(first.isOSR());
         Asserts.assertTrue(PEATestUtils.MethodId.osr(noArgs).isOSR());
         Asserts.assertEquals(PEATestUtils.MethodId.osr(noArgs).llvmFunctionName(),
-                "__jeandle_osr." + first.llvmFunctionName());
+                "__jeandle_osr." + first.llvmFunctionName() + ".root");
         Asserts.assertNotEquals(first.llvmFunctionName(), overloaded.llvmFunctionName());
         Asserts.assertNotEquals(first.dumpStem(), extra.dumpStem());
     }
@@ -145,7 +145,7 @@ public class TestPEAHarnessSmoke {
 
     private static void testMethodIdRunsModesAndStructuralSoundness(Method target)
             throws Exception {
-        PEATestUtils.MethodId normal = PEATestUtils.MethodId.of(target);
+        PEATestUtils.MethodId normal = PEATestUtils.MethodId.rootOf(target);
         PEATestUtils.MethodId osr = PEATestUtils.MethodId.osr(target);
 
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, normal).run()) {
@@ -1437,17 +1437,17 @@ public class TestPEAHarnessSmoke {
                     "-jeandle-trace-pea",
                     "-jeandle-dump-pea-stats",
                     "-jeandle-pea-analyze-function="
-                            + PEATestUtils.MethodId.of(noArgs).llvmFunctionName(),
+                            + PEATestUtils.MethodId.rootOf(noArgs).llvmFunctionName(),
                     "-jeandle-dump-pea-ir-function="
-                            + PEATestUtils.MethodId.of(noArgs).llvmFunctionName(),
+                            + PEATestUtils.MethodId.rootOf(noArgs).llvmFunctionName(),
                     "-jeandle-pea-analyze-function="
-                            + PEATestUtils.MethodId.of(complex).llvmFunctionName(),
+                            + PEATestUtils.MethodId.rootOf(complex).llvmFunctionName(),
                     "-jeandle-dump-pea-ir-function="
-                            + PEATestUtils.MethodId.of(complex).llvmFunctionName());
+                            + PEATestUtils.MethodId.rootOf(complex).llvmFunctionName());
             Asserts.assertEquals(actualLLVMOptions.stream().sorted().toList(),
                     expectedLLVMOptions.stream().sorted().toList());
             for (Method method : List.of(noArgs, complex)) {
-                String function = PEATestUtils.MethodId.of(method).llvmFunctionName();
+                String function = PEATestUtils.MethodId.rootOf(method).llvmFunctionName();
                 Asserts.assertTrue(llvm.contains("-jeandle-pea-analyze-function=" + function));
                 Asserts.assertTrue(llvm.contains("-jeandle-dump-pea-ir-function=" + function));
                 PEATestUtils.PEAReport report = run.report(method);
