@@ -40,6 +40,7 @@
 #include "oops/klass.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/globals.hpp"
+#include "runtime/vm_version.hpp"
 #include "utilities/globalDefinitions.hpp"
 
 // =============================================================================
@@ -98,6 +99,18 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
 
     case vmIntrinsics::_vectorizedMismatch:
       return UseVectorizedMismatchIntrinsic;
+
+    // floatToFloat16/float16ToFloat: gated on the same
+    // VM_Version::supports_float16() predicate that turns on the template
+    // interpreter's hardware entries (and gates C1/C2's intrinsic versions
+    // upstream). Keeping the compiled-code gate identical to the
+    // interpreter's keeps NaN semantics consistent across tiers: with
+    // hardware support every tier quiets signaling NaNs the same way (see
+    // lower_float16_convert); without it every tier runs the pure-Java
+    // implementations.
+    case vmIntrinsics::_floatToFloat16:
+    case vmIntrinsics::_float16ToFloat:
+      return VM_Version::supports_float16();
 
     default: break;
   }
@@ -169,6 +182,14 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_doubleToRawLongBits:
     case vmIntrinsics::_longBitsToDouble:
 
+    // floatToIntBits/doubleToLongBits: no CPU gating needed, same bucket as
+    // the other InlineMathNatives-only intrinsics above (min/max/fma) --
+    // disabled_by_jvm_flags() only checks InlineMathNatives for these two IDs,
+    // no hardware feature check. The NaN-canonicalizing compare+select this
+    // lowers to (see lower_fp_to_bits_canonical) is always legal IR.
+    case vmIntrinsics::_floatToIntBits:
+    case vmIntrinsics::_doubleToLongBits:
+
     // fence
     case vmIntrinsics::_loadFence:
     case vmIntrinsics::_storeFence:
@@ -224,6 +245,7 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_multiplyHigh:
     case vmIntrinsics::_unsignedMultiplyHigh:
       return true;
+
     default:
       return false;
   }
@@ -431,6 +453,16 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_longBitsToDouble:
       return lower_llvm_bitcast();
 
+    // floatToIntBits/doubleToLongBits
+    case vmIntrinsics::_floatToIntBits:
+    case vmIntrinsics::_doubleToLongBits:
+      return lower_fp_to_bits_canonical(id);
+
+    // floatToFloat16/float16ToFloat
+    case vmIntrinsics::_floatToFloat16:
+    case vmIntrinsics::_float16ToFloat:
+      return lower_float16_convert(id);
+
     // fence
     case vmIntrinsics::_loadFence:
     case vmIntrinsics::_storeFence:
@@ -637,6 +669,111 @@ bool JeandleIntrinsicLowering::lower_llvm_bitcast() {
   llvm::Value* src = _interp->_jvm->pop(src_type);
   llvm::Value* cast = builder.CreateBitCast(src, JeandleType::java2llvm(dst_type, ctx));
   _interp->_jvm->push(dst_type, cast);
+  return true;
+}
+
+// ---- lower_fp_to_bits_canonical ----
+// Float.floatToIntBits(float) / Double.doubleToLongBits(double): like the raw
+// bitcast variants, but NaN inputs are canonicalized to the single NaN bit
+// pattern Java specifies, instead of preserving whatever NaN payload/sign the
+// input happened to carry. Mirrors C2's LibraryCallKit::inline_fp_conversions:
+// arg != arg (unordered compare) is true only for NaN; select between the
+// canonical NaN constant and the plain bitcast result.
+bool JeandleIntrinsicLowering::lower_fp_to_bits_canonical(vmIntrinsics::ID id) {
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  bool is_double = (id == vmIntrinsics::_doubleToLongBits);
+
+  if (is_double) {
+    llvm::Value* arg = _interp->_jvm->dpop();
+    llvm::Value* is_nan = builder.CreateFCmpUNE(arg, arg);
+    llvm::Value* bits = builder.CreateBitCast(arg, builder.getInt64Ty());
+    llvm::Value* canonical_nan = builder.getInt64(0x7ff8000000000000ULL);
+    _interp->_jvm->lpush(builder.CreateSelect(is_nan, canonical_nan, bits));
+  } else {
+    llvm::Value* arg = _interp->_jvm->fpop();
+    llvm::Value* is_nan = builder.CreateFCmpUNE(arg, arg);
+    llvm::Value* bits = builder.CreateBitCast(arg, builder.getInt32Ty());
+    llvm::Value* canonical_nan = builder.getInt32(0x7fc00000);
+    _interp->_jvm->ipush(builder.CreateSelect(is_nan, canonical_nan, bits));
+  }
+  return true;
+}
+
+// ---- lower_float16_convert ----
+// Float.floatToFloat16(float) / Float.float16ToFloat(short): float16 values
+// are carried as the raw bit pattern in a Java short, never as a distinct
+// value type, so the non-NaN path is a real narrowing/widening fp convert
+// (fptrunc/fpext through LLVM's `half` type) plus a bitcast to move between
+// `half` and the integer bits -- not a plain bitcast like the 32/64-bit
+// variants above.
+//
+// NaN results must not come from fptrunc/fpext. On machines where
+// VM_Version::supports_float16() holds (the only ones where these
+// intrinsics fire, mirroring the interpreter/C1/C2 gating), the template
+// interpreter entries execute the hardware conversion (x86 vcvtph2ps/
+// vcvtps2ph), which quiets signaling NaNs while preserving the payload.
+// LLVM, however, treats NaN payloads as unspecified: InstCombine folds
+// `fptrunc(fpext x)` to `x`, so a compiled
+// floatToFloat16(float16ToFloat(x)) round trip returns sNaN bit patterns
+// unchanged where the interpreter quiets them.
+// compiler/intrinsics/float16/Binary16ConversionNaN.java compares exactly
+// that round trip bit-for-bit against interpreter results for every 16-bit
+// NaN pattern, so the compiled NaN behavior has to be pinned down: NaNs
+// take an explicit integer-arithmetic path implementing the same
+// quiet-and-preserve-payload semantics as the hardware conversion:
+//   float16ToFloat: f32 = (sign16 << 16) | 0x7f800000 | ((sig10|0x200)<<13)
+//   floatToFloat16: f16 = sign16 | 0x7e00 | ((f32bits >> 13) & 0x1ff)
+// Encoding this in integer ops (selected on isNaN) makes it bit-exact by
+// construction on every target -- LLVM cannot legally alter it, the fp
+// convert only feeds the non-NaN result, and folding fptrunc(fpext x) is
+// value-exact for non-NaN halves. The common case stays a single hardware
+// conversion instruction plus a compare/select.
+//
+// Java short is a computational-int type on the JVM stack (like the
+// reverseBytes_s/_c narrow variants above), so the i16 bit pattern is
+// sign-extended to i32 on push, and truncated back from the popped i32 on the
+// way in.
+bool JeandleIntrinsicLowering::lower_float16_convert(vmIntrinsics::ID id) {
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  bool to_f16 = (id == vmIntrinsics::_floatToFloat16);
+
+  if (to_f16) {
+    llvm::Value* arg = _interp->_jvm->fpop();
+    // Non-NaN path: IEEE-754 narrowing conversion.
+    llvm::Value* half = builder.CreateFPTrunc(arg, builder.getHalfTy());
+    llvm::Value* conv_bits = builder.CreateBitCast(half, builder.getInt16Ty());
+    // NaN path: quiet and preserve the top payload bits, matching the
+    // hardware conversion the interpreter entry executes.
+    llvm::Value* bits = builder.CreateBitCast(arg, builder.getInt32Ty());
+    llvm::Value* nan16 = builder.CreateLShr(
+        builder.CreateAnd(bits, 0x80000000), 16);
+    nan16 = builder.CreateOr(nan16, 0x7e00);
+    nan16 = builder.CreateOr(nan16,
+        builder.CreateAnd(builder.CreateLShr(bits, 13), 0x1ff));
+    llvm::Value* is_nan = builder.CreateFCmpUNO(arg, arg);
+    llvm::Value* res = builder.CreateSelect(
+        is_nan, builder.CreateTrunc(nan16, builder.getInt16Ty()), conv_bits);
+    _interp->_jvm->ipush(builder.CreateSExt(res, builder.getInt32Ty()));
+  } else {
+    llvm::Value* arg = _interp->_jvm->ipop();
+    llvm::Value* bits = builder.CreateTrunc(arg, builder.getInt16Ty());
+    // Non-NaN path: IEEE-754 widening conversion (value-exact).
+    llvm::Value* half = builder.CreateBitCast(bits, builder.getHalfTy());
+    llvm::Value* conv = builder.CreateFPExt(half, builder.getFloatTy());
+    // NaN path: quiet and preserve the payload, matching the hardware
+    // conversion the interpreter entry executes.
+    llvm::Value* w = builder.CreateZExt(bits, builder.getInt32Ty());
+    llvm::Value* nan32 = builder.CreateShl(builder.CreateAnd(w, 0x8000), 16);
+    nan32 = builder.CreateOr(nan32, 0x7f800000);
+    nan32 = builder.CreateOr(nan32,
+        builder.CreateShl(builder.CreateOr(builder.CreateAnd(w, 0x03ff),
+                                           0x200), 13));
+    llvm::Value* nan_f = builder.CreateBitCast(nan32, builder.getFloatTy());
+    // NaN <=> all-ones exponent and nonzero significand.
+    llvm::Value* is_nan = builder.CreateICmpUGT(
+        builder.CreateAnd(w, 0x7fff), builder.getInt32(0x7c00));
+    _interp->_jvm->fpush(builder.CreateSelect(is_nan, nan_f, conv));
+  }
   return true;
 }
 
