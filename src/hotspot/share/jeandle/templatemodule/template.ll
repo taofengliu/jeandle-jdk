@@ -306,8 +306,13 @@ declare hotspotcc ptr addrspace(1) @new_instance(ptr, ptr)
 
 ; Implementation of Java new object
 ; TODO: Support prefetch instructions for next allocations.
-define private hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr %klass, i32 %size_in_bytes) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
+define private hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr %klass, i32 %size_in_bytes, i1 %initial_slow_test) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
 entry:
+  ; The caller may already know that this allocation requires the runtime.
+  ; Share that path with a TLAB exhaustion instead of creating another call.
+  br i1 %initial_slow_test, label %alloc_slow_path, label %check_tlab
+
+check_tlab:
   %use_tlab = load i1, ptr @VMOptions.UseTLAB
   br i1 %use_tlab, label %test_tlab, label %alloc_slow_path
 

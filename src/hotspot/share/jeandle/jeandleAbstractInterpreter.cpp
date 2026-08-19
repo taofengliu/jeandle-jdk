@@ -3112,7 +3112,9 @@ void JeandleAbstractInterpreter::do_new() {
   } else {
     llvm::Value* size_in_bytes = _ir_builder.getInt32(Klass::layout_helper_size_in_bytes(layout_helper));
     new_inst = llvm::cast<llvm::InvokeInst>(
-        call_java_op_ex("jeandle.new_instance", {klass_ptr, size_in_bytes}, {create_current_deopt_bundle()}));
+        call_java_op_ex("jeandle.new_instance",
+                        {klass_ptr, size_in_bytes, _ir_builder.getFalse()},
+                        {create_current_deopt_bundle()}));
   }
 
   // new always produces an exact type.
