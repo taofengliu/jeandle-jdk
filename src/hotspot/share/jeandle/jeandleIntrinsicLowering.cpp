@@ -33,6 +33,7 @@
 #include "jeandle/__hotspotHeadersBegin__.hpp"
 #include "ci/ciMethod.hpp"
 #include "ci/ciSignature.hpp"
+#include "classfile/javaClasses.hpp"
 #include "classfile/vmIntrinsics.hpp"
 #include "jeandle/jeandle_globals.hpp"
 #include "logging/log.hpp"
@@ -176,6 +177,9 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     // newArray
     case vmIntrinsics::_newArray:
 
+    // Unsafe.allocateInstance
+    case vmIntrinsics::_allocateInstance:
+    
     // bitcast
     case vmIntrinsics::_floatToRawIntBits:
     case vmIntrinsics::_intBitsToFloat:
@@ -261,6 +265,8 @@ static constexpr JeandleTrapReasonMask trap_reason_mask_val(Deoptimization::Deop
 
 JeandleTrapReasonMask JeandleIntrinsicLowering::trap_throttle_mask(vmIntrinsics::ID id) {
   switch (id) {
+    case vmIntrinsics::_allocateInstance:
+      return trap_reason_mask_val(Deoptimization::Reason_null_check);
     case vmIntrinsics::_Preconditions_checkIndex:
     case vmIntrinsics::_Preconditions_checkLongIndex:
       return trap_reason_mask_val(Deoptimization::Reason_intrinsic) |
@@ -445,6 +451,10 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     // newArray
     case vmIntrinsics::_newArray:
       return lower_new_array();
+
+    // Unsafe.allocateInstance
+    case vmIntrinsics::_allocateInstance:
+      return lower_unsafe_allocate_instance();
 
     // bitcast
     case vmIntrinsics::_floatToRawIntBits:
@@ -1067,6 +1077,96 @@ bool JeandleIntrinsicLowering::lower_new_array() {
   llvm::PHINode* result = builder.CreatePHI(java_heap_ptr_ty, 2, "newarray.result");
   result->addIncoming(fast_call, fast_normal_bb);
   result->addIncoming(slow_call, slow_normal_bb);
+
+  _interp->_jvm->apush(result);
+  return true;
+}
+
+bool JeandleIntrinsicLowering::lower_unsafe_allocate_instance() {
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+  llvm::Module& m = _interp->_module;
+
+  // Keep the invoke operands in the JVM state until every throwing or
+  // safepointing call has captured its deopt bundle.
+  llvm::Value* mirror = _interp->_jvm->raw_peek(0).value();
+  llvm::Value* unsafe = _interp->_jvm->raw_peek(1).value();
+
+  // Match normal invokevirtual ordering: validate the receiver before the
+  // explicit Class<?> argument.
+  _interp->null_check(unsafe);
+  _interp->null_check(mirror);
+
+  llvm::PointerType* c_heap_ptr_ty =
+      llvm::PointerType::get(ctx, llvm::jeandle::AddrSpace::CHeapAddrSpace);
+
+  llvm::BasicBlock* allocation_check_bb =
+      llvm::BasicBlock::Create(ctx, "unsafe_allocate_check", _interp->_llvm_func);
+  llvm::BasicBlock* primitive_trap_bb = llvm::BasicBlock::Create(
+      ctx, "unsafe_allocate_primitive_trap", _interp->_llvm_func);
+
+  // TODO: Fold constant mirrors, their Klass, and the dependent layout and
+  // initialization loads together in an LLVM pass.
+  llvm::Value* klass_addr = builder.CreateInBoundsGEP(
+      builder.getInt8Ty(), mirror,
+      builder.getInt32(java_lang_Class::klass_offset()));
+  llvm::Value* klass = builder.CreateLoad(
+      c_heap_ptr_ty, klass_addr, "unsafe_allocate.klass");
+  llvm::Value* klass_is_null = builder.CreateICmpEQ(
+      klass, llvm::ConstantPointerNull::get(c_heap_ptr_ty));
+  builder.CreateCondBr(klass_is_null, primitive_trap_bb, allocation_check_bb);
+  _interp->uncommon_trap(Deoptimization::Reason_null_check,
+                         Deoptimization::Action_make_not_entrant,
+                         primitive_trap_bb,
+                         true /* should_reexecute */);
+
+  builder.SetInsertPoint(allocation_check_bb);
+  llvm::Value* layout_addr = builder.CreateInBoundsGEP(
+      builder.getInt8Ty(), klass,
+      builder.getInt32(in_bytes(Klass::layout_helper_offset())));
+  llvm::Value* layout = builder.CreateLoad(
+      builder.getInt32Ty(), layout_addr, "unsafe_allocate.layout");
+
+  llvm::Value* init_state_addr = builder.CreateInBoundsGEP(
+      builder.getInt8Ty(), klass,
+      builder.getInt32(in_bytes(InstanceKlass::init_state_offset())));
+  llvm::Value* init_state = builder.CreateLoad(
+      builder.getInt8Ty(), init_state_addr, "unsafe_allocate.init_state");
+  llvm::Value* init_delta = builder.CreateSub(
+      builder.CreateZExt(init_state, builder.getInt32Ty()),
+      builder.getInt32(InstanceKlass::fully_initialized),
+      "unsafe_allocate.init_delta");
+
+  // Match GraphKit::new_instance's reflective slow test. This also routes
+  // arrays, interfaces, abstract classes and java.lang.Class to the runtime.
+  llvm::Value* slow_path_bits = builder.CreateAnd(
+      layout, builder.getInt32(Klass::_lh_instance_slow_path_bit),
+      "unsafe_allocate.slow_path_bits");
+  llvm::Value* slow_test = builder.CreateOr(
+      slow_path_bits, init_delta, "unsafe_allocate.slow_test");
+  llvm::Value* needs_slow_path = builder.CreateICmpNE(
+      slow_test, builder.getInt32(0));
+
+  // The layout helper stores the aligned instance size in bytes; its low bits
+  // contain allocation flags and must not be passed to the TLAB allocator.
+  llvm::Value* size_in_bytes = builder.CreateAnd(
+      layout, builder.getInt32(~(jint)right_n_bits(LogBytesPerLong)),
+      "unsafe_allocate.size_in_bytes");
+  llvm::Function* new_instance_op = m.getFunction("jeandle.new_instance");
+  assert(new_instance_op != nullptr, "jeandle.new_instance JavaOp must exist");
+  // All reexecuting checks have completed. The allocation slow path must use
+  // the post-invoke state, so do not keep the Unsafe receiver or Class mirror
+  // live in its deopt bundle.
+  _interp->_jvm->apop(); // mirror
+  _interp->_jvm->apop(); // Unsafe receiver
+
+  static constexpr CallSiteAttributeMetadata allocation_attrs =
+      {CTRL_NEEDS_EXCEPTION_EDGE, MEM_READ | MEM_WRITE};
+  // The JavaOp routes this initial slow test and TLAB exhaustion to one
+  // shared new-instance runtime call.
+  llvm::CallBase* result = emit_callsite(
+      new_instance_op, llvm::CallingConv::Hotspot_JIT,
+      {klass, size_in_bytes, needs_slow_path}, allocation_attrs);
 
   _interp->_jvm->apush(result);
   return true;
