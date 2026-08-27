@@ -216,6 +216,10 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
 
+    // unsigned remainder
+    case vmIntrinsics::_remainderUnsigned_i:
+    case vmIntrinsics::_remainderUnsigned_l:
+
     // count leading/trailing zeros
     // No CPU gating: LLVM lowers ctlz/cttz to native sequences on both x86-64
     // (bsr/bsf fallback when LZCNT/TZCNT are absent) and aarch64 (CLZ, RBIT+CLZ),
@@ -487,6 +491,11 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_compareUnsigned_i:
     case vmIntrinsics::_compareUnsigned_l:
       return lower_compare_unsigned(id);
+
+    // RemainderUnsigned
+    case vmIntrinsics::_remainderUnsigned_i:
+    case vmIntrinsics::_remainderUnsigned_l:
+      return lower_remainder_unsigned(id);
 
     // addExact and the other exact-arithmetic intrinsics share the same
     // overflow-trap path implemented by lower_exact_arith.
@@ -886,6 +895,25 @@ bool JeandleIntrinsicLowering::lower_compare_unsigned(vmIntrinsics::ID id) {
   llvm::Value* result = _interp->_ir_builder.CreateSelect(
       is_less, JeandleType::int_const(_interp->_ir_builder, -1), select_greater);
   _interp->_jvm->ipush(result);
+  return true;
+}
+
+// ---- lower_remainder_unsigned ----
+bool JeandleIntrinsicLowering::lower_remainder_unsigned(vmIntrinsics::ID id) {
+  bool is_long = (id == vmIntrinsics::_remainderUnsigned_l);
+
+  llvm::Value* divisor = _interp->_jvm->peek_value().value();
+  _interp->zero_check(divisor);
+
+  divisor = is_long ? _interp->_jvm->lpop() : _interp->_jvm->ipop();
+  llvm::Value* dividend = is_long ? _interp->_jvm->lpop() : _interp->_jvm->ipop();
+  llvm::Value* result = _interp->_ir_builder.CreateURem(dividend, divisor);
+
+  if (is_long) {
+    _interp->_jvm->lpush(result);
+  } else {
+    _interp->_jvm->ipush(result);
+  }
   return true;
 }
 
