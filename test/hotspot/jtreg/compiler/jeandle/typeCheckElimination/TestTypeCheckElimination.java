@@ -598,6 +598,22 @@ public class TestTypeCheckElimination {
         return x instanceof Animal;
     }
 
+    // 24d. PHI incoming directly from the check's own branch edge: the value
+    //      reaches the multi-predecessor merge along the instanceof-true edge
+    //      of the very block that branches to it. Unlike 24a (where an
+    //      intermediate single-predecessor block lets edge dominance apply),
+    //      there is no intermediate block here, so the incoming can only be
+    //      sharpened from the edge itself.
+    static boolean testPhiIncomingEdgeSharpened(Object obj, Dog dog) {
+        Object o = obj;
+        if (!(obj instanceof Dog)) {
+            o = dog;
+        }
+        // o = phi [obj (from instanceof-true edge), dog (from then-block)]
+        // On the true edge obj IS Dog, and dog is Dog -> o is always Dog.
+        return o instanceof Dog; // Should be eliminated to true
+    }
+
     // =========================================================================
     // Group 25: LCA trace result must not be used for negative constraints
     // When a condition is a PHI of different type checks (Dog/Cat), the LCA
@@ -1347,6 +1363,12 @@ public class TestTypeCheckElimination {
             case "testPhiIncomingBranchDenied":
                 Asserts.assertFalse(testPhiIncomingBranchDenied("hello"));
                 Asserts.assertTrue(testPhiIncomingBranchDenied(dog));
+                break;
+            case "testPhiIncomingEdgeSharpened":
+                // obj IS Dog -> o = obj (a Dog)
+                Asserts.assertTrue(testPhiIncomingEdgeSharpened(dog, dog));
+                // obj NOT Dog -> o = dog (a Dog)
+                Asserts.assertTrue(testPhiIncomingEdgeSharpened("hello", dog));
                 break;
             case "testNoOverExcludingLCA":
                 // flag=true, obj=Cat: Dog check fails, but Cat IS Animal → should return true
@@ -2293,6 +2315,24 @@ public class TestTypeCheckElimination {
             int afterCount = countOccurrences(afterIR, "jeandle.check_instanceof");
             Asserts.assertEquals(afterCount, beforeCount,
                 "24c: no check_instanceof should be eliminated; before=" + beforeCount + " after=" + afterCount);
+        }
+
+        // === 24d. PHI incoming directly from the check's own branch edge ===
+        {
+            OutputAnalyzer output = runTestProcess("testPhiIncomingEdgeSharpened", "testPhiIncomingEdgeSharpened");
+            output.shouldHaveExitValue(0);
+            String fullOutput = output.getOutput();
+            String beforeIR = extractBeforeIR(fullOutput, "testPhiIncomingEdgeSharpened");
+            String afterIR = extractAfterIR(fullOutput, "testPhiIncomingEdgeSharpened");
+            int beforeCount = countOccurrences(beforeIR, "jeandle.check_instanceof");
+            int afterCount = countOccurrences(afterIR, "jeandle.check_instanceof");
+            // Before: instanceof Dog (guard) + instanceof Dog (return) = 2.
+            // After: the guard stays (unknown Object param), the return check
+            // folds because the PHI is meet(Dog-on-edge, Dog) = Dog.
+            Asserts.assertGTE(beforeCount, 2,
+                "24d: should have >= 2 check_instanceof before, got " + beforeCount);
+            Asserts.assertEquals(afterCount, 1,
+                "24d: instanceof Dog on the merged PHI should fold; before=" + beforeCount + " after=" + afterCount);
         }
 
         // === 25a. LCA trace must not over-exclude on false-branch ===

@@ -48,7 +48,6 @@
 #include "ci/ciSymbols.hpp"
 #include "ci/ciTypeFlow.hpp"
 #include "oops/arrayOop.hpp"
-#include "oops/objArrayKlass.hpp"
 #include "classfile/javaClasses.hpp"
 #include "compiler/compilerDirectives.hpp"
 #include "compiler/compileTask.hpp"
@@ -2928,28 +2927,8 @@ void JeandleAbstractInterpreter::do_array_load(BasicType basic_type) {
           : llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
       llvm::Value* load_value = do_array_load_inner(T_OBJECT, load_type);
 
-      // Attach element type metadata if the array's type is known.
-      // TODO: maybe we can do this in LLVM side, then we can use context-sensitive type information of array.
-      if (llvm::Instruction* load_inst = llvm::dyn_cast<llvm::Instruction>(load_value)) {
-        llvm::jeandle::JavaType array_type = llvm::jeandle::getJavaType(array_ref);
-        if (array_type.isKnown()) {
-          Klass* array_klass = (Klass*)array_type.Klass;
-          if (array_klass->is_objArray_klass()) {
-            Klass* elem_klass = ObjArrayKlass::cast(array_klass)->element_klass();
-            if (!is_unverified_interface(elem_klass)) {
-              llvm::MDNode* klass_md = llvm::MDNode::get(*_context, {
-                  llvm::ConstantAsMetadata::get(
-                      _ir_builder.getInt64((intptr_t)elem_klass))
-              });
-              load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlass, klass_md);
-              if (is_effectively_final(elem_klass)) {
-                load_inst->setMetadata(llvm::jeandle::Metadata::JavaKlassExact,
-                                       llvm::MDNode::get(*_context, {}));
-              }
-            }
-          }
-        }
-      }
+      // Element type metadata is attached on the LLVM side by RecoverTypeInfo,
+      // which can use context-sensitive type information of the array.
 
       if (UseCompressedOops) {
         llvm::Type* oop_type = JeandleType::java2llvm(T_OBJECT, *_context);
@@ -3744,8 +3723,6 @@ void JeandleAbstractInterpreter::null_check(llvm::Value* obj) {
   // Add make.implicit metadata, and the ImplicitNullChecksPass will transform it into an implicit check.
   llvm::MDNode* make_implicit = llvm::MDNode::get(*_context, {});
   null_check_br->setMetadata(llvm::LLVMContext::MD_make_implicit, make_implicit);
-
-  llvm::jeandle::JavaType obj_type = llvm::jeandle::getJavaType(obj);
 
   builtin_throw(Deoptimization::Reason_null_check, null_check_fail);
 
