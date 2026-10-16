@@ -57,9 +57,9 @@ bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   return UseZihintpause;
 }
 
-bool JeandleIntrinsicLowering::supports_vectorized_mismatch_medium_path() {
+uint64_t JeandleIntrinsicLowering::vectorized_mismatch_medium_path_limit() {
   // The RVV vector extension is optional and not yet wired up here.
-  return false;
+  return 0;
 }
 
 // =============================================================================

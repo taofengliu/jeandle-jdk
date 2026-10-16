@@ -53,8 +53,14 @@ bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   return true;
 }
 
-bool JeandleIntrinsicLowering::supports_vectorized_mismatch_medium_path() {
-  return false;
+uint64_t JeandleIntrinsicLowering::vectorized_mismatch_medium_path_limit() {
+  // The medium tier is a fixed 128-bit <16 x i8> loop lowered to
+  // pcmpeqb/pmovmskb, available from the SSE2 baseline regardless of the
+  // AVX level. C2's ArrayOperationPartialInlineSize carries AVX-512
+  // masked-vector ergonomics (0 on non-AVX-512 x86) and does not describe
+  // this tier, so the limit is fixed instead of flag-derived. Unlike
+  // aarch64, the user flag cannot disable this tier on x86.
+  return 32;
 }
 
 bool JeandleIntrinsicLowering::cpu_supports_cache_writeback() {

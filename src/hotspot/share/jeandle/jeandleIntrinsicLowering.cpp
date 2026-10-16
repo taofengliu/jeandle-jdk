@@ -1703,17 +1703,17 @@ bool JeandleIntrinsicLowering::lower_vectorized_mismatch() {
       byte_length, llvm::ConstantInt::get(i64, small_path_limit),
       "mismatch_inline_small");
 
-  const uint64_t medium_path_limit =
-      static_cast<uint64_t>(ArrayOperationPartialInlineSize);
-  const bool use_medium_path = supports_vectorized_mismatch_medium_path() &&
-                               medium_path_limit >= small_path_limit;
+  const uint64_t medium_path_limit = vectorized_mismatch_medium_path_limit();
+  const bool use_medium_path = medium_path_limit >= small_path_limit;
   llvm::BasicBlock* small_bb = llvm::BasicBlock::Create(ctx, "mismatch_inline_small", f);
   llvm::BasicBlock* dispatch_bb = llvm::BasicBlock::Create(ctx, "mismatch_dispatch_medium", f);
   llvm::BasicBlock* medium_bb = use_medium_path
       ? llvm::BasicBlock::Create(ctx, "mismatch_inline_medium", f) : nullptr;
   llvm::BasicBlock* stub_bb = llvm::BasicBlock::Create(ctx, "mismatch_stub", f);
   llvm::BasicBlock* done_bb = llvm::BasicBlock::Create(ctx, "mismatch_done", f);
-  b.CreateCondBr(is_small, small_bb, dispatch_bb);
+  // Weighted: small ranges dominate real call sites.
+  b.CreateCondBr(is_small, small_bb, dispatch_bb,
+                 llvm::MDBuilder(ctx).createBranchWeights(3, 1));
 
   // Tier 1: inline scalar IR for ranges shorter than 16 bytes.
   b.SetInsertPoint(small_bb);
@@ -1731,9 +1731,11 @@ bool JeandleIntrinsicLowering::lower_vectorized_mismatch() {
     llvm::Value* is_medium = b.CreateICmpULE(
         byte_length, llvm::ConstantInt::get(i64, medium_path_limit),
         "mismatch_inline_medium");
-    b.CreateCondBr(is_medium, medium_bb, stub_bb);
+    // Weighted: the stub is the cold fallback, like C2's PROB_MIN guard.
+    b.CreateCondBr(is_medium, medium_bb, stub_bb,
+                   llvm::MDBuilder(ctx).createBranchWeights(1023, 1));
 
-    // Tier 2: inline 128-bit vector IR up to ArrayOperationPartialInlineSize.
+    // Tier 2: inline 128-bit vector IR up to the platform medium limit.
     b.SetInsertPoint(medium_bb);
     medium_result = emit_vectorized_mismatch_medium(a_addr, b_addr, byte_length, scale64);
     medium_done_bb = b.GetInsertBlock();
