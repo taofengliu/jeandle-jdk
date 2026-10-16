@@ -132,7 +132,11 @@ class JeandleIntrinsicLowering : public StackObj {
   static bool cpu_supports_rounding();          // floor/ceil/rint
   static bool cpu_supports_popcount();          // bitCount_i/bitCount_l
   static bool cpu_supports_spin_wait();         // onSpinWait
-  static bool supports_vectorized_mismatch_medium_path();
+  // Byte limit of the inline 128-bit vector tier for vectorizedMismatch.
+  // A value of 0 disables the tier (values below the 16-byte scalar tier
+  // limit also fall back to the stub); see the per-cpu definitions for the
+  // platform rationale.
+  static uint64_t vectorized_mismatch_medium_path_limit();
   static bool cpu_supports_cache_writeback();   // Unsafe writeback family
 
   // ========================================================================

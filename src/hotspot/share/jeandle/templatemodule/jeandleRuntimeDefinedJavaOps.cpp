@@ -373,6 +373,58 @@ static void emit_variable_zero_heap_words(llvm::IRBuilder<>& builder,
 #endif
 }
 
+#if defined(AMD64)
+static void emit_constant_zero_heap_words(llvm::IRBuilder<>& builder,
+                                          llvm::Function* function,
+                                          llvm::Value* base,
+                                          llvm::Value* word_count,
+                                          llvm::BasicBlock* return_block) {
+  // i128 stores split into scalar stores on x86. Use explicit vectors, capped
+  // at 32 bytes to avoid AVX-512 setup for short clears. HeapWord alignment is
+  // sufficient for unaligned vector stores; never assume vector alignment.
+  int max_words = 1;
+  if (UseSSE >= 2 && MaxVectorSize >= 16) {
+    max_words = UseAVX >= 2 && MaxVectorSize >= 32 ? 4 : 2;
+  }
+
+  for (int words = max_words; words != 0; words >>= 1) {
+    llvm::BasicBlock* dispatch_block = builder.GetInsertBlock();
+    llvm::BasicBlock* loop_block =
+        llvm::BasicBlock::Create(function->getContext(), "constant_clear_loop", function);
+    llvm::BasicBlock* next_block =
+        llvm::BasicBlock::Create(function->getContext(), "constant_clear_next", function);
+    llvm::Value* store_count = builder.CreateUDiv(word_count, builder.getInt32(words));
+    if (words != max_words) {
+      store_count = builder.CreateAnd(store_count, builder.getInt32(1));
+    }
+    llvm::Value* has_stores = builder.CreateICmpNE(store_count, builder.getInt32(0));
+    builder.CreateCondBr(has_stores, loop_block, next_block);
+
+    builder.SetInsertPoint(loop_block);
+    llvm::PHINode* index = builder.CreatePHI(builder.getInt32Ty(), 2, "constant_clear_index");
+    index->addIncoming(builder.getInt32(0), dispatch_block);
+    llvm::Type* store_type = builder.getInt64Ty();
+    if (words > 1) {
+      store_type = llvm::FixedVectorType::get(builder.getInt64Ty(), words);
+    }
+    llvm::Value* address = builder.CreateInBoundsGEP(store_type, base, index);
+    // Volatility prevents loop-idiom recognition from introducing a memset call.
+    llvm::StoreInst* store = builder.CreateStore(llvm::Constant::getNullValue(store_type), address, true);
+    store->setAlignment(llvm::Align(HeapWordSize));
+    llvm::Value* next_index = builder.CreateAdd(index, builder.getInt32(1));
+    llvm::Value* done = builder.CreateICmpEQ(next_index, store_count);
+    builder.CreateCondBr(done, next_block, loop_block);
+    index->addIncoming(next_index, loop_block);
+
+    builder.SetInsertPoint(next_block);
+    // Each narrower store handles one bit of the remainder, so no store can
+    // extend beyond the payload, including for zero or odd word counts.
+    base = builder.CreateInBoundsGEP(store_type, base, store_count);
+  }
+  builder.CreateBr(return_block);
+}
+#endif
+
 DEF_JAVA_OP(zero_heap_words, 1, llvm::Type::getVoidTy(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::Type::getInt32Ty(context))
@@ -381,9 +433,11 @@ DEF_JAVA_OP(zero_heap_words, 1, llvm::Type::getVoidTy(context),
   func->addParamAttr(0, llvm::Attribute::getWithAlignment(context, llvm::Align(HeapWordSize)));
 
   llvm::BasicBlock* constant_dispatch_block = llvm::BasicBlock::Create(context, "constant_dispatch", func);
+#if !defined(AMD64)
   llvm::BasicBlock* constant_odd_word_block = llvm::BasicBlock::Create(context, "constant_odd_word", func);
   llvm::BasicBlock* constant_pair_dispatch_block = llvm::BasicBlock::Create(context, "constant_pair_dispatch", func);
   llvm::BasicBlock* constant_pair_loop_block = llvm::BasicBlock::Create(context, "constant_pair_loop", func);
+#endif
   llvm::BasicBlock* variable_block = llvm::BasicBlock::Create(context, "variable", func);
   llvm::BasicBlock* variable_stub_block = llvm::BasicBlock::Create(context, "variable_stub", func);
   llvm::BasicBlock* return_block = llvm::BasicBlock::Create(context, "return", func);
@@ -415,11 +469,14 @@ DEF_JAVA_OP(zero_heap_words, 1, llvm::Type::getVoidTy(context),
 #endif
   ir_builder.CreateCondBr(inline_constant, constant_dispatch_block, variable_block);
 
+  ir_builder.SetInsertPoint(constant_dispatch_block);
+#if defined(AMD64)
+  emit_constant_zero_heap_words(ir_builder, func, base, word_count, return_block);
+#else
   // Follow C2's constant-count shape: clear an odd leading HeapWord, then clear
   // pairs of HeapWords. A volatile i128 zero store lowers to one STP on AArch64,
   // while volatility prevents LoopIdiomRecognize from recreating memset. The
   // constant-trip pair loop can still be fully unrolled.
-  ir_builder.SetInsertPoint(constant_dispatch_block);
   llvm::Value* odd_word = ir_builder.CreateAnd(word_count, ir_builder.getInt32(1));
   llvm::Value* has_odd_word = ir_builder.CreateICmpNE(odd_word, ir_builder.getInt32(0));
   ir_builder.CreateCondBr(has_odd_word, constant_odd_word_block, constant_pair_dispatch_block);
@@ -449,6 +506,7 @@ DEF_JAVA_OP(zero_heap_words, 1, llvm::Type::getVoidTy(context),
   llvm::Value* constant_done = ir_builder.CreateICmpEQ(next_pair, pair_count);
   ir_builder.CreateCondBr(constant_done, return_block, constant_pair_loop_block);
   pair_index->addIncoming(next_pair, constant_pair_loop_block);
+#endif
 
   ir_builder.SetInsertPoint(variable_block);
   emit_variable_zero_heap_words(
