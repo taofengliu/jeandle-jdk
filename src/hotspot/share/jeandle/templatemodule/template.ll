@@ -164,7 +164,7 @@
 ; baked absolute address (load + inttoptr + indirect call) rather than a PC-relative branch.
 @SharedRuntime.complete_monitor_unlocking_C = external global i64
 
-declare hotspotcc void @jeandle.clone_at_expansion(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, i1)
+declare hotspotcc void @jeandle.clone_payload(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, i1)
 
 ; Keep use to lately-used java operations, until it is lowered.
 @llvm.used = appending addrspace(1) global [9 x ptr] [
@@ -175,7 +175,7 @@ declare hotspotcc void @jeandle.clone_at_expansion(ptr addrspace(1), i64, ptr ad
   ptr @jeandle.post_barrier,
   ptr @jeandle.encode_heap_oop,
   ptr @jeandle.decode_heap_oop,
-  ptr @jeandle.clone_at_expansion,
+  ptr @jeandle.clone_payload,
   ptr @jeandle.membar_storestore
 ], section "llvm.metadata"
 
@@ -483,10 +483,13 @@ declare hotspotcc ptr @jeandle.current_thread()
 declare hotspotcc ptr addrspace(1) @new_array(ptr, i32, ptr)
 declare hotspotcc void @SharedRuntime_register_finalizer(ptr, ptr addrspace(1))
 
-; ArrayCopyNode-like pseudo operation. This is not a JavaOp:
-; ArrayCopySpecialization must expand every call before JavaOperationLower(1),
+; Shared pseudo operation for System.arraycopy, Arrays.copyOf[Range] and clone.
+; Array copies use element indices/counts; instance and raw-array payload clones
+; use byte offsets, a Java-long payload count and object byte sizes instead.
+; This is not a JavaOp:
+; CopySpecialization must expand every call before JavaOperationLower(1),
 ; so this declaration must not carry a lower-phase attribute.
-declare hotspotcc void @jeandle.arraycopy(
+declare hotspotcc void @jeandle.copy(
     ptr addrspace(1), i64, ptr addrspace(1), i64, i64,
     ptr addrspace(0), ptr addrspace(0), i64, i64
 )

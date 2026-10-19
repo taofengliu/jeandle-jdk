@@ -604,11 +604,11 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_arraycopy:
       return lower_arraycopy();
     case vmIntrinsics::_clone:
-      return lower_native_clone();
+      return lower_object_clone();
     case vmIntrinsics::_copyOf:
-      return lower_array_copyOf(false);
+      return lower_arrays_copy_of(false);
     case vmIntrinsics::_copyOfRange:
-      return lower_array_copyOf(true);
+      return lower_arrays_copy_of(true);
 
     // arraycopy
     case vmIntrinsics::_equalsB:
@@ -2337,7 +2337,7 @@ bool JeandleIntrinsicLowering::lower_arraycopy() {
       return true;
     }
     // (2) src and dest arrays must have elements of the same BasicType:
-    // completed by ArrayCopySpecialization, like C2 defers this to Ideal/macro
+    // completed by CopySpecialization, like C2 defers this to Ideal/macro
     // expansion.
 
     // (4) src_offset must not be negative.
@@ -2418,7 +2418,7 @@ bool JeandleIntrinsicLowering::lower_arraycopy() {
   _interp->_jvm->ipop(); // srcPos
   _interp->_jvm->apop(); // src
 
-  // jeandle.arraycopy uses native-width integer arguments.  Keep the Java
+  // jeandle.copy uses native-width integer arguments.  Keep the Java
   // int semantics at the lowering boundary by sign-extending the values;
   // this preserves negative values for the slow/deoptimization path while
   // legal non-negative offsets and lengths retain their value.
@@ -2438,28 +2438,28 @@ bool JeandleIntrinsicLowering::lower_arraycopy() {
   // The pseudo call is the Jeandle equivalent of C2 ArrayCopyNode::make(). It is
   // created after guard admission, and the validated attribute corresponds
   // to C2 ac->set_arraycopy(validated).
-  llvm::Function* arraycopy_callee = m.getFunction("jeandle.arraycopy");
-  assert(arraycopy_callee != nullptr,
-         "jeandle.arraycopy must be declared in template.ll");
+  llvm::Function* copy_callee = m.getFunction("jeandle.copy");
+  assert(copy_callee != nullptr,
+         "jeandle.copy must be declared in template.ll");
   static constexpr CallSiteAttributeMetadata arraycopy_attrs = {
       CTRL_NEEDS_EXCEPTION_EDGE,
       MEM_READ | MEM_WRITE | MEM_NEEDS_GC_STATE};
   llvm::CallBase* arraycopy_call = emit_callsite(
-      arraycopy_callee, llvm::CallingConv::Hotspot_JIT,
+      copy_callee, llvm::CallingConv::Hotspot_JIT,
       {src, src_offset_x, dest, dest_offset_x, length_x,
        _interp->load_object_klass(src), _interp->load_object_klass(dest),
        src_length_x, dest_length_x},
       arraycopy_attrs);
   arraycopy_call->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyKind,
-      llvm::jeandle::Attribute::ArrayCopyKindArrayCopy));
+      ctx, llvm::jeandle::Attribute::CopyKind,
+      llvm::jeandle::Attribute::CopyKindArrayCopy));
   if (validated) {
     arraycopy_call->addFnAttr(llvm::Attribute::get(
-        ctx, llvm::jeandle::Attribute::ValidatedArrayCopy));
+        ctx, llvm::jeandle::Attribute::ValidatedCopy));
   }
   if (negative_length_guard_generated) {
     arraycopy_call->addFnAttr(llvm::Attribute::get(
-        ctx, llvm::jeandle::Attribute::ArrayCopyNegativeLengthGuard));
+        ctx, llvm::jeandle::Attribute::CopyNegativeLengthGuard));
   }
   return true;
 }
@@ -2515,85 +2515,85 @@ bool JeandleIntrinsicLowering::lower_string_char_access(bool is_store) {
   return true;
 }
 
-//------------------------barrier_set_clone--------------------------------
+//------------------------emit_clone_copy--------------------------------
 
 // Jeandle LLVM IR counterpart of C2 BarrierSetC2::clone().
-void JeandleIntrinsicLowering::barrier_set_clone(llvm::Value* src_base,
-                                                llvm::Value* dst_base,
-                                                llvm::Value* size,
-                                                bool is_array) {
+void JeandleIntrinsicLowering::emit_clone_copy(llvm::Value* src_base,
+                                              llvm::Value* dst_base,
+                                              llvm::Value* size_bytes,
+                                              bool is_array) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::Module& m = _interp->_module;
   llvm::LLVMContext& ctx = builder.getContext();
-  assert(size != nullptr, "clone size must be available");
+  assert(size_bytes != nullptr, "clone size must be available");
 
-  // Match C2's TypeX arithmetic in native address width. The arraycopy
+  // Match C2's TypeX arithmetic in native address width. The shared copy
   // pseudo-op also uses i64 arguments, so large array clone sizes are kept
   // intact instead of being truncated at the call boundary.
-  llvm::Value* size_x = size;
-  if (!size->getType()->isIntegerTy(64)) {
-    assert(size->getType()->isIntegerTy(32),
+  llvm::Value* size_bytes_x = size_bytes;
+  if (!size_bytes->getType()->isIntegerTy(64)) {
+    assert(size_bytes->getType()->isIntegerTy(32),
            "clone size must be i32 or i64");
-    size_x = builder.CreateSExt(size, builder.getInt64Ty(),
-                                "clone.size_x");
+    size_bytes_x = builder.CreateSExt(size_bytes, builder.getInt64Ty(),
+                                      "clone.size_bytes_x");
   }
 
   llvm::PointerType* c_heap_ptr_ty =
       llvm::PointerType::get(ctx, llvm::jeandle::AddrSpace::CHeapAddrSpace);
 
   // Match BarrierSetC2::clone(): copy the payload in double-words.
-  int base_offset = arraycopy_payload_base_offset(is_array);
+  int base_offset = clone_payload_base_offset(is_array);
   llvm::Value* offset = builder.getInt64(base_offset);
-  llvm::Value* payload_size = builder.CreateSub(
-      size_x, offset, "clone_payload_size");
+  llvm::Value* payload_bytes = builder.CreateSub(
+      size_bytes_x, offset, "clone.payload_bytes");
   if (is_array) {
     // Array size excludes object-alignment padding, so round the payload up
     // before converting it to double-words.
-    payload_size = builder.CreateAdd(
-        payload_size, builder.getInt64(BytesPerLong - 1),
-        "clone_rounded_payload_size");
+    payload_bytes = builder.CreateAdd(
+        payload_bytes, builder.getInt64(BytesPerLong - 1),
+        "clone.rounded_payload_bytes");
   }
-  payload_size = builder.CreateLShr(
-      payload_size, builder.getInt64(LogBytesPerLong),
-      "clone_payload_words");
-  llvm::Function* arraycopy = m.getFunction("jeandle.arraycopy");
-  assert(arraycopy != nullptr,
-         "jeandle.arraycopy must be declared in template.ll");
+  llvm::Value* payload_long_count = builder.CreateLShr(
+      payload_bytes, builder.getInt64(LogBytesPerLong),
+      "clone.payload_long_count");
+  llvm::Function* copy_callee = m.getFunction("jeandle.copy");
+  assert(copy_callee != nullptr,
+         "jeandle.copy must be declared in template.ll");
   static constexpr CallSiteAttributeMetadata clone_attrs = {
       CTRL_MAY_DEOPT, MEM_READ | MEM_WRITE | MEM_NEEDS_GC_STATE};
   llvm::CallBase* copy = emit_callsite(
-      arraycopy, llvm::CallingConv::Hotspot_JIT,
-      {src_base, offset, dst_base, offset, payload_size,
+      copy_callee, llvm::CallingConv::Hotspot_JIT,
+      {src_base, offset, dst_base, offset, payload_long_count,
        llvm::ConstantPointerNull::get(c_heap_ptr_ty),
-       llvm::ConstantPointerNull::get(c_heap_ptr_ty), size_x, size_x},
+       llvm::ConstantPointerNull::get(c_heap_ptr_ty), size_bytes_x, size_bytes_x},
       clone_attrs);
   RETURN_VOID_ON_JEANDLE_ERROR();
-  // CloneBasic uses byte offsets and a jlong payload count, unlike ordinary
-  // arraycopy's element indices. Its last two operands carry object byte size;
-  // expansion does not interpret them as array lengths.
+  // Instance and raw-array payload clones use byte offsets and a jlong count,
+  // unlike ordinary arraycopy's element indices. The last two operands carry
+  // object byte sizes; expansion does not interpret them as array lengths.
   copy->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyKind,
-      is_array ? llvm::jeandle::Attribute::ArrayCopyKindCloneArray
-               : llvm::jeandle::Attribute::ArrayCopyKindCloneInst));
+      ctx, llvm::jeandle::Attribute::CopyKind,
+      is_array ? llvm::jeandle::Attribute::CopyKindCloneArray
+               : llvm::jeandle::Attribute::CopyKindCloneInstance));
   copy->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyTightlyCoupledAllocation));
+      ctx, llvm::jeandle::Attribute::CopyTightlyCoupledAllocation));
 }
 
 //------------------------clone_copying-----------------------------------
-// Helper function for lower_native_clone.
+// Helper function for lower_object_clone.
 
 // Jeandle counterpart of C2 LibraryCallKit::copy_to_clone().
 //
 // C2 marks the just-created allocation initialization as complete, emits
 // access_clone(), then places a StoreStore/CPUOrder memory barrier. Jeandle
 // cannot model AllocateNode/InitializeNode memory slices here yet. Jeandle
-// represents array and instance payload copies as CloneArray/CloneInst pseudo
+// represents array and instance payload copies as clone-array/clone-instance
 // calls and expands them to collector-correct stubs later; allocation-
 // initialization fusion remains a separate backend task.
-void JeandleIntrinsicLowering::copy_to_clone(llvm::Value* obj,
-                                            llvm::Value* alloc_obj,
-                                            llvm::Value* obj_size,
-                                            bool is_array) {
+void JeandleIntrinsicLowering::copy_clone_payload(llvm::Value* obj,
+                                                 llvm::Value* alloc_obj,
+                                                 llvm::Value* obj_size,
+                                                 bool is_array) {
   assert(obj_size != nullptr, "clone size must be available");
 
   // TODO: Match C2's ReduceBulkZeroing path. Jeandle must expose the fresh
@@ -2602,7 +2602,7 @@ void JeandleIntrinsicLowering::copy_to_clone(llvm::Value* obj,
   // complete_with_arraycopy initialization so the clone copy can own payload
   // initialization instead of zeroing the same memory first.
 
-  barrier_set_clone(obj, alloc_obj, obj_size, is_array);
+  emit_clone_copy(obj, alloc_obj, obj_size, is_array);
   RETURN_VOID_ON_JEANDLE_ERROR();
 
   // Payload stores happen after the allocation's initialization fence. Order
@@ -2613,7 +2613,7 @@ void JeandleIntrinsicLowering::copy_to_clone(llvm::Value* obj,
 // Follow C2 LibraryCallKit::inline_native_clone() control order. LLVM control
 // edges carry Jeandle's memory and I/O state, so only the result value needs an
 // explicit PHI at the final merge.
-bool JeandleIntrinsicLowering::lower_native_clone() {
+bool JeandleIntrinsicLowering::lower_object_clone() {
   assert(!_target->is_static(), "Object.clone must be an instance method");
 
   const Bytecodes::Code bc = _interp->_bytecodes.cur_bc_raw();
@@ -2682,7 +2682,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
 
       // Jeandle currently supports Serial and G1. Both use C2's card-table
       // barrier-set rule for this tightly-coupled oop-array clone.
-      if (array_copy_requires_gc_barriers(
+      if (copy_requires_gc_barriers(
               true /* tightly_coupled_alloc */, T_OBJECT)) {
         llvm::BasicBlock* obj_array_control =
             generate_objArray_guard(obj_klass, nullptr);
@@ -2705,7 +2705,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
                   CTRL_DEOPT_ON_EXCEPTION,
               MEM_READ | MEM_WRITE | MEM_NEEDS_GC_STATE};
           llvm::CallBase* ac = emit_callsite(
-              m.getFunction("jeandle.arraycopy"),
+              m.getFunction("jeandle.copy"),
               llvm::CallingConv::Hotspot_JIT,
               {obj, b.getInt64(0), alloc_obj, b.getInt64(0),
                obj_length_x, obj_klass, obj_klass, obj_length_x,
@@ -2713,11 +2713,11 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
               clone_arraycopy_attrs, false /* is_gc_leaf_entry */);
           RETURN_ON_JEANDLE_ERROR(true);
           ac->addFnAttr(llvm::Attribute::get(
-              ctx, llvm::jeandle::Attribute::ArrayCopyKind,
-              llvm::jeandle::Attribute::ArrayCopyKindCloneOopArray));
+              ctx, llvm::jeandle::Attribute::CopyKind,
+              llvm::jeandle::Attribute::CopyKindCloneReferenceArray));
           ac->addFnAttr(llvm::Attribute::get(
               ctx,
-              llvm::jeandle::Attribute::ArrayCopyTightlyCoupledAllocation));
+              llvm::jeandle::Attribute::CopyTightlyCoupledAllocation));
 
           // Present the results of the object-array copy.
           llvm::BasicBlock* obj_array_result_control = b.GetInsertBlock();
@@ -2735,7 +2735,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
       // card marks are required in compiled code to initialize
       // the object.)
       if (b.GetInsertBlock() != nullptr) {
-        copy_to_clone(obj, alloc_obj, array_size, true /* is_array */);
+        copy_clone_payload(obj, alloc_obj, array_size, true /* is_array */);
         RETURN_ON_JEANDLE_ERROR(true);
 
         // Present the results of the array copy.
@@ -2775,7 +2775,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
     RETURN_ON_JEANDLE_ERROR(true);
 
     if (b.GetInsertBlock() != nullptr) {
-      copy_to_clone(obj, alloc_obj, obj_size, false /* is_array */);
+      copy_clone_payload(obj, alloc_obj, obj_size, false /* is_array */);
       RETURN_ON_JEANDLE_ERROR(true);
 
       llvm::BasicBlock* instance_result_control = b.GetInsertBlock();
@@ -2833,7 +2833,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
 //     U[] original, int newLength, Class<? extends T[]> newType);
 // public static <T,U> T[] java.util.Arrays.copyOfRange(
 //     U[] original, int from, int to, Class<? extends T[]> newType);
-bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
+bool JeandleIntrinsicLowering::lower_arrays_copy_of(bool is_copy_of_range) {
   if (_interp->too_many_traps(_interp->_method,
                               _interp->_bytecodes.cur_bci(),
                               Deoptimization::Reason_intrinsic)) {
@@ -2850,8 +2850,8 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
 
   // Get the arguments.
   llvm::Value* original =
-      _interp->_jvm->raw_peek(is_copyOfRange ? 3 : 2).value();
-  llvm::Value* start = is_copyOfRange
+      _interp->_jvm->raw_peek(is_copy_of_range ? 3 : 2).value();
+  llvm::Value* start = is_copy_of_range
       ? _interp->_jvm->raw_peek(2).value()
       : b.getInt32(0);
   llvm::Value* end = _interp->_jvm->raw_peek(1).value();
@@ -2884,7 +2884,7 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
   generate_negative_guard(end, bailout);
 
   llvm::Value* length = end;
-  if (is_copyOfRange) {
+  if (is_copy_of_range) {
     length = b.CreateSub(end, start, "copyof.length");
   }
 
@@ -2956,33 +2956,33 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
   // the destination allocation is tightly coupled and all length guards have
   // already run. The specialization pass recognizes copyOf kinds separately
   // so it can preserve their disjoint, object-array expansion.
-  llvm::Function* arraycopy_callee = m.getFunction("jeandle.arraycopy");
-  assert(arraycopy_callee != nullptr,
-         "jeandle.arraycopy must be declared in template.ll");
+  llvm::Function* copy_callee = m.getFunction("jeandle.copy");
+  assert(copy_callee != nullptr,
+         "jeandle.copy must be declared in template.ll");
   static constexpr CallSiteAttributeMetadata copyof_attrs = {
       CTRL_NEEDS_EXCEPTION_EDGE,
       MEM_READ | MEM_WRITE | MEM_NEEDS_GC_STATE};
   llvm::CallBase* arraycopy_call = emit_callsite(
-      arraycopy_callee, llvm::CallingConv::Hotspot_JIT,
+      copy_callee, llvm::CallingConv::Hotspot_JIT,
       {original, start_x, newcopy, b.getInt64(0), moved_x,
        src_klass, klass_node, orig_length_x, length_x},
       copyof_attrs);
   RETURN_ON_JEANDLE_ERROR(true);
   arraycopy_call->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyKind,
-      is_copyOfRange
-          ? llvm::jeandle::Attribute::ArrayCopyKindCopyOfRange
-          : llvm::jeandle::Attribute::ArrayCopyKindCopyOf));
+      ctx, llvm::jeandle::Attribute::CopyKind,
+      is_copy_of_range
+          ? llvm::jeandle::Attribute::CopyKindCopyOfRange
+          : llvm::jeandle::Attribute::CopyKindCopyOf));
   arraycopy_call->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyNegativeLengthGuard));
+      ctx, llvm::jeandle::Attribute::CopyNegativeLengthGuard));
   arraycopy_call->addFnAttr(llvm::Attribute::get(
-      ctx, llvm::jeandle::Attribute::ArrayCopyTightlyCoupledAllocation));
+      ctx, llvm::jeandle::Attribute::CopyTightlyCoupledAllocation));
   if (validated) {
     arraycopy_call->addFnAttr(llvm::Attribute::get(
-        ctx, llvm::jeandle::Attribute::ValidatedArrayCopy));
+        ctx, llvm::jeandle::Attribute::ValidatedCopy));
   }
 
-  if (is_copyOfRange) {
+  if (is_copy_of_range) {
     _interp->_jvm->apop();  // newType
     _interp->_jvm->ipop();  // to
     _interp->_jvm->ipop();  // from

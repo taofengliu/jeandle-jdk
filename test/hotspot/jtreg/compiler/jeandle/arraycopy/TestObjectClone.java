@@ -140,9 +140,9 @@ public class TestObjectClone {
         exact.checkNotPattern(
                 "invoke.*@jeandle\\.new_instance.*\\[ \"deopt\"\\(i64 0,");
         exact.checkPatternAnywhere(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 1,");
         exact.checkNotPattern(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 0,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 0,");
         exact.checkNotPattern("call.*@jeandle\\.clone_post_barrier");
 
         if (!reduceInitialCardMarks) {
@@ -171,9 +171,9 @@ public class TestObjectClone {
         array.checkNotPattern(
                 "invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 0,");
         array.checkPatternAnywhere(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 1,");
         array.checkNotPattern(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 0,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 0,");
 
         checkPrimitiveArrayFastPath(dumpPath, "cloneByteArray", byte[].class);
         checkPrimitiveArrayFastPath(dumpPath, "cloneShortArray", short[].class);
@@ -197,9 +197,9 @@ public class TestObjectClone {
         dynamic.checkNotPattern(
                 "invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 0,");
         dynamic.checkPatternAnywhere(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 1,");
         dynamic.checkNotPattern(
-                "(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 0,");
+                "(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 0,");
         dynamic.checkNotPattern("clone\\.virtual_target_mismatch");
         dynamic.checkNotPattern(
                 "__jeandle_dynamic_call.*java_lang_Object_clone");
@@ -207,7 +207,7 @@ public class TestObjectClone {
             // With card marks enabled, oop-array clone uses a distinct
             // exception-producing arraycopy rather than the generic clone copy.
             dynamic.checkPatternAnywhere(
-                    "invoke.*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
+                    "invoke.*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 1,");
         }
     }
 

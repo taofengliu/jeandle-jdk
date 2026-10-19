@@ -537,43 +537,44 @@ DEF_JAVA_OP(decode_klass, 1, llvm::PointerType::get(context, llvm::jeandle::Addr
 JAVA_OP_END
 
 // HeapAccess<>::clone supplies the collector's bulk post-barrier.
-static void clone_in_runtime(llvm::Module& module,
-                             llvm::IRBuilder<>& builder,
-                             llvm::Value* src,
-                             llvm::Value* dst,
-                             llvm::Value* payload_size) {
+static void emit_runtime_clone(llvm::Module& module,
+                               llvm::IRBuilder<>& builder,
+                               llvm::Value* src,
+                               llvm::Value* dst,
+                               llvm::Value* payload_long_count) {
   llvm::LLVMContext& context = builder.getContext();
   llvm::Type* intptr_type = builder.getIntPtrTy(module.getDataLayout());
 
   // The native clone expects the complete object size in HeapWords. Restore
   // the header omitted from the pseudo operation's Java-long payload count.
-  llvm::Value* base_offset = llvm::ConstantInt::get(
+  llvm::Value* header_long_count = llvm::ConstantInt::get(
       intptr_type,
-      arraycopy_payload_base_offset(/*is_array=*/false) >> LogBytesPerLong);
-  llvm::Value* payload_size_x = builder.CreateIntCast(
-      payload_size, intptr_type, /*isSigned=*/true, "clone.payload_size_x");
-  llvm::Value* full_size = builder.CreateAdd(
-      payload_size_x, base_offset, "clone.full_size");
-  llvm::Value* full_size_in_heap_words = builder.CreateShl(
-      full_size, llvm::ConstantInt::get(intptr_type, LogHeapWordsPerLong),
-      "clone.full_size_in_heap_words");
+      clone_payload_base_offset(/*is_array=*/false) >> LogBytesPerLong);
+  llvm::Value* payload_long_count_x = builder.CreateIntCast(
+      payload_long_count, intptr_type, /*isSigned=*/true,
+      "clone.payload_long_count_x");
+  llvm::Value* object_long_count = builder.CreateAdd(
+      payload_long_count_x, header_long_count, "clone.object_long_count");
+  llvm::Value* object_heap_word_count = builder.CreateShl(
+      object_long_count, llvm::ConstantInt::get(intptr_type, LogHeapWordsPerLong),
+      "clone.object_heap_word_count");
 
   llvm::FunctionCallee clone =
       JeandleRuntimeRoutine::JeandleRuntime_clone_callee(module);
   llvm::CallInst* call =
-      builder.CreateCall(clone, {src, dst, full_size_in_heap_words});
+      builder.CreateCall(clone, {src, dst, object_heap_word_count});
   call->setCallingConv(llvm::CallingConv::C);
   call->addFnAttr(llvm::Attribute::NoUnwind);
   call->addFnAttr(llvm::Attribute::get(context, "gc-leaf-function"));
 }
 
-static void clone_at_expansion(llvm::Module& module,
-                               llvm::IRBuilder<>& builder,
-                               llvm::Value* src,
-                               llvm::Value* src_offset,
-                               llvm::Value* dst,
-                               llvm::Value* dst_offset,
-                               llvm::Value* length) {
+static void emit_raw_clone_payload_copy(llvm::Module& module,
+                                        llvm::IRBuilder<>& builder,
+                                        llvm::Value* src,
+                                        llvm::Value* src_offset,
+                                        llvm::Value* dst,
+                                        llvm::Value* dst_offset,
+                                        llvm::Value* payload_long_count) {
   llvm::Value* payload_src = builder.CreateGEP(
       builder.getInt8Ty(), src, src_offset, "clone.payload_src");
   llvm::Value* payload_dst = builder.CreateGEP(
@@ -583,7 +584,7 @@ static void clone_at_expansion(llvm::Module& module,
   assert(arraycopy != nullptr, "clone arraycopy stub must exist");
   llvm::CallInst* call = builder.CreateCall(
       arraycopy->getFunctionType(), arraycopy,
-      {payload_src, payload_dst, length});
+      {payload_src, payload_dst, payload_long_count});
   call->setCallingConv(llvm::CallingConv::C);
   call->addFnAttr(llvm::Attribute::NoUnwind);
   call->addFnAttr(llvm::Attribute::get(
@@ -594,7 +595,7 @@ static void clone_at_expansion(llvm::Module& module,
 // allocation with compensating card marks; otherwise instance copies use
 // HeapAccess<>::clone for the collector's bulk post-barrier. Reference arrays
 // needing barriers are handled separately with oop-aware arraycopy stubs.
-DEF_JAVA_OP(clone_at_expansion, 1, llvm::Type::getVoidTy(context),
+DEF_JAVA_OP(clone_payload, 1, llvm::Type::getVoidTy(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::Type::getInt64Ty(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
@@ -604,32 +605,32 @@ DEF_JAVA_OP(clone_at_expansion, 1, llvm::Type::getVoidTy(context),
   llvm::Value* src_offset = func->getArg(1);
   llvm::Value* dst = func->getArg(2);
   llvm::Value* dst_offset = func->getArg(3);
-  llvm::Value* length = func->getArg(4);
-  llvm::Value* is_clone_inst = func->getArg(5);
+  llvm::Value* payload_long_count = func->getArg(4);
+  llvm::Value* is_clone_instance = func->getArg(5);
 
-  if (array_copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
-                                      T_OBJECT)) {
+  if (copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
+                                 T_OBJECT)) {
     llvm::BasicBlock* runtime_clone =
         llvm::BasicBlock::Create(context, "clone.runtime", func);
     llvm::BasicBlock* raw_clone =
         llvm::BasicBlock::Create(context, "clone.raw", func);
     llvm::BasicBlock* done =
         llvm::BasicBlock::Create(context, "clone.done", func);
-    ir_builder.CreateCondBr(is_clone_inst, runtime_clone, raw_clone);
+    ir_builder.CreateCondBr(is_clone_instance, runtime_clone, raw_clone);
 
     ir_builder.SetInsertPoint(runtime_clone);
-    clone_in_runtime(template_module, ir_builder, src, dst, length);
+    emit_runtime_clone(template_module, ir_builder, src, dst, payload_long_count);
     ir_builder.CreateBr(done);
 
     ir_builder.SetInsertPoint(raw_clone);
-    clone_at_expansion(template_module, ir_builder, src, src_offset,
-                       dst, dst_offset, length);
+    emit_raw_clone_payload_copy(template_module, ir_builder, src, src_offset,
+                                dst, dst_offset, payload_long_count);
     ir_builder.CreateBr(done);
 
     ir_builder.SetInsertPoint(done);
   } else {
-    clone_at_expansion(template_module, ir_builder, src, src_offset,
-                       dst, dst_offset, length);
+    emit_raw_clone_payload_copy(template_module, ir_builder, src, src_offset,
+                                dst, dst_offset, payload_long_count);
   }
   ir_builder.CreateRetVoid();
 JAVA_OP_END
@@ -674,7 +675,7 @@ bool RuntimeDefinedJavaOps::define_all(llvm::Module& template_module) {
   define_encode_klass(template_module);
   define_decode_klass(template_module);
   define_hashcode_fast(template_module);
-  define_clone_at_expansion(template_module);
+  define_clone_payload(template_module);
 
   return failed();
 }

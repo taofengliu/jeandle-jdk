@@ -164,9 +164,9 @@ public class TestArraysCopyOfIntrinsic {
             Asserts.assertEquals(!reduceBulkZeroing, copyOfRangeInitialized,
                     "unexpected Arrays.copyOfRange initialized-destination stub call");
             Asserts.assertFalse(containsOptimizedMethod(
-                            dump, "copyOfExact", "@jeandle.arraycopy")
+                            dump, "copyOfExact", "@jeandle.copy")
                             || containsOptimizedMethod(
-                                    dump, "copyOfRangeExact", "@jeandle.arraycopy"),
+                                    dump, "copyOfRangeExact", "@jeandle.copy"),
                     "Arrays.copyOf pseudo call survived specialization");
         }
         String checksum = text.lines().filter(line -> line.startsWith("CHECKSUM="))
@@ -180,8 +180,8 @@ public class TestArraysCopyOfIntrinsic {
         FileCheck raw = new FileCheck(dump.toString(), method, false);
         raw.checkPatternAnywhere("invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 1,");
         raw.checkNotPattern("invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 0,");
-        raw.checkPatternAnywhere("(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
-        raw.checkNotPattern("(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 0,");
+        raw.checkPatternAnywhere("(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 1,");
+        raw.checkNotPattern("(?:call|invoke).*@jeandle\\.copy.*\\[ \"deopt\"\\(i64 0,");
         FileCheck optimized = new FileCheck(dump.toString(), method, true);
         optimized.checkPatternAnywhere(
                 "@llvm\\.experimental\\.gc\\.statepoint.*@new_array.*\\[ \"deopt\"\\(i64 1,");

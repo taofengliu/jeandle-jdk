@@ -235,14 +235,14 @@ class JeandleIntrinsicLowering : public StackObj {
   // StringUTF16 trusted single-code-unit access. The byte[] backing stores
   // UTF16 values in the platform's native byte order.
   bool lower_string_char_access(bool is_store);
-  bool lower_array_copyOf(bool is_copyOfRange);
-  bool lower_native_clone();
-  void barrier_set_clone(llvm::Value* src_base,
-                         llvm::Value* dst_base,
-                         llvm::Value* size,
-                         bool is_array);
-  void copy_to_clone(llvm::Value* obj, llvm::Value* alloc_obj,
-                     llvm::Value* obj_size, bool is_array);
+  bool lower_arrays_copy_of(bool is_copy_of_range);
+  bool lower_object_clone();
+  void emit_clone_copy(llvm::Value* src_base,
+                       llvm::Value* dst_base,
+                       llvm::Value* size_bytes,
+                       bool is_array);
+  void copy_clone_payload(llvm::Value* obj, llvm::Value* alloc_obj,
+                           llvm::Value* obj_size, bool is_array);
   bool lower_arrayequals(BasicType element_type);
   llvm::Value* emit_vectorized_mismatch_small(llvm::Value* a_addr,
                                               llvm::Value* b_addr,

@@ -258,14 +258,14 @@ bool is_jeandle_compiler_thread(Thread* t) {
   return compiler != nullptr && compiler->is_jeandle();
 }
 
-bool array_copy_requires_gc_barriers(bool tightly_coupled_alloc,
-                                     BasicType type) {
+bool copy_requires_gc_barriers(bool tightly_coupled_alloc,
+                               BasicType type) {
   assert(UseG1GC || UseSerialGC, "only Serial and G1 GC are supported");
   bool is_oop = is_reference_type(type);
   return is_oop && (!tightly_coupled_alloc || !ReduceInitialCardMarks);
 }
 
-int arraycopy_payload_base_offset(bool is_array) {
+int clone_payload_base_offset(bool is_array) {
   // Exclude the header but include array length to copy by 8 bytes words.
   // Can't use base_offset_in_bytes(bt) since basic type is unknown.
   int base_off = is_array ? arrayOopDesc::length_offset_in_bytes() :

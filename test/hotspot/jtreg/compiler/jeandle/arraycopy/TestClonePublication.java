@@ -85,7 +85,7 @@ public class TestClonePublication {
             output.shouldMatch("Jeandle:.*" + Pattern.quote(holder.getName() + "::copy")
                     + " \\([0-9]+ bytes\\)");
             FileCheck raw = new FileCheck(dump.toString(), holder.getDeclaredMethod("copy"), false);
-            raw.checkPattern("(?:call|invoke).*@jeandle\\.arraycopy");
+            raw.checkPattern("(?:call|invoke).*@jeandle\\.copy");
             raw.checkPattern("call.*@jeandle\\.membar_storestore");
             FileCheck optimized = new FileCheck(dump.toString(), holder.getDeclaredMethod("copy"), true);
             if (holder == Scalar.class) {

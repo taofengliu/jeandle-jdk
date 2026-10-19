@@ -749,7 +749,7 @@ class JeandleRuntimeRoutine : public AllStatic {
   static void new_array_from_mirror(oopDesc* mirror, int length, JavaThread* current);
 
   // Leaf entry used by collector-aware clone expansion.
-  static void clone(oopDesc* src, oopDesc* dst, size_t size);
+  static void clone(oopDesc* src, oopDesc* dst, size_t object_heap_word_count);
 
   // Multi-dimensional array allocation routines
   static void multianewarray2(Klass* elem_type, int len1, int len2, JavaThread* current);
