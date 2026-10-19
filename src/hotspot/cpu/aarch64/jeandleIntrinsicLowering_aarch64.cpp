@@ -27,6 +27,7 @@
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
+#include "runtime/globals.hpp"
 #include "runtime/vm_version.hpp"
 
 // =============================================================================
@@ -57,9 +58,11 @@ bool JeandleIntrinsicLowering::cpu_supports_spin_wait() {
   return VM_Version::spin_wait_desc().inst() == SpinWait::YIELD;
 }
 
-bool JeandleIntrinsicLowering::supports_vectorized_mismatch_medium_path() {
-  // NEON (128-bit Advanced SIMD) is ARMv8-A baseline, always available.
-  return true;
+uint64_t JeandleIntrinsicLowering::vectorized_mismatch_medium_path_limit() {
+  // Preserve the SVE ergonomics: ArrayOperationPartialInlineSize is
+  // MaxVectorSize on SVE machines and 0 on NEON-only ones, so the medium
+  // tier stays disabled there.
+  return (uint64_t)ArrayOperationPartialInlineSize;
 }
 
 // =============================================================================

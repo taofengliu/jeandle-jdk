@@ -34,6 +34,7 @@ import java.util.regex.Pattern;
 
 import compiler.jeandle.fileCheck.FileCheck;
 import jdk.test.lib.Asserts;
+import jdk.test.lib.Platform;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 import jdk.test.whitebox.WhiteBox;
@@ -93,7 +94,9 @@ public class TestClonePublication {
             } else {
                 optimized.checkPattern("call void @StubRoutines_jlong_disjoint_arraycopy");
             }
-            optimized.checkNextPattern("fence release");
+            optimized.checkNextPattern(Platform.isAArch64()
+                    ? "call void @llvm\\.aarch64\\.dmb\\(i32 10\\)"
+                    : "fence release");
             optimized.checkPattern("ret ptr addrspace\\(1\\)");
         }
     }
