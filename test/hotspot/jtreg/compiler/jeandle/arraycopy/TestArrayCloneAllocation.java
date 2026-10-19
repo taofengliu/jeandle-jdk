@@ -20,6 +20,7 @@
 /*
  * @test
  * @summary Dynamic array allocation must not speculate Object[] before LLVM folds the layout
+ * @requires vm.gc.Serial & vm.gc.G1
  * @library /test/lib /
  * @build TestObjectClone compiler.jeandle.fileCheck.FileCheck
  * @run driver TestArrayCloneAllocation

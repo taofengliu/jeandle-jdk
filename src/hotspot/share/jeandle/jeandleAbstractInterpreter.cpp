@@ -2912,20 +2912,11 @@ llvm::Value* JeandleAbstractInterpreter::get_layout_helper(
   // Match GraphKit::get_layout_helper(): a known Klass is represented by a
   // null returned value plus a constant layout_con; otherwise load the layout
   // helper from the Klass at runtime. LLVM does not carry C2's TypeKlassPtr,
-  // so constant Klass pointers are recognized from the inttoptr form emitted
-  // at the bytecode allocation call sites.
+  // so reuse the shared Klass-constant extraction for supported IR wrappers.
   layout_con = Klass::_lh_neutral_value;
   if (!StressReflectiveCode) {
-    Klass* known_klass = nullptr;
-    if (auto* int_to_ptr = llvm::dyn_cast<llvm::ConstantExpr>(klass)) {
-      if (int_to_ptr->getOpcode() == llvm::Instruction::IntToPtr) {
-        auto* constant = llvm::dyn_cast<llvm::ConstantInt>(
-            int_to_ptr->getOperand(0));
-        if (constant != nullptr) {
-          known_klass = reinterpret_cast<Klass*>(constant->getZExtValue());
-        }
-      }
-    }
+    Klass* known_klass = reinterpret_cast<Klass*>(
+        llvm::jeandle::extractKlassConstant(klass));
     if (known_klass != nullptr) {
       const jint known_layout = known_klass->layout_helper();
       if (known_layout != Klass::_lh_neutral_value) {
@@ -3207,6 +3198,18 @@ JeandleAbstractInterpreter::DispatchedDest JeandleAbstractInterpreter::dispatch_
   // This landingpad should always be entered during exception handling.
   landingpad->setCleanup(true);
 
+  // Every landingpad consumes the exception root installed by the runtime
+  // handler, including allocation failures that reexecute in the interpreter.
+  llvm::Type* oop_type = JeandleType::java2llvm(BasicType::T_OBJECT, *_context);
+  llvm::Value* exception_oop_addr = _ir_builder.CreateIntToPtr(
+      _ir_builder.getInt64((uint64_t)JavaThread::exception_oop_offset()),
+      llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::TLSAddrSpace));
+  llvm::Value* exception_oop = _ir_builder.CreateLoad(
+      oop_type, exception_oop_addr, true /* is_volatile */);
+  _ir_builder.CreateStore(
+      llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(oop_type)),
+      exception_oop_addr, true /* is_volatile */);
+
   if (deoptimize_on_exception) {
     // Match GraphKit::make_slow_call_ex(..., deoptimize=true): an allocation
     // exception must not be merged into the caller's exception state.  The
@@ -3215,16 +3218,6 @@ JeandleAbstractInterpreter::DispatchedDest JeandleAbstractInterpreter::dispatch_
     uncommon_trap(Deoptimization::Reason_unhandled,
                   Deoptimization::Action_none);
   } else {
-    // Read the exception oop from thread local storage.
-    llvm::Value* exception_oop_addr = _ir_builder.CreateIntToPtr(_ir_builder.getInt64((uint64_t)JavaThread::exception_oop_offset()),
-                                                                 llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::TLSAddrSpace));
-    llvm::Value* exception_oop = _ir_builder.CreateLoad(JeandleType::java2llvm(BasicType::T_OBJECT, *_context), exception_oop_addr, true /* is_volatile */);
-
-    // Clear the exception oop field in thread local storage.
-    _ir_builder.CreateStore(llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(JeandleType::java2llvm(BasicType::T_OBJECT, *_context))),
-                            exception_oop_addr,
-                            true /* is_volatile */);
-
     dispatch_exception_to_handler(exception_oop, landingpad);
   }
   RETURN_ON_JEANDLE_ERROR(dispatched);
@@ -3632,7 +3625,7 @@ llvm::InvokeInst* JeandleAbstractInterpreter::new_instance(
 //-------------------------------new_array-------------------------------------
 llvm::InvokeInst* JeandleAbstractInterpreter::emit_jeandle_newarray(
     llvm::Value* array_klass, llvm::Value* length,
-    int nargs, llvm::Value** return_size_val, bool deoptimize_on_exception) {
+    llvm::Value** return_size_val, bool deoptimize_on_exception) {
   jint layout_con = Klass::_lh_neutral_value;
   llvm::Value* layout_val = get_layout_helper(array_klass, layout_con);
   bool layout_is_con = layout_val == nullptr;
@@ -3730,7 +3723,8 @@ void JeandleAbstractInterpreter::do_unified_newarray(Klass* array_klass) {
       *_context, llvm::jeandle::AddrSpace::CHeapAddrSpace);
   llvm::Value* array_klass_ptr = _ir_builder.CreateIntToPtr(
       _ir_builder.getInt64((intptr_t)array_klass), klass_type);
-  llvm::InvokeInst* result = emit_jeandle_newarray(array_klass_ptr, length, 0);
+  llvm::InvokeInst* result = emit_jeandle_newarray(array_klass_ptr, length);
+  RETURN_VOID_ON_JEANDLE_ERROR();
 
   // newarray always produces an exact type.
   result->addRetAttr(llvm::Attribute::get(*_context,
@@ -3799,7 +3793,7 @@ void JeandleAbstractInterpreter::multianewarray() {
     llvm::Value* int_array_klass_ptr = _ir_builder.CreateIntToPtr(
         _ir_builder.getInt64((intptr_t)int_array_klass), klass_type);
     llvm::InvokeInst* dimensions_array_oop = emit_jeandle_newarray(
-        int_array_klass_ptr, dimensions_array_length, 0);
+        int_array_klass_ptr, dimensions_array_length);
     RETURN_VOID_ON_JEANDLE_ERROR();
 
     llvm::Value* array_base_offset = _ir_builder.CreateLoad(llvm::Type::getInt32Ty(*_context),

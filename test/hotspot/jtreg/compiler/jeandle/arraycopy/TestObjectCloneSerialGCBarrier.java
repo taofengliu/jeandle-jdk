@@ -30,6 +30,7 @@
  */
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -103,7 +104,7 @@ public class TestObjectCloneSerialGCBarrier {
                 .shouldContain("SOURCE_OLD=true")
                 .shouldContain("CLONE_OLD=true")
                 .shouldContain("REFERENT_OLD=false")
-                .shouldContain(CloneTarget.class.getName() + "::copy");
+                .shouldContain("CLONE_METHOD_COMPILED=true");
 
         if (useJeandle) {
             output.shouldContain(INTRINSIC_LOG);
@@ -112,9 +113,10 @@ public class TestObjectCloneSerialGCBarrier {
         }
     }
 
-    private static void runWorkload() {
+    private static void runWorkload() throws Exception {
         WhiteBox wb = WhiteBoxHolder.WB;
-        createFixture();
+        Method copyMethod = CloneTarget.class.getDeclaredMethod("copy");
+        createFixture(copyMethod);
 
         // createFixture() has returned, so neither the original object nor its
         // local Marker variable can keep the referent alive at this safepoint.
@@ -129,7 +131,7 @@ public class TestObjectCloneSerialGCBarrier {
         System.out.println(PASS);
     }
 
-    private static void createFixture() {
+    private static void createFixture(Method copyMethod) {
         WhiteBox wb = WhiteBoxHolder.WB;
         Marker marker = new Marker(0x5a17c0de);
         CloneTarget source = new CloneTarget(marker);
@@ -151,6 +153,9 @@ public class TestObjectCloneSerialGCBarrier {
                 "allocation gap must be pretenured");
 
         CloneTarget clone = source.copy();
+        boolean compiled = wb.isMethodCompiled(copyMethod);
+        System.out.println("CLONE_METHOD_COMPILED=" + compiled);
+        Asserts.assertTrue(compiled, "clone target must have installed compiled code");
         clone.assertReferences(marker);
         boolean cloneOld = wb.isObjectInOldGen(clone);
         System.out.println("CLONE_OLD=" + cloneOld);

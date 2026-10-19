@@ -619,9 +619,9 @@ def(StubRoutines_generic_arraycopy,                                             
       llvm::Type::getInt64Ty(context),                                              \
       llvm::PointerType::get(context, llvm::jeandle::AddrSpace::CHeapAddrSpace))    \
                                                                                     \
-    def(JeandleRuntime_clone,                                                       \
+  def(JeandleRuntime_clone,                                                         \
       JeandleRuntimeRoutine::clone,                                                 \
-      true,                                                                         \
+      false,                                                                        \
       true,                                                                         \
       llvm::Type::getVoidTy(context),                                               \
       llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace), \

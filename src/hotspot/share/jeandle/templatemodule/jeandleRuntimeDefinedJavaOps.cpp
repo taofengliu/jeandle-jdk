@@ -536,7 +536,7 @@ DEF_JAVA_OP(decode_klass, 1, llvm::PointerType::get(context, llvm::jeandle::Addr
   ir_builder.CreateRet(klass_ptr);
 JAVA_OP_END
 
-// Jeandle counterpart of C2 BarrierSetC2::clone_in_runtime().
+// HeapAccess<>::clone supplies the collector's bulk post-barrier.
 static void clone_in_runtime(llvm::Module& module,
                              llvm::IRBuilder<>& builder,
                              llvm::Value* src,
@@ -590,10 +590,10 @@ static void clone_at_expansion(llvm::Module& module,
       builder.getContext(), "gc-leaf-function"));
 }
 
-// Jeandle counterpart of BarrierSetC2::clone_at_expansion() and
-// G1BarrierSetC2::clone_at_expansion(). VM configuration is folded while the
-// template is constructed, so ArrayCopySpecialization need not inspect GC
-// flags or embed collector runtime addresses.
+// Follow CardTableBarrierSetC2::clone: raw payload copy suffices for a fresh
+// allocation with compensating card marks; otherwise instance copies use
+// HeapAccess<>::clone for the collector's bulk post-barrier. Reference arrays
+// needing barriers are handled separately with oop-aware arraycopy stubs.
 DEF_JAVA_OP(clone_at_expansion, 1, llvm::Type::getVoidTy(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::Type::getInt64Ty(context),
@@ -607,7 +607,8 @@ DEF_JAVA_OP(clone_at_expansion, 1, llvm::Type::getVoidTy(context),
   llvm::Value* length = func->getArg(4);
   llvm::Value* is_clone_inst = func->getArg(5);
 
-  if (!ReduceInitialCardMarks) {
+  if (array_copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
+                                      T_OBJECT)) {
     llvm::BasicBlock* runtime_clone =
         llvm::BasicBlock::Create(context, "clone.runtime", func);
     llvm::BasicBlock* raw_clone =

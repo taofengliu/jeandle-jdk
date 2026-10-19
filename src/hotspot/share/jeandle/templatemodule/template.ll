@@ -167,7 +167,7 @@
 declare hotspotcc void @jeandle.clone_at_expansion(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, i1)
 
 ; Keep use to lately-used java operations, until it is lowered.
-@llvm.used = appending addrspace(1) global [8 x ptr] [
+@llvm.used = appending addrspace(1) global [9 x ptr] [
   ptr @jeandle.card_table_barrier,
   ptr @jeandle.g1_pre_barrier,
   ptr @jeandle.g1_post_barrier,
@@ -175,11 +175,19 @@ declare hotspotcc void @jeandle.clone_at_expansion(ptr addrspace(1), i64, ptr ad
   ptr @jeandle.post_barrier,
   ptr @jeandle.encode_heap_oop,
   ptr @jeandle.decode_heap_oop,
-  ptr @jeandle.clone_at_expansion
+  ptr @jeandle.clone_at_expansion,
+  ptr @jeandle.membar_storestore
 ], section "llvm.metadata"
 
 declare hotspotcc ptr addrspace(0) @jeandle.decode_klass(i32)
 declare hotspotcc i32 @jeandle.encode_klass(ptr addrspace(0))
+
+; Order completed clone payload initialization before publishing the object.
+; Keep the same JavaOp available to arraycopy specialization until phase 1.
+define hotspotcc void @jeandle.membar_storestore() noinline "lower-phase"="1" #0 {
+  fence release
+  ret void
+}
 
 declare hotspotcc ptr addrspace(1) @jeandle.decode_heap_oop(ptr addrspace(3))
 declare hotspotcc ptr addrspace(3) @jeandle.encode_heap_oop(ptr addrspace(1))

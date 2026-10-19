@@ -22,6 +22,7 @@
  * @test
  * @summary Verify Object.clone semantics, Jeandle lowering, virtual fallback,
  *          array boundaries, and collector barriers.
+ * @requires vm.gc.Serial & vm.gc.G1
  * @library /test/lib /
  * @build compiler.jeandle.fileCheck.FileCheck
  * @run driver TestObjectClone
@@ -148,7 +149,7 @@ public class TestObjectClone {
             FileCheck optimized = new FileCheck(dumpPath.toString(),
                     ExactCloneable.class.getDeclaredMethod("copy"), true);
             optimized.checkPatternAnywhere(
-                    "call void @JeandleRuntime_clone"
+                    "call void (?:@JeandleRuntime_clone|inttoptr \\(i64 -?[0-9]+ to ptr\\))"
                     + "\\(ptr addrspace\\(1\\).*ptr addrspace\\(1\\).*i64 [0-9]+\\)");
             optimized.checkNotPattern(
                     "call void @StubRoutines_jlong_disjoint_arraycopy");
@@ -158,9 +159,10 @@ public class TestObjectClone {
                 CloneBase.class.getDeclaredMethod("cloneThroughBase", CloneBase.class), false);
         virtual.checkPatternAnywhere("clone\\.virtual_target_mismatch");
         virtual.checkPatternAnywhere(
-                "invoke.*__jeandle_dynamic_call.*java_lang_Object_clone.*\\[ \"deopt\"\\(i64 1,");
-        virtual.checkNotPattern(
                 "invoke.*__jeandle_dynamic_call.*java_lang_Object_clone.*\\[ \"deopt\"\\(i64 0,");
+        virtual.checkNotPattern(
+                "invoke.*__jeandle_dynamic_call.*java_lang_Object_clone.*\\[ \"deopt\"\\(i64 1,");
+        virtual.checkNotPattern("invoke hotspotcc nonnull.*__jeandle_dynamic_call.*java_lang_Object_clone");
 
         FileCheck array = new FileCheck(dumpPath.toString(),
                 TestMethods.class.getDeclaredMethod("cloneByteArray", byte[].class), false);

@@ -1070,6 +1070,13 @@ JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
             field_count, {}};
   }
 
+  if (array_copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
+                                      T_OBJECT)) {
+    return {
+        static_cast<int>(CloneInstanceInfoStatus::RequiresGCBarriers),
+        field_count, {}};
+  }
+
   if (!klass_exact) {
     assert(!ik->is_interface(), "inconsistent klass hierarchy");
     if (ik->has_subklass()) {
@@ -1078,13 +1085,6 @@ JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
               field_count, {}};
     }
     env->dependencies()->assert_leaf_type(ik);
-  }
-
-  if (array_copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
-                                      T_OBJECT)) {
-    return {
-        static_cast<int>(CloneInstanceInfoStatus::RequiresGCBarriers),
-        field_count, {}};
   }
 
   std::vector<CloneInstanceFieldInfo> fields;

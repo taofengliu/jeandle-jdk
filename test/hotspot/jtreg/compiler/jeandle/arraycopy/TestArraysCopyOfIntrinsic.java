@@ -21,13 +21,14 @@
 /*
  * @test
  * @summary Verify Jeandle Arrays.copyOf/copyOfRange exact-array fast path and fallback
+ * @requires vm.gc.Serial & vm.gc.G1
  * @library /test/lib /
- * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox
+ * @build jdk.test.lib.Asserts jdk.test.whitebox.WhiteBox compiler.jeandle.fileCheck.FileCheck
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
- * @run driver compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic
+ * @run driver compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic
  */
 
-package compiler.jeandle.intrinsic;
+package compiler.jeandle.arraycopy;
 
 import java.lang.ref.WeakReference;
 import java.nio.file.Files;
@@ -37,6 +38,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
 
+import compiler.jeandle.fileCheck.FileCheck;
 import jdk.test.lib.Asserts;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
@@ -88,8 +90,8 @@ public class TestArraysCopyOfIntrinsic {
                 reduceBulkZeroing ? "-XX:+ReduceBulkZeroing" : "-XX:-ReduceBulkZeroing",
                 "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory=" + dump,
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact"));
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact"));
         command.addAll(List.of(gcOptions));
         if (!enabled) {
             command.add("-XX:+UnlockDiagnosticVMOptions");
@@ -102,6 +104,9 @@ public class TestArraysCopyOfIntrinsic {
         output.shouldHaveExitValue(0);
         String text = output.getOutput();
         if (enabled) {
+            checkReexecuteState(dump, "copyOfExact", Object[].class, int.class, Class.class);
+            checkReexecuteState(dump, "copyOfRangeExact",
+                    Object[].class, int.class, int.class, Class.class);
             Asserts.assertTrue(text.contains("static jobject java.util.Arrays.copyOf(jobject, jint, jobject)")
                             && text.contains("is parsed as intrinsic"),
                     "missing Arrays.copyOf intrinsic log: " + text);
@@ -169,12 +174,27 @@ public class TestArraysCopyOfIntrinsic {
         return new RunResult(checksum);
     }
 
+    private static void checkReexecuteState(Path dump, String name,
+                                            Class<?>... parameterTypes) throws Exception {
+        var method = Workload.class.getDeclaredMethod(name, parameterTypes);
+        FileCheck raw = new FileCheck(dump.toString(), method, false);
+        raw.checkPatternAnywhere("invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 1,");
+        raw.checkNotPattern("invoke.*@jeandle\\.new_array.*\\[ \"deopt\"\\(i64 0,");
+        raw.checkPatternAnywhere("(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 1,");
+        raw.checkNotPattern("(?:call|invoke).*@jeandle\\.arraycopy.*\\[ \"deopt\"\\(i64 0,");
+        FileCheck optimized = new FileCheck(dump.toString(), method, true);
+        optimized.checkPatternAnywhere(
+                "@llvm\\.experimental\\.gc\\.statepoint.*@new_array.*\\[ \"deopt\"\\(i64 1,");
+        optimized.checkNotPattern(
+                "@llvm\\.experimental\\.gc\\.statepoint.*@new_array.*\\[ \"deopt\"\\(i64 0,");
+    }
+
     private static RunResult runC2Case(String... gcOptions) throws Exception {
         ArrayList<String> command = new ArrayList<>(List.of(
                 "-Xbatch", "-Xcomp", "-XX:-TieredCompilation",
                 "-XX:-BackgroundCompilation", "-XX:-UseJeandleCompiler",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact"));
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact"));
         command.addAll(List.of(gcOptions));
         command.add(TestArraysCopyOfIntrinsic.class.getName());
         command.add("regular");
@@ -197,8 +217,8 @@ public class TestArraysCopyOfIntrinsic {
                 reduceBulkZeroing ? "-XX:+ReduceBulkZeroing" : "-XX:-ReduceBulkZeroing",
                 "-Xlog:jeandle=debug", "-XX:+JeandleDumpIR",
                 "-XX:JeandleDumpDirectory=" + dump,
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfCheckcast",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfRangeCheckcast",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfCheckcast",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfRangeCheckcast",
                 gcOption,
                 TestArraysCopyOfIntrinsic.class.getName(),
                 "checkcast"));
@@ -246,8 +266,8 @@ public class TestArraysCopyOfIntrinsic {
                 "-XX:-ReduceInitialCardMarks", "-XX:-UseTLAB",
                 "-Dcopyof.barrier.length=" + length,
                 "-Xlog:jeandle=debug,gc=debug",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
-                "-XX:CompileCommand=compileonly,compiler.jeandle.intrinsic.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfExact",
+                "-XX:CompileCommand=compileonly,compiler.jeandle.arraycopy.TestArraysCopyOfIntrinsic$Workload::copyOfRangeExact",
                 gcOption));
         command.addAll(List.of(allocationOptions));
         command.add(TestArraysCopyOfIntrinsic.class.getName());
@@ -332,6 +352,23 @@ public class TestArraysCopyOfIntrinsic {
                 checksum = Long.rotateLeft(checksum ^ grown[0].hashCode() ^ range[0].hashCode(), 3);
             }
 
+            String[] shrunk = (String[]) copyOfExact(SOURCE, 2, String[].class);
+            Asserts.assertEquals(shrunk.getClass(), String[].class, "copyOf shrink runtime type");
+            Asserts.assertTrue(Arrays.equals(shrunk, new String[] {"zero", "one"}),
+                    "copyOf shrink contents");
+            Asserts.assertTrue(shrunk != SOURCE, "copyOf shrink identity");
+            String[] empty = (String[]) copyOfExact(SOURCE, 0, String[].class);
+            Asserts.assertEquals(empty.getClass(), String[].class, "copyOf empty runtime type");
+            Asserts.assertEquals(empty.length, 0, "copyOf empty length");
+            String[] emptyRange = (String[]) copyOfRangeExact(SOURCE, 2, 2, String[].class);
+            Asserts.assertEquals(emptyRange.getClass(), String[].class, "copyOfRange empty runtime type");
+            Asserts.assertEquals(emptyRange.length, 0, "copyOfRange empty length");
+            String[] padded = (String[]) copyOfRangeExact(
+                    SOURCE, SOURCE.length, SOURCE.length + 2, String[].class);
+            Asserts.assertEquals(padded.getClass(), String[].class, "copyOfRange padded runtime type");
+            Asserts.assertTrue(Arrays.equals(padded, new String[2]),
+                    "copyOfRange at source end must contain only nulls");
+
             // A destination whose element type is wider than the source is
             // eligible for the validated fast path.
             Object[] widened = copyOfExact(SOURCE, 5, Object[].class);
@@ -346,6 +383,8 @@ public class TestArraysCopyOfIntrinsic {
 
             // Invalid range cases are deliberately deoptimized so Java chooses
             // the precise exception type/order.
+            Asserts.assertThrows(ArrayIndexOutOfBoundsException.class,
+                    () -> copyOfRangeExact(SOURCE, SOURCE.length + 1, SOURCE.length + 2, String[].class));
             Asserts.assertThrows(IllegalArgumentException.class,
                     () -> copyOfRangeExact(SOURCE, 3, 1, String[].class));
             Asserts.assertThrows(ArrayIndexOutOfBoundsException.class,

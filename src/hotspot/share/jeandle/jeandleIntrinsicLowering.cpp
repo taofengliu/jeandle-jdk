@@ -25,6 +25,7 @@
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/GCStrategy.h"
 #include "llvm/IR/Jeandle/JavaType.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/MDBuilder.h"
@@ -2518,9 +2519,9 @@ bool JeandleIntrinsicLowering::lower_string_char_access(bool is_store) {
 
 // Jeandle LLVM IR counterpart of C2 BarrierSetC2::clone().
 void JeandleIntrinsicLowering::barrier_set_clone(llvm::Value* src_base,
-                                                 llvm::Value* dst_base,
-                                                 llvm::Value* size,
-                                                 bool is_array) {
+                                                llvm::Value* dst_base,
+                                                llvm::Value* size,
+                                                bool is_array) {
   llvm::IRBuilder<>& builder = _interp->_ir_builder;
   llvm::Module& m = _interp->_module;
   llvm::LLVMContext& ctx = builder.getContext();
@@ -2566,6 +2567,10 @@ void JeandleIntrinsicLowering::barrier_set_clone(llvm::Value* src_base,
        llvm::ConstantPointerNull::get(c_heap_ptr_ty),
        llvm::ConstantPointerNull::get(c_heap_ptr_ty), size_x, size_x},
       clone_attrs);
+  RETURN_VOID_ON_JEANDLE_ERROR();
+  // CloneBasic uses byte offsets and a jlong payload count, unlike ordinary
+  // arraycopy's element indices. Its last two operands carry object byte size;
+  // expansion does not interpret them as array lengths.
   copy->addFnAttr(llvm::Attribute::get(
       ctx, llvm::jeandle::Attribute::ArrayCopyKind,
       is_array ? llvm::jeandle::Attribute::ArrayCopyKindCloneArray
@@ -2574,7 +2579,7 @@ void JeandleIntrinsicLowering::barrier_set_clone(llvm::Value* src_base,
       ctx, llvm::jeandle::Attribute::ArrayCopyTightlyCoupledAllocation));
 }
 
-//------------------------clone_coping-----------------------------------
+//------------------------clone_copying-----------------------------------
 // Helper function for lower_native_clone.
 
 // Jeandle counterpart of C2 LibraryCallKit::copy_to_clone().
@@ -2586,26 +2591,23 @@ void JeandleIntrinsicLowering::barrier_set_clone(llvm::Value* src_base,
 // calls and expands them to collector-correct stubs later; allocation-
 // initialization fusion remains a separate backend task.
 void JeandleIntrinsicLowering::copy_to_clone(llvm::Value* obj,
-                                             llvm::Value* alloc_obj,
-                                             llvm::Value* obj_size,
-                                             bool is_array) {
-  llvm::IRBuilder<>& builder = _interp->_ir_builder;
+                                            llvm::Value* alloc_obj,
+                                            llvm::Value* obj_size,
+                                            bool is_array) {
   assert(obj_size != nullptr, "clone size must be available");
 
   // TODO: Match C2's ReduceBulkZeroing path. Jeandle must expose the fresh
   // allocation behind alloc_obj, verify that an array clone has a statically
   // known array source type, mark the allocation complete, and record a
   // complete_with_arraycopy initialization so the clone copy can own payload
-  // initialization and place StoreStore after the copy.
+  // initialization instead of zeroing the same memory first.
 
   barrier_set_clone(obj, alloc_obj, obj_size, is_array);
+  RETURN_VOID_ON_JEANDLE_ERROR();
 
-  // Jeandle cannot yet identify the tightly coupled AllocateNode used by C2's
-  // ReduceBulkZeroing path, so match C2's alloc == nullptr case: prevent
-  // compiler memory accesses from moving across the clone without emitting a
-  // second hardware StoreStore barrier after the allocation barrier.
-  builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent,
-                      llvm::SyncScope::SingleThread);
+  // Payload stores happen after the allocation's initialization fence. Order
+  // them before publishing the clone, including final fields copied here.
+  _interp->call_java_op("jeandle.membar_storestore", {});
 }
 
 // Follow C2 LibraryCallKit::inline_native_clone() control order. LLVM control
@@ -2674,8 +2676,9 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
           _interp->emit_array_length(obj);
       llvm::Value* array_size = nullptr;
       llvm::InvokeInst* alloc_obj = _interp->emit_jeandle_newarray(
-          obj_klass, obj_length, 0, &array_size,
+          obj_klass, obj_length, &array_size,
           true /* deoptimize_on_exception */);
+      RETURN_ON_JEANDLE_ERROR(true);
 
       // Jeandle currently supports Serial and G1. Both use C2's card-table
       // barrier-set rule for this tightly-coupled oop-array clone.
@@ -2708,6 +2711,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
                obj_length_x, obj_klass, obj_klass, obj_length_x,
                obj_length_x},
               clone_arraycopy_attrs, false /* is_gc_leaf_entry */);
+          RETURN_ON_JEANDLE_ERROR(true);
           ac->addFnAttr(llvm::Attribute::get(
               ctx, llvm::jeandle::Attribute::ArrayCopyKind,
               llvm::jeandle::Attribute::ArrayCopyKindCloneOopArray));
@@ -2732,6 +2736,7 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
       // the object.)
       if (b.GetInsertBlock() != nullptr) {
         copy_to_clone(obj, alloc_obj, array_size, true /* is_array */);
+        RETURN_ON_JEANDLE_ERROR(true);
 
         // Present the results of the array copy.
         llvm::BasicBlock* array_result_control = b.GetInsertBlock();
@@ -2767,9 +2772,11 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
     llvm::InvokeInst* alloc_obj = _interp->new_instance(
         obj_klass, nullptr, &obj_size,
         true /* deoptimize_on_exception */);
+    RETURN_ON_JEANDLE_ERROR(true);
 
     if (b.GetInsertBlock() != nullptr) {
       copy_to_clone(obj, alloc_obj, obj_size, false /* is_array */);
+      RETURN_ON_JEANDLE_ERROR(true);
 
       llvm::BasicBlock* instance_result_control = b.GetInsertBlock();
       b.CreateBr(result_bb);
@@ -2779,17 +2786,22 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
   }
 
   // Generate code for the slow case. We make a call to clone().
-  b.SetInsertPoint(slow_region);
-  if (b.GetInsertBlock() != nullptr) {
-    // Match C2's generate_method_call(). In the virtual case this must be a
-    // real dynamic Java call so a subclass override of clone() is selected;
-    // a fixed clone_object() runtime entry would bypass that override.
+  if (!llvm::pred_empty(slow_region)) {
+    b.SetInsertPoint(slow_region);
+    // An override is an ordinary Java call: it may return null or throw after
+    // side effects. Consume its receiver and use call state so deoptimization
+    // and exception dispatch never execute the override a second time.
+    JeandlePreserveReexecuteState slow_reexecute_scope(_interp);
+    _interp->_should_reexecute = false;
+    _interp->_jvm->apop();
     llvm::CallBase* slow_result = _interp->emit_java_call(
         const_cast<ciMethod*>(_target), declared_holder, _target->signature(),
         {obj}, /*has_receiver=*/true, /*is_method_handle_invoke=*/false, bc,
         /*call_does_dispatch=*/is_virtual,
-        /*deoptimize_on_exception=*/true,
-        /*result_is_non_null=*/true);
+        /*deoptimize_on_exception=*/false,
+        /*result_is_non_null=*/!is_virtual);
+    _interp->_jvm->apush(obj);
+    RETURN_ON_JEANDLE_ERROR(true);
 
     // The builder insertion point comes from emit_java_call().
     // Present the results of the slow call.
@@ -2797,6 +2809,8 @@ bool JeandleIntrinsicLowering::lower_native_clone() {
     b.CreateBr(result_bb);
     result_values.push_back(slow_result);
     result_controls.push_back(slow_call_control);
+  } else {
+    slow_region->eraseFromParent();
   }
 
   assert(!result_values.empty(), "clone must have a live result path");
@@ -2827,6 +2841,8 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
   }
 
   assert(_target->is_static(), "Arrays.copyOf[Range] must be static");
+  JeandlePreserveReexecuteState reexecute_scope(_interp);
+  _interp->_should_reexecute = true;
   llvm::LLVMContext& ctx = *_interp->_context;
   llvm::IRBuilder<>& b = _interp->_ir_builder;
   llvm::Module& m = _interp->_module;
@@ -2883,9 +2899,13 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
   generate_negative_guard(orig_tail, bailout);
 
   // All failed guards above merge at bailout, matching C2's RegionNode.
-  _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
-                         Deoptimization::Action_maybe_recompile,
-                         bailout);
+  if (!llvm::pred_empty(bailout)) {
+    _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
+                           Deoptimization::Action_maybe_recompile,
+                           bailout);
+  } else {
+    bailout->eraseFromParent();
+  }
 
   // The number copied can be smaller than the requested result length; the
   // allocation's normal zeroing supplies null padding for the remainder.
@@ -2904,19 +2924,24 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
                               Deoptimization::Reason_class_check)) {
     llvm::BasicBlock* class_check_fail =
         llvm::BasicBlock::Create(ctx, "copyof_class_check_fail", f);
-    _interp->uncommon_trap(Deoptimization::Reason_class_check,
-                           Deoptimization::Action_make_not_entrant,
-                           class_check_fail);
     llvm::Value* is_subtype = _interp->call_java_op(
         "jeandle.check_klass_subtype", {src_klass, klass_node});
     llvm::Value* not_subtype =
         b.CreateNot(is_subtype, "copyof_not_subtype");
     generate_guard(not_subtype, class_check_fail, PROB_MIN);
+    if (!llvm::pred_empty(class_check_fail)) {
+      _interp->uncommon_trap(Deoptimization::Reason_class_check,
+                             Deoptimization::Action_make_not_entrant,
+                             class_check_fail);
+    } else {
+      class_check_fail->eraseFromParent();
+    }
     validated = true;
   }
 
   llvm::InvokeInst* newcopy = _interp->emit_jeandle_newarray(
-      klass_node, length, 0 /* nargs */);
+      klass_node, length);
+  RETURN_ON_JEANDLE_ERROR(true);
 
   llvm::Value* start_x =
       b.CreateSExt(start, b.getInt64Ty(), "copyof.start_x");
@@ -2942,6 +2967,7 @@ bool JeandleIntrinsicLowering::lower_array_copyOf(bool is_copyOfRange) {
       {original, start_x, newcopy, b.getInt64(0), moved_x,
        src_klass, klass_node, orig_length_x, length_x},
       copyof_attrs);
+  RETURN_ON_JEANDLE_ERROR(true);
   arraycopy_call->addFnAttr(llvm::Attribute::get(
       ctx, llvm::jeandle::Attribute::ArrayCopyKind,
       is_copyOfRange

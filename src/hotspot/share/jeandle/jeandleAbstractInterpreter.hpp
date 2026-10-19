@@ -500,7 +500,7 @@ class JeandleAbstractInterpreter : public StackObj {
   // decodes layout_helper at runtime instead and shares emit_array_size_in_bytes.
   llvm::Value* emit_array_length(llvm::Value* array_oop);
   llvm::InvokeInst* emit_jeandle_newarray(
-      llvm::Value* array_klass, llvm::Value* length, int nargs,
+      llvm::Value* array_klass, llvm::Value* length,
       llvm::Value** return_size_val = nullptr,
       bool deoptimize_on_exception = false);
 
