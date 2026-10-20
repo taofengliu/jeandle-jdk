@@ -23,7 +23,8 @@
  * @library /test/lib /
  * @build jdk.test.whitebox.WhiteBox
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
- * @run main/othervm/timeout=120 -Xbootclasspath/a:. -XX:+WhiteBoxAPI
+ * @run main/othervm/timeout=120 -Xbootclasspath/a:.
+ *      -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
  *      -Xcomp -Xbatch -XX:-TieredCompilation -XX:+UseJeandleCompiler
  *      -XX:CompileCommand=compileonly,compiler.jeandle.TestCyclicPhiTypeQueries::test
  *      compiler.jeandle.TestCyclicPhiTypeQueries
