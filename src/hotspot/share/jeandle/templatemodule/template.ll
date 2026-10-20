@@ -95,6 +95,7 @@
 @VMOptions.UseTLAB = external global i1
 @VMOptions.ZeroTLAB = external global i1
 @VMOptions.ReduceBulkZeroing = external global i1
+@VMOptions.ReduceInitialCardMarks = external global i1
 @VMOptions.AllocateInstancePrefetchLines = external global i32
 @VMOptions.AllocatePrefetchLines = external global i32
 ; Heap layout switches consumed by VMConstants::fromModule on the LLVM side.
@@ -633,7 +634,7 @@ declare void @StubRoutines_arrayof_jlong_disjoint_arraycopy(
 ; Unified array allocation JavaOp.  Both bytecode (newarray/anewarray) and intrinsic
 ; (_newArray / Array.newInstance) paths call this function.
 ; LLVM passes identify array allocation by matching on this function name.
-define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %base_offset, i32 %length_limit) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
+define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %header_size, i32 %length_limit) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
 entry:
   ; Fast-path length cap. %length_limit is a size-derived bound (FastAllocateSizeLimit, scaled
   ; by element size on the caller side) chosen so %size_in_bytes cannot overflow i32 -- it is
@@ -712,8 +713,8 @@ array_post_klass_store:
 array_clear_memory:
   ; Array payloads are HeapWord-aligned. Reuse the platform-aware zeroing
   ; JavaOp used by new_instance for constant and variable word counts.
-  %base_addr = getelementptr i8, ptr addrspace(1) %tlab_old_top, i32 %base_offset
-  %payload_size = sub i32 %size_in_bytes, %base_offset
+  %base_addr = getelementptr i8, ptr addrspace(1) %tlab_old_top, i32 %header_size
+  %payload_size = sub i32 %size_in_bytes, %header_size
   %payload_words = lshr exact i32 %payload_size, 3
   call hotspotcc void @jeandle.zero_heap_words(
       ptr addrspace(1) %base_addr, i32 %payload_words)
