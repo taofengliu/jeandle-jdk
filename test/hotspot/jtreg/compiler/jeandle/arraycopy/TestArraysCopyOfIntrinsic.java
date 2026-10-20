@@ -377,6 +377,8 @@ public class TestArraysCopyOfIntrinsic {
             Asserts.assertEquals(widened[2], "two", "covariant fallback");
             Asserts.assertNull(widened[4], "covariant fallback tail");
 
+            verifyDynamicMirrors();
+
             Object[] mixed = {"ok", new Object()};
             Asserts.assertThrows(ArrayStoreException.class,
                     () -> copyOfExact(mixed, 2, String[].class));
@@ -434,6 +436,38 @@ public class TestArraysCopyOfIntrinsic {
                     () -> copyOfRangeCheckcast(
                             mixed, 0, mixed.length, String[].class));
             System.out.println("CHECKCAST_OK=" + checksum);
+        }
+
+        private static void verifyDynamicMirrors() {
+            CharSequence[] source = {"zero", new StringBuilder("one"), null};
+            Class<?>[] types = {CharSequence[].class, Object[].class, String[].class};
+            // Change mirrors at the same compiled sites, including a failing
+            // store check followed by successful copies after deoptimization.
+            for (int iteration = 0; iteration < 300; iteration++) {
+                Class<?> type = types[iteration % types.length];
+                if (type == String[].class) {
+                    Asserts.assertThrows(ArrayStoreException.class,
+                            () -> copyOfExact(source, 5, type));
+                    Asserts.assertThrows(ArrayStoreException.class,
+                            () -> copyOfRangeExact(source, 1, 5, type));
+                    continue;
+                }
+                Object[] copy = copyOfExact(source, 5, type);
+                Object[] range = copyOfRangeExact(source, 1, 5, type);
+                Asserts.assertEquals(copy.getClass(), type);
+                Asserts.assertEquals(range.getClass(), type);
+                Asserts.assertEquals(copy.length, 5);
+                Asserts.assertEquals(range.length, 4);
+                Asserts.assertTrue(Arrays.equals(copy,
+                        new Object[] {source[0], source[1], null, null, null}));
+                Asserts.assertTrue(Arrays.equals(range,
+                        new Object[] {source[1], null, null, null}));
+                Asserts.assertTrue(copy != source && range != source);
+                copy[0] = null;
+                range[0] = null;
+                Asserts.assertEquals(source[0], "zero");
+                Asserts.assertTrue(source[1] instanceof StringBuilder);
+            }
         }
 
         static void runBarrier() {

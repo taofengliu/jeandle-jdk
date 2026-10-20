@@ -24,10 +24,12 @@
  *          array boundaries, and collector barriers.
  * @requires vm.gc.Serial & vm.gc.G1
  * @library /test/lib /
- * @build compiler.jeandle.fileCheck.FileCheck
+ * @build compiler.jeandle.fileCheck.FileCheck jdk.test.whitebox.WhiteBox
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run driver TestObjectClone
  */
 
+import java.lang.ref.WeakReference;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -39,6 +41,7 @@ import compiler.jeandle.fileCheck.FileCheck;
 import jdk.test.lib.Asserts;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
+import jdk.test.whitebox.WhiteBox;
 
 public class TestObjectClone {
     private static final String PASS = "OBJECT_CLONE_PASS";
@@ -62,6 +65,7 @@ public class TestObjectClone {
                 "-Xbatch", "-Xcomp", "-XX:-TieredCompilation",
                 "-XX:-BackgroundCompilation", "-Xms128m", "-Xmx128m",
                 "-XX:+UnlockDiagnosticVMOptions",
+                "-Xbootclasspath/a:.", "-XX:+WhiteBoxAPI",
                 useJeandle ? "-XX:+UseJeandleCompiler" : "-XX:-UseJeandleCompiler",
                 "-XX:" + gcOption,
                 reduceInitialCardMarks
@@ -85,6 +89,10 @@ public class TestObjectClone {
         if (!reduceInitialCardMarks) {
             // Exercise allocation slow paths as well as TLAB allocation.
             command.add("-XX:-UseTLAB");
+        }
+        if (gcOption.equals("+UseG1GC")) {
+            command.add("-XX:G1HeapRegionSize=1m");
+            command.add("-Dtest.clone.oldDestination=true");
         }
         if (!intrinsicEnabled) {
             command.add("-XX:ControlIntrinsic=-_clone");
@@ -366,6 +374,9 @@ public class TestObjectClone {
     }
 
     static final class Workload {
+        private static final int BARRIER_LENGTH = 200_003;
+        private static Object[] cloneBarrierRoot;
+        private static WeakReference<Marker> cloneBarrierWeak;
         private static final int[] LENGTHS = {
                 0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33,
                 127, 128, 129, 1023, 1024, 1025, 1_000_003
@@ -564,14 +575,19 @@ public class TestObjectClone {
             // One compiled call site must retain the actual covariant klass,
             // including nested primitive arrays, not manufacture Object[].
             for (Object[] source : new Object[][] {
-                    new Object[] { null, new Object() }, new String[] { "x", null },
-                    new int[][] { new int[] { 1, 2 }, null } }) {
+                    new Object[] { new Object(), null }, new String[] { "x", null },
+                    new int[][] { new int[] { 1, 2 }, null },
+                    new CharSequence[] { "x", new StringBuilder("y") } }) {
                 Object[] copy = TestMethods.cloneObjectArray(source);
                 Asserts.assertEquals(copy.getClass(), source.getClass());
                 Asserts.assertTrue(copy != source && Arrays.equals(copy, source));
-                Asserts.assertTrue(copy[0] == source[0]);
-                copy[0] = null;
-                Asserts.assertTrue(source[0] != null || source.getClass() == Object[].class);
+                Object[] original = source.clone();
+                for (int index = 0; index < copy.length; index++) {
+                    Asserts.assertSame(copy[index], source[index]);
+                    copy[index] = null;
+                }
+                Asserts.assertTrue(Arrays.equals(source, original),
+                        "mutating clone must not change its source");
             }
             for (int length : LENGTHS) {
                 Object first = new Marker(length);
@@ -593,27 +609,46 @@ public class TestObjectClone {
         }
 
         private static void verifyReferenceBarrierUnderGc() {
-            final int length = 200_003;
-            Marker marker = new Marker(0x5a17c0de);
-            Object[] source = new Object[length];
-            Arrays.fill(source, marker);
-            Object[] clone = TestMethods.cloneObjectArray(source);
-
-            source = null;
-            marker = null;
+            boolean oldDestination = Boolean.getBoolean("test.clone.oldDestination");
+            createReferenceBarrierFixture(oldDestination);
+            if (oldDestination) {
+                WhiteBox.getWhiteBox().youngGC();
+            }
             for (int i = 0; i < 96; i++) {
                 byte[] garbage = new byte[1024 * 1024];
                 garbage[0] = (byte) i;
             }
 
-            int[] probes = {0, 1, length / 2, length - 2, length - 1};
+            Marker marker = cloneBarrierWeak.get();
+            Asserts.assertNotNull(marker, "clone must keep its referent alive after GC");
+            int[] probes = {0, 1, BARRIER_LENGTH / 2, BARRIER_LENGTH - 2, BARRIER_LENGTH - 1};
             for (int index : probes) {
-                Object value = clone[index];
-                Asserts.assertTrue(value instanceof Marker,
-                        "reference lost after GC at index " + index);
-                Asserts.assertEQ(((Marker) value).value, 0x5a17c0de,
-                        "reference contents after GC at index " + index);
+                Asserts.assertSame(cloneBarrierRoot[index], marker,
+                        "clone reference must be updated by GC at index " + index);
             }
+            Asserts.assertEQ(marker.value, 0x5a17c0de, "reference contents after GC");
+            cloneBarrierRoot = null;
+            cloneBarrierWeak = null;
+        }
+
+        private static void createReferenceBarrierFixture(boolean oldDestination) {
+            Marker marker = new Marker(0x5a17c0de);
+            Object[] source = new Object[BARRIER_LENGTH];
+            Arrays.fill(source, marker);
+            cloneBarrierRoot = TestMethods.cloneObjectArray(source);
+            cloneBarrierWeak = new WeakReference<>(marker);
+
+            if (oldDestination) {
+                WhiteBox whiteBox = WhiteBox.getWhiteBox();
+                Asserts.assertTrue(whiteBox.isObjectInOldGen(cloneBarrierRoot),
+                        "G1 clone must be old to exercise old-to-young barriers");
+                Asserts.assertFalse(whiteBox.isObjectInOldGen(marker),
+                        "G1 referent must be young before collection");
+            }
+
+            // A dead humongous Object[] may still be scanned through its dirty
+            // cards. Clear it so only the clone can keep the marker alive.
+            Arrays.fill(source, null);
         }
     }
 }

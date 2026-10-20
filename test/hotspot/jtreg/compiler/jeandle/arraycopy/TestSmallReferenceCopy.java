@@ -98,9 +98,7 @@ public class TestSmallReferenceCopy {
             }
             optimized.checkPattern(Platform.isAArch64()
                     ? "call void @llvm\\.aarch64\\.dmb\\(i32 10\\)" : "fence release");
-            new FileCheck(dump.toString(),
-                    Workload.class.getDeclaredMethod(name, Object.class, Object.class), true)
-                    .checkPattern("ret ptr addrspace\\(1\\)");
+            optimized.checkPatternAnywhere("ret ptr addrspace\\(1\\)");
         }
     }
 

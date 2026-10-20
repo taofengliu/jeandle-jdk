@@ -2718,6 +2718,8 @@ bool JeandleIntrinsicLowering::lower_object_clone() {
               ctx, llvm::jeandle::Attribute::CopyKind,
               llvm::jeandle::Attribute::CopyKindCloneReferenceArray));
           ac->addFnAttr(llvm::Attribute::get(
+              ctx, llvm::jeandle::Attribute::CopyNegativeLengthGuard));
+          ac->addFnAttr(llvm::Attribute::get(
               ctx,
               llvm::jeandle::Attribute::CopyTightlyCoupledAllocation));
 

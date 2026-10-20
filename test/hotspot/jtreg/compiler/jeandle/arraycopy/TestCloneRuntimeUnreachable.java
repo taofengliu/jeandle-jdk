@@ -21,7 +21,7 @@
 /*
  * @test
  * @summary Runtime clone supports targets outside the direct-call range
- * @requires os.simpleArch == "x64" & vm.gc.Serial
+ * @requires vm.gc.Serial
  * @library /test/lib
  * @build TestObjectCloneSerialGCBarrier jdk.test.whitebox.WhiteBox
  * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 import jdk.test.lib.Asserts;
+import jdk.test.lib.Platform;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 import jdk.test.whitebox.WhiteBox;
@@ -53,8 +54,12 @@ public class TestCloneRuntimeUnreachable {
             return;
         }
         runCase(false, true);
-        runCase(true, true);
-        runCase(true, false);
+        runCase(false, false);
+        if (Platform.isX64()) {
+            // ForceUnreachable changes direct-call reachability on x86 only.
+            runCase(true, true);
+            runCase(true, false);
+        }
     }
 
     private static void runCase(boolean unreachable, boolean enabled) throws Exception {

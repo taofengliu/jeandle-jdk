@@ -3214,7 +3214,13 @@ JeandleAbstractInterpreter::DispatchedDest JeandleAbstractInterpreter::dispatch_
     // Match GraphKit::make_slow_call_ex(..., deoptimize=true): an allocation
     // exception must not be merged into the caller's exception state.  The
     // invoke's deopt bundle was built before any intrinsic operands were
-    // consumed, so the interpreter can reexecute the original bytecode.
+    // consumed, so the interpreter can reexecute the original bytecode. The
+    // exception is deliberately discarded: Unpack_uncommon_trap resumes at
+    // that bytecode and does not deliver the exception in TLS. As in C2, a
+    // repeated allocation failure is thrown by the interpreter; if allocation
+    // succeeds on retry, execution continues normally. Do not write it back
+    // as a pending exception when entering the uncommon-trap runtime.
+    assert(_should_reexecute, "must reexecute after discarding an exception");
     uncommon_trap(Deoptimization::Reason_unhandled,
                   Deoptimization::Action_none);
   } else {

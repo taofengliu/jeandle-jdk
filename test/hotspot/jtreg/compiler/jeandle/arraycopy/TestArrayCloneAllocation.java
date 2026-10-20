@@ -22,7 +22,8 @@
  * @summary Dynamic array allocation must not speculate Object[] before LLVM folds the layout
  * @requires vm.gc.Serial & vm.gc.G1
  * @library /test/lib /
- * @build TestObjectClone compiler.jeandle.fileCheck.FileCheck
+ * @build TestObjectClone compiler.jeandle.fileCheck.FileCheck jdk.test.whitebox.WhiteBox
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
  * @run driver TestArrayCloneAllocation
  */
 
@@ -48,11 +49,16 @@ public class TestArrayCloneAllocation {
         Path dump = Files.createTempDirectory("array_clone_allocation_");
         ArrayList<String> command = new ArrayList<>(List.of(
                 "-XX:+UnlockDiagnosticVMOptions", "-Xbatch", "-Xcomp",
+                "-Xbootclasspath/a:.", "-XX:+WhiteBoxAPI",
                 "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler",
                 "-Xms128m", "-Xmx128m", gc, "-Xlog:jeandle=debug,gc=info",
                 "-XX:+JeandleDumpIR", "-XX:JeandleDumpDirectory=" + dump,
                 "-XX:CompileCommand=compileonly,TestObjectClone$TestMethods::*"));
         command.addAll(extra);
+        if (gc.equals("-XX:+UseG1GC")) {
+            command.add("-XX:G1HeapRegionSize=1m");
+            command.add("-Dtest.clone.oldDestination=true");
+        }
         command.add("TestObjectClone$Workload");
         command.add("arrays");
         OutputAnalyzer out = ProcessTools.executeProcess(

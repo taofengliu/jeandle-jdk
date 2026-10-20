@@ -1024,10 +1024,15 @@ static void emit_raw_clone_payload_copy(llvm::Module& module,
       builder.getContext(), "gc-leaf-function"));
 }
 
-// Follow CardTableBarrierSetC2::clone: raw payload copy suffices for a fresh
-// allocation with compensating card marks; otherwise instance copies use
-// HeapAccess<>::clone for the collector's bulk post-barrier. Reference arrays
-// needing barriers are handled separately with oop-aware arraycopy stubs.
+// The destination must be a fresh allocation tightly coupled to this copy,
+// with no intervening safepoint or publication. ReduceInitialCardMarks relies
+// on that property to omit barriers via compensating allocation card marks.
+// With barriers required, only primitive arrays may take the raw path;
+// reference arrays are routed separately to oop-aware arraycopy stubs.
+// Instance copies use HeapAccess<>::clone and its bulk region invalidation.
+// This conservatively dirties the destination for both Serial and G1; C2's
+// CardTableBarrierSetC2::clone instead emits post_barrier, including G1's
+// dynamic young-card check.
 DEF_JAVA_OP(clone_payload, 1, llvm::Type::getVoidTy(context),
             llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
             llvm::Type::getInt64Ty(context),
@@ -1265,7 +1270,7 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("VMOptions.UseTLAB",                                int1_type, static_cast<uint64_t>(UseTLAB));
   define_global("VMOptions.ZeroTLAB",                               int1_type, static_cast<uint64_t>(ZeroTLAB));
   define_global("VMOptions.ReduceBulkZeroing",                      int1_type, static_cast<uint64_t>(ReduceBulkZeroing));
-  define_global("VMOptions.ReduceInitialCardMarks",                int1_type, static_cast<uint64_t>(ReduceInitialCardMarks));
+  define_global("VMOptions.ReduceInitialCardMarks",                 int1_type, static_cast<uint64_t>(ReduceInitialCardMarks));
   define_global("VMOptions.AllocateInstancePrefetchLines",          int32_type, static_cast<uint64_t>(AllocateInstancePrefetchLines));
   define_global("VMOptions.AllocatePrefetchLines",                  int32_type, static_cast<uint64_t>(AllocatePrefetchLines));
   define_global("VMOptions.UseCompressedClassPointers",             int1_type, static_cast<uint64_t>(UseCompressedClassPointers));

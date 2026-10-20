@@ -1080,7 +1080,8 @@ JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
   if (!klass_exact) {
     assert(!ik->is_interface(), "inconsistent klass hierarchy");
     if (ik->has_subklass()) {
-      // Concurrent class loading after the clone-instance admission check.
+      // Recheck the cached ci hierarchy before recording the dependency.
+      // assert_leaf_type supplies class-loading validation at code installation.
       return {static_cast<int>(CloneInstanceInfoStatus::TransformFailed),
               field_count, {}};
     }
@@ -1094,6 +1095,8 @@ JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
     fields.emplace_back(field->offset_in_bytes(),
                         basictype_to_jbasictype(field->layout_type()));
   }
+  // Ready must describe exactly field_count fields on both sides of the VM interface.
+  assert(fields.size() == static_cast<size_t>(field_count), "incomplete clone field layout");
   return {static_cast<int>(CloneInstanceInfoStatus::Ready), field_count,
           std::move(fields)};
 }
