@@ -20,12 +20,21 @@
 /*
  * @test
  * @summary Compilation completes for shared inputs depending on cyclic Java type queries
- * @run main/othervm/timeout=120 -Xcomp -Xbatch -XX:-TieredCompilation -XX:+UseJeandleCompiler
+ * @library /test/lib /
+ * @build jdk.test.whitebox.WhiteBox
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller jdk.test.whitebox.WhiteBox
+ * @run main/othervm/timeout=120 -Xbootclasspath/a:. -XX:+WhiteBoxAPI
+ *      -Xcomp -Xbatch -XX:-TieredCompilation -XX:+UseJeandleCompiler
  *      -XX:CompileCommand=compileonly,compiler.jeandle.TestCyclicPhiTypeQueries::test
  *      compiler.jeandle.TestCyclicPhiTypeQueries
  */
 
 package compiler.jeandle;
+
+import java.lang.reflect.Method;
+
+import jdk.test.lib.Asserts;
+import jdk.test.whitebox.WhiteBox;
 
 public class TestCyclicPhiTypeQueries {
     static volatile int marker;
@@ -35,7 +44,14 @@ public class TestCyclicPhiTypeQueries {
         int get() { return value; }
     }
     static class Left extends Node { Left() { super(11); } }
-    static class Right extends Node { Right() { super(17); } }
+    // get() returns a Right-specific result so the oracle detects a receiver
+    // wrongly narrowed to the sibling class or a get() devirtualized to the
+    // wrong target.
+    static class Right extends Node {
+        Right() { super(17); }
+        @Override
+        int get() { return value * 2; }
+    }
     static int test(Left left, Right right, int mask, int count) {
         Object a = left;
         Object b = right;
@@ -218,7 +234,7 @@ public class TestCyclicPhiTypeQueries {
         }
         return sum;
     }
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         Left left = new Left();
         Right right = new Right();
         int[] masks = {0, 1, 3, -1, 0x55555555, 0x12345678, Integer.MIN_VALUE};
@@ -227,7 +243,9 @@ public class TestCyclicPhiTypeQueries {
                 int expected = 0;
                 for (int i = 0; i < count; i++) {
                     boolean swapped = ((Integer.bitCount(mask) ^ i) & 1) != 0;
-                    expected += swapped ? 34 : 22;
+                    // Left contributes 11 + Node.get() = 22, Right contributes
+                    // 17 + Right.get() = 51.
+                    expected += swapped ? 51 : 22;
                 }
                 int actual = test(left, right, mask, count);
                 if (actual != expected) {
@@ -235,6 +253,13 @@ public class TestCyclicPhiTypeQueries {
                 }
             }
         }
+        // The whole point of the test is that the cyclic type queries let the
+        // compilation finish; a silent bailout would leave the oracle passing
+        // in the interpreter.
+        WhiteBox wb = WhiteBox.getWhiteBox();
+        Method m = TestCyclicPhiTypeQueries.class.getDeclaredMethod(
+                "test", Left.class, Right.class, int.class, int.class);
+        Asserts.assertTrue(wb.isMethodCompiled(m), "test() was not compiled");
         System.out.println("Passed");
     }
 }
