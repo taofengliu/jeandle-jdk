@@ -3505,7 +3505,9 @@ llvm::Value* JeandleAbstractInterpreter::emit_array_size_in_bytes(llvm::Value* l
   return _ir_builder.CreateAnd(with_align_pad, _ir_builder.getInt32(~align_mask));
 }
 
-llvm::InvokeInst* JeandleAbstractInterpreter::emit_jeandle_newarray(Klass* array_klass, llvm::Value* length) {
+llvm::InvokeInst* JeandleAbstractInterpreter::emit_jeandle_newarray(
+    Klass* array_klass, llvm::Value* length,
+    llvm::ArrayRef<llvm::OperandBundleDef> deopt_bundle) {
   // Decode the array klass layout at IR build time. array_klass is known here, so size/base/max
   // fold to i32 constants and the fast path in template.ll collapses to a tight bump-pointer plus
   // inline zero loop.
@@ -3529,9 +3531,15 @@ llvm::InvokeInst* JeandleAbstractInterpreter::emit_jeandle_newarray(Klass* array
   llvm::PointerType* klass_type = llvm::PointerType::get(*_context, llvm::jeandle::AddrSpace::CHeapAddrSpace);
   llvm::Value* array_klass_ptr = _ir_builder.CreateIntToPtr(_ir_builder.getInt64((intptr_t)array_klass), klass_type);
 
+  // Intrinsics can supply the original invoke state captured before popping
+  // their operands. Bytecode allocations retain the current bytecode state.
+  llvm::SmallVector<llvm::OperandBundleDef, 1> bundles(deopt_bundle);
+  if (bundles.empty()) {
+    bundles.push_back(create_current_deopt_bundle());
+  }
   return call_java_op_ex("jeandle.new_array",
       {array_klass_ptr, length, size_in_bytes, _ir_builder.getInt32(base_offset), _ir_builder.getInt32(length_limit)},
-      {create_current_deopt_bundle()});
+      bundles);
 }
 
 void JeandleAbstractInterpreter::do_unified_newarray(Klass* array_klass) {

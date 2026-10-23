@@ -300,6 +300,29 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
     case vmIntrinsics::_hashCode:
     case vmIntrinsics::_identityHashCode:
 
+    // String operations over Latin1 and native-endian UTF16 arrays.
+    case vmIntrinsics::_compareToL:
+    case vmIntrinsics::_compareToU:
+    case vmIntrinsics::_compareToLU:
+    case vmIntrinsics::_compareToUL:
+    case vmIntrinsics::_indexOfL:
+    case vmIntrinsics::_indexOfU:
+    case vmIntrinsics::_indexOfUL:
+    case vmIntrinsics::_indexOfIL:
+    case vmIntrinsics::_indexOfIU:
+    case vmIntrinsics::_indexOfIUL:
+    case vmIntrinsics::_indexOfL_char:
+    case vmIntrinsics::_indexOfU_char:
+    case vmIntrinsics::_equalsL:
+    case vmIntrinsics::_equalsU:
+    case vmIntrinsics::_toBytesStringU:
+    case vmIntrinsics::_getCharsStringU:
+    case vmIntrinsics::_compressStringC:
+    case vmIntrinsics::_compressStringB:
+    case vmIntrinsics::_inflateStringC:
+    case vmIntrinsics::_inflateStringB:
+      return true;
+
     // arrayequals
     case vmIntrinsics::_equalsB:
     case vmIntrinsics::_equalsC:
@@ -598,6 +621,28 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     // arraycopy
     case vmIntrinsics::_arraycopy:
       return lower_arraycopy();
+
+    case vmIntrinsics::_compareToL:
+    case vmIntrinsics::_compareToU:
+    case vmIntrinsics::_compareToLU:
+    case vmIntrinsics::_compareToUL:
+    case vmIntrinsics::_indexOfL:
+    case vmIntrinsics::_indexOfU:
+    case vmIntrinsics::_indexOfUL:
+    case vmIntrinsics::_indexOfIL:
+    case vmIntrinsics::_indexOfIU:
+    case vmIntrinsics::_indexOfIUL:
+    case vmIntrinsics::_indexOfL_char:
+    case vmIntrinsics::_indexOfU_char:
+    case vmIntrinsics::_equalsL:
+    case vmIntrinsics::_equalsU:
+    case vmIntrinsics::_toBytesStringU:
+    case vmIntrinsics::_getCharsStringU:
+    case vmIntrinsics::_compressStringC:
+    case vmIntrinsics::_compressStringB:
+    case vmIntrinsics::_inflateStringC:
+    case vmIntrinsics::_inflateStringB:
+      return lower_string_intrinsic(id);
 
     // arraycopy
     case vmIntrinsics::_equalsB:

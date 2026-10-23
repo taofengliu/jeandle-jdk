@@ -487,7 +487,8 @@ class JeandleAbstractInterpreter : public StackObj {
   // in template.ll collapses tight. Used by do_unified_newarray and multianewarray's
   // dimensions-array allocation. The reflection path (JeandleIntrinsicLowering::lower_new_array)
   // decodes layout_helper at runtime instead and shares emit_array_size_in_bytes.
-  llvm::InvokeInst* emit_jeandle_newarray(Klass* array_klass, llvm::Value* length);
+  llvm::InvokeInst* emit_jeandle_newarray(Klass* array_klass, llvm::Value* length,
+      llvm::ArrayRef<llvm::OperandBundleDef> deopt_bundle = {});
 
   // Builds the array size_in_bytes expression shared by the bytecode and reflection
   // allocation paths. Mirrors C2's GraphKit::new_array size computation.
