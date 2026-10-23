@@ -94,6 +94,8 @@
 ; Global vm options
 @VMOptions.UseTLAB = external global i1
 @VMOptions.ZeroTLAB = external global i1
+@VMOptions.ReduceBulkZeroing = external global i1
+@VMOptions.ReduceInitialCardMarks = external global i1
 @VMOptions.AllocateInstancePrefetchLines = external global i32
 @VMOptions.AllocatePrefetchLines = external global i32
 ; Heap layout switches consumed by VMConstants::fromModule on the LLVM side.
@@ -166,15 +168,19 @@
 ; baked absolute address (load + inttoptr + indirect call) rather than a PC-relative branch.
 @SharedRuntime.complete_monitor_unlocking_C = external global i64
 
+declare hotspotcc void @jeandle.clone_payload(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, i1)
+
 ; Keep use to lately-used java operations, until it is lowered.
-@llvm.used = appending addrspace(1) global [7 x ptr] [
+@llvm.used = appending addrspace(1) global [9 x ptr] [
   ptr @jeandle.card_table_barrier,
   ptr @jeandle.g1_pre_barrier,
   ptr @jeandle.g1_post_barrier,
   ptr @jeandle.pre_barrier,
   ptr @jeandle.post_barrier,
   ptr @jeandle.encode_heap_oop,
-  ptr @jeandle.decode_heap_oop
+  ptr @jeandle.decode_heap_oop,
+  ptr @jeandle.clone_payload,
+  ptr @jeandle.membar_storestore
 ], section "llvm.metadata"
 
 declare hotspotcc ptr addrspace(0) @jeandle.decode_klass(i32)
@@ -492,12 +498,16 @@ declare hotspotcc ptr @jeandle.current_thread()
 declare hotspotcc ptr addrspace(1) @new_array(ptr, i32, ptr)
 declare hotspotcc void @SharedRuntime_register_finalizer(ptr, ptr addrspace(1))
 
-; ArrayCopyNode-like pseudo operation. Keep it opaque through phase 0 so
-; ArrayCopySpecialization can expand every call before phase 1 lowering.
-declare hotspotcc void @jeandle.arraycopy(
-    ptr addrspace(1), i32, ptr addrspace(1), i32, i32,
-    ptr addrspace(0), ptr addrspace(0), i32, i32
-) "lower-phase"="1"
+; Shared pseudo operation for System.arraycopy, Arrays.copyOf[Range] and clone.
+; Array copies use element indices/counts; instance and raw-array payload clones
+; use byte offsets, a Java-long payload count and object byte sizes instead.
+; This is not a JavaOp:
+; CopySpecialization must expand every call before JavaOperationLower(1),
+; so this declaration must not carry a lower-phase attribute.
+declare hotspotcc void @jeandle.copy(
+    ptr addrspace(1), i64, ptr addrspace(1), i64, i64,
+    ptr addrspace(0), ptr addrspace(0), i64, i64
+)
 
 ; Slow-path runtime routines for monitor JavaOps. The LOCKING routine is an
 ; indirect routine called via a JIT stub (hotspotcc); declared here and
@@ -519,35 +529,112 @@ declare hotspotcc void @SharedRuntime_complete_monitor_locking_C(ptr addrspace(1
 declare hotspotcc void @__llvm_deoptimize(i32)
 
 ; Arraycopy stub entry points resolved by jeandleRuntimeRoutine.hpp.
-declare i32 @StubRoutines_generic_arraycopy(ptr addrspace(1), i32, ptr addrspace(1), i32, i32)
 declare hotspotcc void @SharedRuntime_slow_arraycopy_C(ptr addrspace(1), i32, ptr addrspace(1), i32, i32, ptr)
-declare void @StubRoutines_jbyte_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jbyte_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jbyte_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jbyte_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jshort_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jshort_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jshort_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jshort_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jint_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jint_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jlong_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jlong_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_jlong_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_jlong_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_oop_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_oop_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_oop_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
-declare void @StubRoutines_arrayof_oop_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
+declare i32 @StubRoutines_generic_arraycopy(ptr addrspace(1), i32, ptr addrspace(1), i32, i32)
 declare i32 @StubRoutines_checkcast_arraycopy(ptr addrspace(1), ptr addrspace(1), i64, i64, ptr addrspace(0))
+declare i32 @StubRoutines_checkcast_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64, i64, ptr addrspace(0))
+declare void @StubRoutines_oop_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_oop_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_arrayof_oop_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_arrayof_oop_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_oop_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_oop_disjoint_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_arrayof_oop_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
+declare void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64)
+
+; jbyte
+declare void @StubRoutines_jbyte_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jbyte_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_jbyte_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jbyte_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+
+; jshort
+declare void @StubRoutines_jshort_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jshort_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_jshort_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jshort_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+
+; jint
+declare void @StubRoutines_jint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_jint_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jint_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+
+; jlong
+declare void @StubRoutines_jlong_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jlong_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_jlong_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
+declare void @StubRoutines_arrayof_jlong_disjoint_arraycopy(
+    ptr addrspace(1) readonly captures(none) %src,
+    ptr addrspace(1) writeonly captures(none) %dest,
+    i64 %count
+) memory(argmem: readwrite) nounwind
 
 
 ; Unified array allocation JavaOp.  Both bytecode (newarray/anewarray) and intrinsic
 ; (_newArray / Array.newInstance) paths call this function.
 ; LLVM passes identify array allocation by matching on this function name.
-define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %base_offset, i32 %length_limit) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
+define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %header_size, i32 %length_limit) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
 entry:
   ; Fast-path length cap. %length_limit is a size-derived bound (FastAllocateSizeLimit, scaled
   ; by element size on the caller side) chosen so %size_in_bytes cannot overflow i32 -- it is
@@ -626,8 +713,8 @@ array_post_klass_store:
 array_clear_memory:
   ; Array payloads are HeapWord-aligned. Reuse the platform-aware zeroing
   ; JavaOp used by new_instance for constant and variable word counts.
-  %base_addr = getelementptr i8, ptr addrspace(1) %tlab_old_top, i32 %base_offset
-  %payload_size = sub i32 %size_in_bytes, %base_offset
+  %base_addr = getelementptr i8, ptr addrspace(1) %tlab_old_top, i32 %header_size
+  %payload_size = sub i32 %size_in_bytes, %header_size
   %payload_words = lshr exact i32 %payload_size, 3
   call hotspotcc void @jeandle.zero_heap_words(
       ptr addrspace(1) %base_addr, i32 %payload_words)

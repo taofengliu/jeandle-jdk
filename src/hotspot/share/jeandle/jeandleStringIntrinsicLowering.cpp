@@ -268,25 +268,29 @@ bool JeandleIntrinsicLowering::lower_string_intrinsic(vmIntrinsics::ID id) {
       ShouldNotReachHere();
   }
 
-  // Capture the original invoke stack before consuming any arguments. Every
-  // guard precedes allocation and bulk stores, so re-execution is safe.
+  // Keep the original invoke operands until allocation has captured its
+  // reexecute state. Every guard precedes allocation and bulk stores.
   _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
                          Deoptimization::Action_make_not_entrant, slow);
-  llvm::SmallVector<llvm::OperandBundleDef, 1> allocation_bundle;
+  llvm::Value* allocated = nullptr;
+  llvm::BasicBlock* allocation_done = nullptr;
   if (allocate) {
-    allocation_bundle.push_back(_interp->create_current_deopt_bundle(true));
+    JeandlePreserveReexecuteState reexecute_scope(_interp);
+    _interp->_should_reexecute = true;
+    llvm::PointerType* klass_type = llvm::PointerType::get(
+        *_interp->_context, llvm::jeandle::AddrSpace::CHeapAddrSpace);
+    llvm::Value* array_klass = b.CreateIntToPtr(
+        b.getInt64((intptr_t)Universe::byteArrayKlassObj()), klass_type);
+    allocated = _interp->emit_jeandle_newarray(array_klass, allocation_length);
+    RETURN_ON_JEANDLE_ERROR(true);
+    attach_java_klass_ret_attr(llvm::cast<llvm::CallBase>(allocated),
+                               sig->return_type(), *_interp->_context);
+    operands[2] = allocated;
   }
   for (int i = nargs - 1; i >= 0; --i) {
     _interp->_jvm->pop(JeandleType::actual2computational(sig->type_at(i)->basic_type()));
   }
-  llvm::Value* allocated = nullptr;
-  llvm::BasicBlock* allocation_done = nullptr;
   if (allocate) {
-    allocated = _interp->emit_jeandle_newarray(Universe::byteArrayKlassObj(),
-                                               allocation_length, allocation_bundle);
-    attach_java_klass_ret_attr(llvm::cast<llvm::CallBase>(allocated),
-                               sig->return_type(), *_interp->_context);
-    operands[2] = allocated;
     allocation_done = llvm::BasicBlock::Create(
         *_interp->_context, "string_allocation_done", _interp->_llvm_func);
     llvm::BasicBlock* copy = llvm::BasicBlock::Create(

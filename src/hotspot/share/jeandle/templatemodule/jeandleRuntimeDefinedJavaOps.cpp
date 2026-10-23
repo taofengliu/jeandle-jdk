@@ -30,6 +30,7 @@
 #include "jeandle/templatemodule/jeandleRuntimeDefinedJavaOps.hpp"
 #include "jeandle/jeandleRuntimeRoutine.hpp"
 #include "jeandle/jeandleRegister.hpp"
+#include "jeandle/jeandleUtils.hpp"
 #include "jeandle/jeandleCompiledCall.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
@@ -968,6 +969,110 @@ DEF_JAVA_OP(decode_klass, 1, llvm::PointerType::get(context, llvm::jeandle::Addr
   ir_builder.CreateRet(klass_ptr);
 JAVA_OP_END
 
+// HeapAccess<>::clone supplies the collector's bulk post-barrier.
+static void emit_runtime_clone(llvm::Module& module,
+                               llvm::IRBuilder<>& builder,
+                               llvm::Value* src,
+                               llvm::Value* dst,
+                               llvm::Value* payload_long_count) {
+  llvm::LLVMContext& context = builder.getContext();
+  llvm::Type* intptr_type = builder.getIntPtrTy(module.getDataLayout());
+
+  // The native clone expects the complete object size in HeapWords. Restore
+  // the header omitted from the pseudo operation's Java-long payload count.
+  llvm::Value* header_long_count = llvm::ConstantInt::get(
+      intptr_type,
+      clone_payload_base_offset(/*is_array=*/false) >> LogBytesPerLong);
+  llvm::Value* payload_long_count_x = builder.CreateIntCast(
+      payload_long_count, intptr_type, /*isSigned=*/true,
+      "clone.payload_long_count_x");
+  llvm::Value* object_long_count = builder.CreateAdd(
+      payload_long_count_x, header_long_count, "clone.object_long_count");
+  llvm::Value* object_heap_word_count = builder.CreateShl(
+      object_long_count, llvm::ConstantInt::get(intptr_type, LogHeapWordsPerLong),
+      "clone.object_heap_word_count");
+
+  llvm::FunctionCallee clone =
+      JeandleRuntimeRoutine::JeandleRuntime_clone_callee(module);
+  llvm::CallInst* call =
+      builder.CreateCall(clone, {src, dst, object_heap_word_count});
+  call->setCallingConv(llvm::CallingConv::C);
+  call->addFnAttr(llvm::Attribute::NoUnwind);
+  call->addFnAttr(llvm::Attribute::get(context, "gc-leaf-function"));
+}
+
+static void emit_raw_clone_payload_copy(llvm::Module& module,
+                                        llvm::IRBuilder<>& builder,
+                                        llvm::Value* src,
+                                        llvm::Value* src_offset,
+                                        llvm::Value* dst,
+                                        llvm::Value* dst_offset,
+                                        llvm::Value* payload_long_count) {
+  llvm::Value* payload_src = builder.CreateGEP(
+      builder.getInt8Ty(), src, src_offset, "clone.payload_src");
+  llvm::Value* payload_dst = builder.CreateGEP(
+      builder.getInt8Ty(), dst, dst_offset, "clone.payload_dst");
+  llvm::Function* arraycopy =
+      module.getFunction("StubRoutines_jlong_disjoint_arraycopy");
+  assert(arraycopy != nullptr, "clone arraycopy stub must exist");
+  llvm::CallInst* call = builder.CreateCall(
+      arraycopy->getFunctionType(), arraycopy,
+      {payload_src, payload_dst, payload_long_count});
+  call->setCallingConv(llvm::CallingConv::C);
+  call->addFnAttr(llvm::Attribute::NoUnwind);
+  call->addFnAttr(llvm::Attribute::get(
+      builder.getContext(), "gc-leaf-function"));
+}
+
+// The destination must be a fresh allocation tightly coupled to this copy,
+// with no intervening safepoint or publication. ReduceInitialCardMarks relies
+// on that property to omit barriers via compensating allocation card marks.
+// With barriers required, only primitive arrays may take the raw path;
+// reference arrays are routed separately to oop-aware arraycopy stubs.
+// Instance copies use HeapAccess<>::clone and its bulk region invalidation.
+// This conservatively dirties the destination for both Serial and G1; C2's
+// CardTableBarrierSetC2::clone instead emits post_barrier, including G1's
+// dynamic young-card check.
+DEF_JAVA_OP(clone_payload, 1, llvm::Type::getVoidTy(context),
+            llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
+            llvm::Type::getInt64Ty(context),
+            llvm::PointerType::get(context, llvm::jeandle::AddrSpace::JavaHeapAddrSpace),
+            llvm::Type::getInt64Ty(context), llvm::Type::getInt64Ty(context),
+            llvm::Type::getInt1Ty(context))
+  llvm::Value* src = func->getArg(0);
+  llvm::Value* src_offset = func->getArg(1);
+  llvm::Value* dst = func->getArg(2);
+  llvm::Value* dst_offset = func->getArg(3);
+  llvm::Value* payload_long_count = func->getArg(4);
+  llvm::Value* is_clone_instance = func->getArg(5);
+
+  if (copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
+                                 T_OBJECT)) {
+    llvm::BasicBlock* runtime_clone =
+        llvm::BasicBlock::Create(context, "clone.runtime", func);
+    llvm::BasicBlock* raw_clone =
+        llvm::BasicBlock::Create(context, "clone.raw", func);
+    llvm::BasicBlock* done =
+        llvm::BasicBlock::Create(context, "clone.done", func);
+    ir_builder.CreateCondBr(is_clone_instance, runtime_clone, raw_clone);
+
+    ir_builder.SetInsertPoint(runtime_clone);
+    emit_runtime_clone(template_module, ir_builder, src, dst, payload_long_count);
+    ir_builder.CreateBr(done);
+
+    ir_builder.SetInsertPoint(raw_clone);
+    emit_raw_clone_payload_copy(template_module, ir_builder, src, src_offset,
+                                dst, dst_offset, payload_long_count);
+    ir_builder.CreateBr(done);
+
+    ir_builder.SetInsertPoint(done);
+  } else {
+    emit_raw_clone_payload_copy(template_module, ir_builder, src, src_offset,
+                                dst, dst_offset, payload_long_count);
+  }
+  ir_builder.CreateRetVoid();
+JAVA_OP_END
+
 static inline void insert_patch_size_metadata(
   llvm::Module &template_module, llvm::LLVMContext &context,
   const char *patch_type, int patch_size) {
@@ -1012,6 +1117,7 @@ bool RuntimeDefinedJavaOps::define_all(llvm::Module& template_module) {
   define_encode_klass(template_module);
   define_decode_klass(template_module);
   define_hashcode_fast(template_module);
+  define_clone_payload(template_module);
 
   return failed();
 }
@@ -1163,8 +1269,10 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
 
   define_global("VMOptions.UseTLAB",                                int1_type, static_cast<uint64_t>(UseTLAB));
   define_global("VMOptions.ZeroTLAB",                               int1_type, static_cast<uint64_t>(ZeroTLAB));
+  define_global("VMOptions.ReduceBulkZeroing",                      int1_type, static_cast<uint64_t>(ReduceBulkZeroing));
+  define_global("VMOptions.ReduceInitialCardMarks",                 int1_type, static_cast<uint64_t>(ReduceInitialCardMarks));
   define_global("VMOptions.AllocateInstancePrefetchLines",          int32_type, static_cast<uint64_t>(AllocateInstancePrefetchLines));
   define_global("VMOptions.AllocatePrefetchLines",                  int32_type, static_cast<uint64_t>(AllocatePrefetchLines));
-  define_global("VMOptions.UseCompressedClassPointers",             int1_type,  static_cast<uint64_t>(UseCompressedClassPointers));
+  define_global("VMOptions.UseCompressedClassPointers",             int1_type, static_cast<uint64_t>(UseCompressedClassPointers));
   define_global("VMOptions.UseCompressedOops",                      int1_type, static_cast<uint64_t>(UseCompressedOops));
 }
