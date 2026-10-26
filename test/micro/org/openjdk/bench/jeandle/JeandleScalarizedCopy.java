@@ -35,7 +35,7 @@ import org.openjdk.jmh.annotations.Warmup;
 /**
  * Array copies into FRESH destinations that never escape: PEA folds the
  * jeandle.copy pseudo call into virtual field state and eliminates both the
- * copy and the allocation. Runs with Jeandle PEA enabled — unlike
+ * copy and the allocation. Runs with Jeandle PEA enabled -- unlike
  * JeandleArrayCopy/Of (PEA disabled, pre-allocated destinations), which
  * measure the CopySpecialization path and serve as the regression companion.
  * Every benchmark consumes each copied element so the result is not
