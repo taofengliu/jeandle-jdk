@@ -634,7 +634,12 @@ declare void @StubRoutines_arrayof_jlong_disjoint_arraycopy(
 ; Unified array allocation JavaOp.  Both bytecode (newarray/anewarray) and intrinsic
 ; (_newArray / Array.newInstance) paths call this function.
 ; LLVM passes identify array allocation by matching on this function name.
-define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %header_size, i32 %length_limit) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
+; The trailing flags serve tightly coupled initializers such as the string
+; toBytes copy: %uninitialized skips the bulk payload zeroing because the
+; caller overwrites every byte before the array can escape, and
+; %defer_initialization_membar moves the fast path's publication barrier to
+; that initializer, which re-issues it once the payload is complete.
+define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %header_size, i32 %length_limit, i1 %uninitialized, i1 %defer_initialization_membar) noinline "lower-phase"="1" "jeandle.not-guaranteed-safepoint" {
 entry:
   ; Fast-path length cap. %length_limit is a size-derived bound (FastAllocateSizeLimit, scaled
   ; by element size on the caller side) chosen so %size_in_bytes cannot overflow i32 -- it is
@@ -707,8 +712,11 @@ array_post_klass_store:
   store i32 %length, ptr addrspace(1) %length_addr, align 4
 
   %zero_tlab = load i1, ptr @VMOptions.ZeroTLAB
-  %skip_clear = and i1 %use_tlab, %zero_tlab
-  br i1 %skip_clear, label %array_init_membar, label %array_clear_memory
+  %tlab_is_zeroed = and i1 %use_tlab, %zero_tlab
+  ; A tightly coupled initializer overwrites the payload in full before the
+  ; array escapes, so its allocation needs no bulk zeroing here.
+  %skip_clear = or i1 %uninitialized, %tlab_is_zeroed
+  br i1 %skip_clear, label %array_after_payload_init, label %array_clear_memory
 
 array_clear_memory:
   ; Array payloads are HeapWord-aligned. Reuse the platform-aware zeroing
@@ -718,7 +726,13 @@ array_clear_memory:
   %payload_words = lshr exact i32 %payload_size, 3
   call hotspotcc void @jeandle.zero_heap_words(
       ptr addrspace(1) %base_addr, i32 %payload_words)
-  br label %array_init_membar
+  br label %array_after_payload_init
+
+array_after_payload_init:
+  ; Only a tightly coupled initialization may defer this fast-path barrier.
+  ; The initializer re-issues it after its payload stores; the normal VM
+  ; slow allocation path above always publishes on its own.
+  br i1 %defer_initialization_membar, label %array_return, label %array_init_membar
 
 array_init_membar:
   ; Publish array initialization with a StoreStore barrier.
@@ -726,7 +740,7 @@ array_init_membar:
   br label %array_return
 
 array_return:
-  %array_oop = phi ptr addrspace(1) [ %tlab_old_top, %array_init_membar ], [ %slow_array_oop, %array_slow_path ]
+  %array_oop = phi ptr addrspace(1) [ %tlab_old_top, %array_after_payload_init ], [ %tlab_old_top, %array_init_membar ], [ %slow_array_oop, %array_slow_path ]
   ret ptr addrspace(1) %array_oop
 }
 
@@ -1668,6 +1682,9 @@ entry:
 
 ; Byte and char arrays both store UTF16 code units in native byte order.
 ; Separate base constants keep the layout explicit even when they agree.
+; The dynamic-length copy lowers to the native memcpy; hand-rolled loop
+; bodies here do not vectorize widely enough in the addrspace(1) context to
+; compete with the tuned libc implementation.
 define private hotspotcc void @jeandle.string_copy_utf16(ptr addrspace(1) nocapture readonly %src, i32 %srcOff, ptr addrspace(1) nocapture writeonly %dst, i32 %dstOff, i32 %count, i1 %srcBytes) noinline optnone "lower-phase"="1" #0 memory(read, argmem: readwrite) {
 entry:
   %byte.base = load i32, ptr @arrayOopDesc.base_offset_in_bytes.byte

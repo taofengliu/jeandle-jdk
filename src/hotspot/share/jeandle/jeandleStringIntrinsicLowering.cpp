@@ -270,8 +270,11 @@ bool JeandleIntrinsicLowering::lower_string_intrinsic(vmIntrinsics::ID id) {
 
   // Keep the original invoke operands until allocation has captured its
   // reexecute state. Every guard precedes allocation and bulk stores.
+  // Guard failures replay the Java method; as in C2's string intrinsics, a
+  // hot guard only discourages recompilation of this site rather than
+  // discarding the compiled method outright.
   _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
-                         Deoptimization::Action_make_not_entrant, slow);
+                         Deoptimization::Action_maybe_recompile, slow);
   llvm::Value* allocated = nullptr;
   llvm::BasicBlock* allocation_done = nullptr;
   if (allocate) {
@@ -281,7 +284,15 @@ bool JeandleIntrinsicLowering::lower_string_intrinsic(vmIntrinsics::ID id) {
         *_interp->_context, llvm::jeandle::AddrSpace::CHeapAddrSpace);
     llvm::Value* array_klass = b.CreateIntToPtr(
         b.getInt64((intptr_t)Universe::byteArrayKlassObj()), klass_type);
-    allocated = _interp->emit_jeandle_newarray(array_klass, allocation_length);
+    // The copy overwrites every payload byte before the array can escape
+    // (an empty allocation has no payload), so the allocation skips bulk
+    // zeroing; the deferred publication barrier is re-issued at the merge
+    // below, covering both the copy path and the empty path's header.
+    allocated = _interp->emit_jeandle_newarray(array_klass, allocation_length,
+                                               /*return_size_val=*/nullptr,
+                                               /*deoptimize_on_exception=*/false,
+                                               /*uninitialized=*/true,
+                                               /*defer_initialization_membar=*/true);
     RETURN_ON_JEANDLE_ERROR(true);
     attach_java_klass_ret_attr(llvm::cast<llvm::CallBase>(allocated),
                                sig->return_type(), *_interp->_context);
@@ -313,6 +324,12 @@ bool JeandleIntrinsicLowering::lower_string_intrinsic(vmIntrinsics::ID id) {
   if (allocate) {
     b.CreateBr(allocation_done);
     b.SetInsertPoint(allocation_done);
+    // The allocator deferred its fast-path StoreStore: the header stores and
+    // the payload copy publish together here, before the array escapes.
+    // PEA elimination of the allocation leaves this barrier call behind; it
+    // carries no virtual operands and is a no-op on TSO targets.
+    _interp->call_java_op("jeandle.membar_storestore", {});
+    RETURN_ON_JEANDLE_ERROR(true);
     _interp->_jvm->apush(allocated);
   } else {
     if (done != nullptr) {

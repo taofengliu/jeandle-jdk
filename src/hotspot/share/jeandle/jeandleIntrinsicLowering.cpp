@@ -1423,7 +1423,10 @@ bool JeandleIntrinsicLowering::lower_new_array() {
   llvm::Function* new_array_op = m.getFunction("jeandle.new_array");
   llvm::CallBase* fast_call =
       emit_callsite(new_array_op, llvm::CallingConv::Hotspot_JIT,
-                    {klass, length, size_in_bytes, base_offset, length_limit}, fast_attrs);
+                    {klass, length, size_in_bytes, base_offset, length_limit,
+                     /*uninitialized=*/builder.getFalse(),
+                     /*defer_initialization_membar=*/builder.getFalse()},
+                    fast_attrs);
   // emit_callsite with exception edge moves builder to a new normal_dest block.
   builder.CreateBr(merge_bb);
   llvm::BasicBlock* fast_normal_bb = builder.GetInsertBlock();

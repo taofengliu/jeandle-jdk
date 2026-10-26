@@ -242,13 +242,21 @@ public class TestStringIntrinsics {
                     && bytes[2] == 'L' && bytes[3] == 'F', "expected an ELF object: " + object);
             String name = object.getFileName().toString();
             Path optimized = object.resolveSibling(name.substring(0, name.length() - 2) + "_optimized.ll");
-            require(Files.readString(optimized).lines().anyMatch(line ->
+            String ir = Files.readString(optimized);
+            require(ir.lines().anyMatch(line ->
                     line.contains("call void @llvm.memcpy.p1.p1.i64(") && line.contains(", i64 %")),
                     "copy probe must retain a dynamic heap memcpy: " + optimized);
             // The object string table must name the native copy implementation.
             // Inspect the actual codegen output: optimized IR precedes libcall lowering.
             require(new String(bytes, StandardCharsets.ISO_8859_1).contains("\0memcpy\0"),
                     "dynamic copy has no memcpy symbol in the ELF object: " + object);
+            if (wrapper.equals("toBytesStringU")) {
+                // The allocation is tightly coupled to the copy: the payload
+                // is written exactly once by the copy, never pre-zeroed.
+                require(ir.lines().noneMatch(line -> line.contains("@jeandle.zero_heap_words")
+                        || line.contains("@zero_heap_words_stub")),
+                        "toBytes allocation must skip bulk payload zeroing: " + optimized);
+            }
         }
     }
 
