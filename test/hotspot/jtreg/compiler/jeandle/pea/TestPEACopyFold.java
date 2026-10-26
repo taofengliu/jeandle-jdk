@@ -183,11 +183,10 @@ public class TestPEACopyFold {
             return sum;
         }
 
-        // Arrays.copyOf over a VIRTUAL source (a fresh locally-built array):
-        // both the source and the tightly-coupled destination stay virtual
-        // and the copyof kind folds by entry transfer. A concrete source with
-        // the min(origTail, length) select cannot prove a constant count and
-        // stays conservative.
+        // Arrays.copyOf behavior oracle only: under default flags the
+        // tightly-coupled destination derives its klass from a runtime
+        // mirror load and does not virtualize, so the copy stays real. The
+        // copyof-kind fold itself is covered by the lit tests.
         public static long testCopyOfString() {
             String[] src = {"aa", "bb", "cc", "dd"};
             String[] copy = Arrays.copyOf(src, 4);
