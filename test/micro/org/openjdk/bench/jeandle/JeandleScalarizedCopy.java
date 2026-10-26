@@ -33,13 +33,14 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
 /**
- * Array copies into FRESH destinations that never escape: PEA folds the
- * jeandle.copy pseudo call into virtual field state and eliminates both the
- * copy and the allocation. Runs with Jeandle PEA enabled -- unlike
- * JeandleArrayCopy/Of (PEA disabled, pre-allocated destinations), which
- * measure the CopySpecialization path and serve as the regression companion.
- * Every benchmark consumes each copied element so the result is not
- * dead-code-eliminated.
+ * Array copies into FRESH destinations that never escape, at CONSTANT
+ * lengths: PEA folds the jeandle.copy pseudo call into virtual field state
+ * and eliminates both the copy and the allocation. The copy length must be
+ * a compile-time constant for the fold (a @Param value is a runtime int and
+ * stays conservative). Runs with Jeandle PEA enabled; JeandleArrayCopy/Of
+ * (PEA off, pre-allocated destinations) remain the CopySpecialization
+ * companions. Every benchmark consumes each copied element so the result
+ * is not dead-code-eliminated.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -49,71 +50,93 @@ import org.openjdk.jmh.annotations.Warmup;
 @Fork(value = 3, jvmArgsAppend = {
         "-XX:+JeandleDoPEA"})
 public class JeandleScalarizedCopy {
-    @Param({"0", "1", "7", "8", "9", "64"})
-    public int size;
 
     private int[] intsSource;
     private long[] longsSource;
     private Object[] objectsSource;
-    private int[] overlapSource;
 
     @Setup
     public void setup() {
-        int length = size + 4;
-        intsSource = new int[length];
-        longsSource = new long[length];
-        objectsSource = new Object[length];
-        overlapSource = new int[length];
-        for (int i = 0; i < length; i++) {
+        intsSource = new int[72];
+        longsSource = new long[72];
+        objectsSource = new Object[72];
+        for (int i = 0; i < 72; i++) {
             intsSource[i] = i * 31 + 19;
             longsSource[i] = i * 6364136223846793005L + 1442695040888963407L;
             objectsSource[i] = Integer.valueOf(i);
-            overlapSource[i] = i * 17 + 3;
         }
     }
 
-    @Benchmark
-    public long freshIntCopy() {
-        int[] dst = new int[size];
-        System.arraycopy(intsSource, 2, dst, 0, size);
+    private long sum(int[] a, int n) {
         long sum = 0;
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < n; i++) {
+            sum += a[i];
+        }
+        return sum;
+    }
+
+    @Benchmark
+    public long freshIntCopy1() {
+        int[] dst = new int[1];
+        System.arraycopy(intsSource, 2, dst, 0, 1);
+        return sum(dst, 1);
+    }
+
+    @Benchmark
+    public long freshIntCopy4() {
+        int[] dst = new int[4];
+        System.arraycopy(intsSource, 2, dst, 0, 4);
+        return sum(dst, 4);
+    }
+
+    @Benchmark
+    public long freshIntCopy8() {
+        int[] dst = new int[8];
+        System.arraycopy(intsSource, 2, dst, 0, 8);
+        return sum(dst, 8);
+    }
+
+    @Benchmark
+    public long freshIntCopy16() {
+        int[] dst = new int[16];
+        System.arraycopy(intsSource, 2, dst, 0, 16);
+        return sum(dst, 16);
+    }
+
+    @Benchmark
+    public long freshIntCopy64() {
+        int[] dst = new int[64];
+        System.arraycopy(intsSource, 2, dst, 0, 64);
+        return sum(dst, 64);
+    }
+
+    @Benchmark
+    public long freshLongCopy8() {
+        long[] dst = new long[8];
+        System.arraycopy(longsSource, 2, dst, 0, 8);
+        long sum = 0;
+        for (int i = 0; i < 8; i++) {
             sum += dst[i];
         }
         return sum;
     }
 
     @Benchmark
-    public long freshLongCopy() {
-        long[] dst = new long[size];
-        System.arraycopy(longsSource, 2, dst, 0, size);
+    public long freshObjectCopy8() {
+        Object[] dst = new Object[8];
+        System.arraycopy(objectsSource, 2, dst, 0, 8);
         long sum = 0;
-        for (int i = 0; i < size; i++) {
-            sum += dst[i];
-        }
-        return sum;
-    }
-
-    @Benchmark
-    public long freshObjectCopy() {
-        Object[] dst = new Object[size];
-        System.arraycopy(objectsSource, 2, dst, 0, size);
-        long sum = 0;
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < 8; i++) {
             sum += System.identityHashCode(dst[i]) & 1;
         }
         return sum;
     }
 
     @Benchmark
-    public long freshIntSelfOverlap() {
-        int[] a = new int[size + 4];
-        System.arraycopy(overlapSource, 0, a, 0, size + 4);
-        System.arraycopy(a, 0, a, 1, size);
-        long sum = 0;
-        for (int i = 0; i < size + 4; i++) {
-            sum += a[i];
-        }
-        return sum;
+    public long freshIntSelfOverlap8() {
+        int[] a = new int[12];
+        System.arraycopy(intsSource, 0, a, 0, 12);
+        System.arraycopy(a, 0, a, 1, 8);
+        return sum(a, 12);
     }
 }
