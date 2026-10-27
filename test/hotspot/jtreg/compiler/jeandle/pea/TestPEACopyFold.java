@@ -1,7 +1,7 @@
 /*
  * @test
  * @summary PEA folds jeandle.copy (System.arraycopy / Arrays.copyOf[Range] /
- *          reference-array clone) into virtual field state: scalarization,
+ *          array / instance clone) into virtual field state: scalarization,
  *          escape replay, active-frame deopt reconstruction with copied
  *          entries, and exception-path conservatism are behavior-equivalent
  *          with PEA off
@@ -46,25 +46,23 @@ public class TestPEACopyFold {
                 .dontinline(requestDeopt)
                 .runPEAOnOffEquivalent();
 
-        // Structural evidence that the fold actually engaged: per-round
-        // CopyFolds statistics, a ReplaceCall effect on the pseudo call, and
-        // no surviving @jeandle.copy in the final IR.
-        // Structural evidence that the fold engages through the real
-        // frontend. arraycopy folds for virtual and concrete sources, and
-        // array clones fold through their byte-payload kinds (the default
-        // flags emit clone-array for both reference and primitive arrays).
-        // copyOf folds in profiled compilations but the shape run's forced
-        // cold compilation neither inlines the two-argument wrapper nor
-        // binds the intrinsic's three-argument form, so that workload stays
-        // a behavior oracle; an instance clone likewise rides a wrapper
-        // (Pt.clone) that the cold compilation does not inline.
-        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, v2vInt, cloneRef, cloneInt, deoptConcrete)
+        // Each copy kind must fold through the real frontend and execute
+        // with the same configuration as the behavior comparison.
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, v2vInt, cloneRef, cloneInt, deoptConcrete,
+                                                              copyOf, copyOfRange, cloneInstance)
                 .dontinline(requestDeopt)
                 .run()) {
             assertFold(run, v2vInt, 2);
             assertFold(run, cloneRef, 2);
             assertFold(run, cloneInt, 2);
             assertFold(run, deoptConcrete, 1);
+            assertFold(run, copyOf, 2);
+            assertFold(run, copyOfRange, 2);
+            // The clone fast path folds, then joins the native slow path.
+            // Both identities remain real across that join, exercising replay.
+            assertFold(run, cloneInstance, 0);
+            Asserts.assertEquals(run.report(cloneInstance).round(0).partiallyEscapes(), 2,
+                    "instance clone source and destination replay at the slow-path join");
         }
     }
 
@@ -76,21 +74,29 @@ public class TestPEACopyFold {
         Asserts.assertEquals(report.round(0).copyFolds(), 1,
                 target + ": exactly one jeandle.copy folded");
         Asserts.assertEquals(report.round(0).neverEscapes(), neverEscapes,
-                target + ": arrays never escape");
+                target + ": objects that never escape");
         Asserts.assertTrue(report.effects("ReplaceCall").stream()
                         .anyMatch(e -> e.detail().contains("jeandle.copy")),
                 target + ": ReplaceCall effect on the pseudo call");
         run.finalIR(target).assertAbsent("@jeandle.copy");
     }
 
-    public static class TestWrapper {
+    public static class TestWrapper implements Cloneable {
         private static final String[] SRC_STRINGS = {"aa", "bb", "cc", "dd"};
         private static final int[] SRC_INTS = {10, 20, 30, 40, 50, 60};
         private static int[] sinkInt;
 
         private static Method deoptTarget;
+        private int x;
+        private int y;
+        private Object ref;
 
         public static void main(String[] args) throws Exception {
+            // Resolve the intrinsic holders and their class constants before
+            // the explicit target compilation.
+            Arrays.copyOf(SRC_STRINGS, 4, String[].class);
+            Arrays.copyOfRange(SRC_STRINGS, 1, 3, String[].class);
+            new TestWrapper().clone();
             PEATestUtils.compileConfiguredTargetsAtLevel4();
 
             long payload = 0x6A09E667F3BCC909L;
@@ -104,9 +110,11 @@ public class TestPEACopyFold {
                 payload = mix(payload, testArrayCopyRefV2V());
             }
             if (configured("testCopyOfString")) {
+                deoptTarget = TestWrapper.class.getMethod("testCopyOfString");
                 payload = mix(payload, testCopyOfString());
             }
             if (configured("testCopyOfRangeString")) {
+                deoptTarget = TestWrapper.class.getMethod("testCopyOfRangeString");
                 payload = mix(payload, testCopyOfRangeString());
             }
             if (configured("testSelfOverlapInt")) {
@@ -130,6 +138,7 @@ public class TestPEACopyFold {
                 payload = mix(payload, testCloneIntArray());
             }
             if (configured("testCloneInstance")) {
+                deoptTarget = TestWrapper.class.getMethod("testCloneInstance");
                 payload = mix(payload, testCloneInstance());
             }
             if (configured("testExceptions")) {
@@ -210,51 +219,44 @@ public class TestPEACopyFold {
             return sum;
         }
 
-        // Instance clone over a fresh source. Behavior oracle: the Pt.clone
-        // wrapper is not inlined by the shape run's forced cold compilation,
-        // but profiled compilations fold the clone-instance payload kind by
-        // field transfer.
-        public static class Pt implements Cloneable {
-            int x;
-            int y;
-
-            Pt(int x, int y) {
-                this.x = x;
-                this.y = y;
+        // Instance clone over a fresh source, including a shared reference.
+        public static long testCloneInstance() throws CloneNotSupportedException {
+            TestWrapper p = new TestWrapper();
+            p.x = 13;
+            p.y = 29;
+            p.ref = SRC_STRINGS;
+            // The inherited protected native method is accessible here,
+            // exposing a fresh receiver directly to the clone intrinsic.
+            TestWrapper q = (TestWrapper) p.clone();
+            requestDeopt();
+            if (q == p || q.x != 13 || q.y != 29 || q.ref != p.ref || q.ref != SRC_STRINGS) {
+                throw new AssertionError("clone fields and identity after deopt");
             }
-
-            @Override
-            public Pt clone() {
-                try {
-                    return (Pt) super.clone();
-                } catch (CloneNotSupportedException e) {
-                    throw new AssertionError(e);
-                }
+            long result = q.x * 31 + q.y;
+            q.x = 41;
+            if (p.x != 13) {
+                throw new AssertionError("clone has independent storage");
             }
-        }
-
-        public static long testCloneInstance() {
-            Pt p = new Pt(13, 29);
-            Pt q = p.clone();
-            if (q == p || q.x != 13 || q.y != 29) {
-                return Long.MIN_VALUE + 12;
-            }
-            return q.x * 31 + q.y;
+            return result;
         }
 
         // Arrays.copyOf over a VIRTUAL source: the source's arraylength is
         // a compile-time constant, so the intrinsic's count expression
         // min(length, srcLength - start) folds and the copyof kind folds by
-        // entry transfer in profiled compilations. A concrete source of
+        // entry transfer. A concrete source of
         // unknown length keeps the select and stays conservative (matching
         // Graal's constant-length requirement).
         public static long testCopyOfString() {
             String[] src = {"aa", "bb", "cc", "dd"};
-            String[] copy = Arrays.copyOf(src, 4);
+            String[] copy = Arrays.copyOf(src, 6, String[].class);
+            requestDeopt();
+            if (copy == src || copy.length != 6 || copy[4] != null || copy[5] != null) {
+                throw new AssertionError("copyOf identity, length and padding after deopt");
+            }
             long sum = 0;
             for (int i = 0; i < 4; i++) {
                 if (copy[i] != SRC_STRINGS[i]) {
-                    return Long.MIN_VALUE + 2;
+                    throw new AssertionError("copyOf element identity after deopt");
                 }
                 sum = sum * 31 + copy[i].charAt(1);
             }
@@ -262,10 +264,12 @@ public class TestPEACopyFold {
         }
 
         public static long testCopyOfRangeString() {
-            String[] copy = Arrays.copyOfRange(SRC_STRINGS, 1, 3);
-            if (copy.length != 2 || copy[0] != SRC_STRINGS[1]
+            String[] src = {"aa", "bb", "cc", "dd"};
+            String[] copy = Arrays.copyOfRange(src, 1, 3, String[].class);
+            requestDeopt();
+            if (copy == src || copy.length != 2 || copy[0] != SRC_STRINGS[1]
                     || copy[1] != SRC_STRINGS[2] || copy[0].length() != 2) {
-                return Long.MIN_VALUE + 3;
+                throw new AssertionError("copyOfRange values and identity after deopt");
             }
             return copy[0].charAt(0) * 31 + copy[1].charAt(0);
         }
