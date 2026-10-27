@@ -133,6 +133,26 @@ public class JeandleScalarizedCopy {
     }
 
     @Benchmark
+    public long freshCloneInt8() {
+        int[] src = {1, 2, 3, 4, 5, 6, 7, 8};
+        int[] c = src.clone();
+        return sum(c, 8);
+    }
+
+    @Benchmark
+    public long freshCloneObject8() {
+        Object[] src = {objectsSource[0], objectsSource[1], objectsSource[2],
+                        objectsSource[3], objectsSource[4], objectsSource[5],
+                        objectsSource[6], objectsSource[7]};
+        Object[] c = src.clone();
+        long sum = 0;
+        for (int i = 0; i < 8; i++) {
+            sum += System.identityHashCode(c[i]) & 1;
+        }
+        return sum;
+    }
+
+    @Benchmark
     public long freshIntSelfOverlap8() {
         int[] a = new int[12];
         System.arraycopy(intsSource, 0, a, 0, 12);

@@ -34,10 +34,13 @@ public class TestPEACopyFold {
         Method deoptV2V = TestWrapper.class.getMethod("testDeoptIntV2V");
         Method deoptConcrete = TestWrapper.class.getMethod("testDeoptRefConcrete");
         Method cloneRef = TestWrapper.class.getMethod("testCloneRefV2V");
+        Method cloneInt = TestWrapper.class.getMethod("testCloneIntArray");
+        Method cloneInstance = TestWrapper.class.getMethod("testCloneInstance");
         Method exceptions = TestWrapper.class.getMethod("testExceptions");
         Method requestDeopt = TestWrapper.class.getDeclaredMethod("requestDeopt");
         Method[] targets = {v2vInt, v2vRef, copyOf, copyOfRange, overlap,
-                            escape, deoptV2V, deoptConcrete, cloneRef, exceptions};
+                            escape, deoptV2V, deoptConcrete, cloneRef, cloneInt,
+                            cloneInstance, exceptions};
 
         PEATestUtils.behaviorRun(WRAPPER, targets)
                 .dontinline(requestDeopt)
@@ -47,21 +50,20 @@ public class TestPEACopyFold {
         // CopyFolds statistics, a ReplaceCall effect on the pseudo call, and
         // no surviving @jeandle.copy in the final IR.
         // Structural evidence that the fold engages through the real
-        // frontend. arraycopy folds for virtual and concrete sources.
-        // copyOf folds the same way in profiled compilations (standalone
-        // runs show CopyFolds=1 with a virtual source of constant length),
-        // but the shape run's forced cold compilation neither inlines the
-        // two-argument wrapper nor binds the intrinsic's three-argument
-        // form, so no jeandle.copy appears there and the workload stays a
-        // behavior oracle. clone-reference-array only appears with
-        // ReduceInitialCardMarks disabled — under the default flags a
-        // reference-array clone emits the byte-payload clone-array kind and
-        // stays conservative, so testCloneRefV2V is likewise a behavior
-        // oracle.
-        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, v2vInt, deoptConcrete)
+        // frontend. arraycopy folds for virtual and concrete sources, and
+        // array clones fold through their byte-payload kinds (the default
+        // flags emit clone-array for both reference and primitive arrays).
+        // copyOf folds in profiled compilations but the shape run's forced
+        // cold compilation neither inlines the two-argument wrapper nor
+        // binds the intrinsic's three-argument form, so that workload stays
+        // a behavior oracle; an instance clone likewise rides a wrapper
+        // (Pt.clone) that the cold compilation does not inline.
+        try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, v2vInt, cloneRef, cloneInt, deoptConcrete)
                 .dontinline(requestDeopt)
                 .run()) {
             assertFold(run, v2vInt, 2);
+            assertFold(run, cloneRef, 2);
+            assertFold(run, cloneInt, 2);
             assertFold(run, deoptConcrete, 1);
         }
     }
@@ -124,6 +126,12 @@ public class TestPEACopyFold {
             if (configured("testCloneRefV2V")) {
                 payload = mix(payload, testCloneRefV2V());
             }
+            if (configured("testCloneIntArray")) {
+                payload = mix(payload, testCloneIntArray());
+            }
+            if (configured("testCloneInstance")) {
+                payload = mix(payload, testCloneInstance());
+            }
             if (configured("testExceptions")) {
                 payload = mix(payload, testExceptions());
             }
@@ -168,10 +176,9 @@ public class TestPEACopyFold {
             return sum;
         }
 
-        // Reference-array clone. Under default flags the frontend emits the
-        // byte-payload clone-array kind, so this exercises the conservative
-        // path's correctness (the clone-reference-array fold itself is
-        // covered by the lit tests).
+        // Reference-array clone. Under the default flags the frontend emits
+        // the byte-payload clone-array kind, which folds by element
+        // transfer over the payload window.
         public static long testCloneRefV2V() {
             String[] src = {"aa", "bb", "cc", "dd"};
             String[] c = src.clone();
@@ -183,6 +190,56 @@ public class TestPEACopyFold {
                 sum = sum * 31 + c[i].charAt(0);
             }
             return sum;
+        }
+
+        // Primitive-array clone over a fresh source: the byte-payload
+        // clone-array kind folds by element transfer.
+        public static long testCloneIntArray() {
+            int[] src = new int[6];
+            for (int i = 0; i < 6; i++) {
+                src[i] = (i + 1) * 7;
+            }
+            int[] c = src.clone();
+            long sum = 0;
+            for (int i = 0; i < 6; i++) {
+                if (c[i] != (i + 1) * 7 || c.length != 6) {
+                    return Long.MIN_VALUE + 11;
+                }
+                sum = sum * 31 + c[i];
+            }
+            return sum;
+        }
+
+        // Instance clone over a fresh source. Behavior oracle: the Pt.clone
+        // wrapper is not inlined by the shape run's forced cold compilation,
+        // but profiled compilations fold the clone-instance payload kind by
+        // field transfer.
+        public static class Pt implements Cloneable {
+            int x;
+            int y;
+
+            Pt(int x, int y) {
+                this.x = x;
+                this.y = y;
+            }
+
+            @Override
+            public Pt clone() {
+                try {
+                    return (Pt) super.clone();
+                } catch (CloneNotSupportedException e) {
+                    throw new AssertionError(e);
+                }
+            }
+        }
+
+        public static long testCloneInstance() {
+            Pt p = new Pt(13, 29);
+            Pt q = p.clone();
+            if (q == p || q.x != 13 || q.y != 29) {
+                return Long.MIN_VALUE + 12;
+            }
+            return q.x * 31 + q.y;
         }
 
         // Arrays.copyOf over a VIRTUAL source: the source's arraylength is
