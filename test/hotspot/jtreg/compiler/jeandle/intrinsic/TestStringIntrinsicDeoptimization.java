@@ -23,6 +23,7 @@
  * @library /test/lib /
  * @compile --patch-module java.base=${test.src} java/lang/JeandleStringIntrinsicCaller.java
  * @run main/othervm/timeout=180 compiler.jeandle.intrinsic.TestStringIntrinsicDeoptimization
+ * @run main/othervm/timeout=180 compiler.jeandle.intrinsic.TestStringIntrinsicDeoptimization preserveFramePointer
  */
 package compiler.jeandle.intrinsic;
 
@@ -43,7 +44,7 @@ public class TestStringIntrinsicDeoptimization {
     private static final String[] METHODS = {"compareToL", "compareToLU", "compareToUL", "compareToU"};
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 0) {
+        if (args.length != 0 && args[0].equals("child")) {
             exercise();
             System.out.println("String comparison guard deoptimization PASSED");
             return;
@@ -53,8 +54,9 @@ public class TestStringIntrinsicDeoptimization {
         OutputAnalyzer output = ProcessTools.executeTestJava(
                 "--patch-module=java.base=" + System.getProperty("test.class.path"),
                 "-Xcomp", "-Xbatch", "-XX:-TieredCompilation", "-XX:+UseJeandleCompiler",
+                "-XX:" + (args.length == 0 ? "-" : "+") + "PreserveFramePointer",
                 "-XX:+UnlockDiagnosticVMOptions", "-XX:+LogCompilation", "-XX:LogFile=" + log,
-                "-XX:+JeandleDumpIR", "-XX:JeandleDumpDirectory=" + dumps,
+                "-XX:+JeandleDumpIR", "-XX:+JeandleDumpObjects", "-XX:JeandleDumpDirectory=" + dumps,
                 "-XX:CompileCommand=compileonly," + CALLER + "::*",
                 TestStringIntrinsicDeoptimization.class.getName(), "child");
         output.shouldHaveExitValue(0).shouldContain("String comparison guard deoptimization PASSED");
@@ -76,9 +78,24 @@ public class TestStringIntrinsicDeoptimization {
             }
         }
         try (var files = Files.list(dumps)) {
-            Path latinIR = files.filter(path -> path.getFileName().toString()
+            var optimized = files.filter(path -> path.toString().endsWith("_optimized.ll")).toList();
+            for (String method : METHODS) {
+                Path methodIR = optimized.stream().filter(path -> path.getFileName().toString()
+                        .startsWith("java_lang_JeandleStringIntrinsicCaller_" + method + "_"))
+                        .findFirst().orElseThrow(() -> new AssertionError("Missing comparison IR for " + method));
+                String ir = Files.readString(methodIR);
+                Matcher root = Pattern.compile("(?m)^define [^\n]*\\.root\"\\([^\n]* #(\\d+) gc \"hotspotgc\"")
+                        .matcher(ir);
+                if (!root.find() || !Pattern.compile("(?m)^attributes #" + root.group(1)
+                        + " = \\{[^\n]*\"no-realign-stack\"[^\n]*\\}").matcher(ir).find()) {
+                    throw new AssertionError("Comparison frame permits stack realignment: " + methodIR);
+                }
+                if (!Pattern.compile("extractelement <(?:16|32) x i(?:8|16)>").matcher(ir).find()) {
+                    throw new AssertionError("Missing vector mismatch character extraction: " + methodIR);
+                }
+            }
+            Path latinIR = optimized.stream().filter(path -> path.getFileName().toString()
                     .startsWith("java_lang_JeandleStringIntrinsicCaller_compareToL_"))
-                    .filter(path -> path.toString().endsWith("_optimized.ll"))
                     .findFirst().orElseThrow(() -> new AssertionError("Missing Latin1 comparison IR: " + dumps));
             String ir = Files.readString(latinIR);
             if (!ir.contains("load <32 x i8>")

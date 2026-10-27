@@ -1850,10 +1850,10 @@ latin.load:
   br i1 %latin.any, label %latin.diff, label %latin.advance
 latin.diff:
   %latin.lane = call hotspotcc i32 @jeandle.string_first_lane32(<32 x i1> %latin.neq)
-  %latin.index = add i32 %latin.pos, %latin.lane
-  ; Scalar reloads avoid over-aligned temporaries from variable extraction.
-  %latin.ca = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %a, i32 %latin.index, i1 false)
-  %latin.cb = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %b, i32 %latin.index, i1 false)
+  %latin.ca8 = extractelement <32 x i8> %latin.a, i32 %latin.lane
+  %latin.cb8 = extractelement <32 x i8> %latin.b, i32 %latin.lane
+  %latin.ca = zext i8 %latin.ca8 to i32
+  %latin.cb = zext i8 %latin.cb8 to i32
   %latin.result = sub i32 %latin.ca, %latin.cb
   ret i32 %latin.result
 latin.advance:
@@ -1872,12 +1872,10 @@ vector.load:
   br i1 %any, label %vector.diff, label %vector.next
 vector.diff:
   %lane = call hotspotcc i32 @jeandle.string_first_lane(<16 x i1> %neq)
-  ; Reload the proven in-range character instead of dynamically extracting a
-  ; vector element. Variable extraction can require over-aligned stack slots,
-  ; whereas HotSpot compiled frames require a fixed stack-pointer adjustment.
-  %index = add i32 %pos, %lane
-  %ca32 = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %a, i32 %index, i1 %au)
-  %cb32 = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %b, i32 %index, i1 %bu)
+  %ca16 = extractelement <16 x i16> %va, i32 %lane
+  %cb16 = extractelement <16 x i16> %vb, i32 %lane
+  %ca32 = zext i16 %ca16 to i32
+  %cb32 = zext i16 %cb16 to i32
   %diff = sub i32 %ca32, %cb32
   ret i32 %diff
 vector.next:
