@@ -47,15 +47,17 @@ public class TestPEACopyFold {
         // CopyFolds statistics, a ReplaceCall effect on the pseudo call, and
         // no surviving @jeandle.copy in the final IR.
         // Structural evidence that the fold engages through the real
-        // frontend. Among the element-indexed kinds, arraycopy folds today:
-        // copyOf[Range]'s destination allocation derives its klass from a
-        // runtime mirror load (does not virtualize yet), and
-        // clone-reference-array only appears with ReduceInitialCardMarks
-        // disabled — under the default flags a reference-array clone emits
-        // the byte-payload clone-array kind and stays conservative. The
-        // analyzer-side support for all four kinds is covered by the lit
-        // tests (775/788); testCloneRefV2V keeps the behavior oracle for the
-        // conservative clone path.
+        // frontend. arraycopy folds for virtual and concrete sources.
+        // copyOf folds the same way in profiled compilations (standalone
+        // runs show CopyFolds=1 with a virtual source of constant length),
+        // but the shape run's forced cold compilation neither inlines the
+        // two-argument wrapper nor binds the intrinsic's three-argument
+        // form, so no jeandle.copy appears there and the workload stays a
+        // behavior oracle. clone-reference-array only appears with
+        // ReduceInitialCardMarks disabled — under the default flags a
+        // reference-array clone emits the byte-payload clone-array kind and
+        // stays conservative, so testCloneRefV2V is likewise a behavior
+        // oracle.
         try (PEATestUtils.RunResult run = PEATestUtils.shapeRun(WRAPPER, v2vInt, deoptConcrete)
                 .dontinline(requestDeopt)
                 .run()) {
@@ -183,10 +185,12 @@ public class TestPEACopyFold {
             return sum;
         }
 
-        // Arrays.copyOf behavior oracle only: under default flags the
-        // tightly-coupled destination derives its klass from a runtime
-        // mirror load and does not virtualize, so the copy stays real. The
-        // copyof-kind fold itself is covered by the lit tests.
+        // Arrays.copyOf over a VIRTUAL source: the source's arraylength is
+        // a compile-time constant, so the intrinsic's count expression
+        // min(length, srcLength - start) folds and the copyof kind folds by
+        // entry transfer in profiled compilations. A concrete source of
+        // unknown length keeps the select and stays conservative (matching
+        // Graal's constant-length requirement).
         public static long testCopyOfString() {
             String[] src = {"aa", "bb", "cc", "dd"};
             String[] copy = Arrays.copyOf(src, 4);
