@@ -44,7 +44,7 @@ import org.openjdk.jmh.annotations.Warmup;
 @Measurement(iterations = 5, time = 1)
 @Fork(value = 3, jvmArgsAppend = {"--add-opens=java.base/java.lang=ALL-UNNAMED"})
 public class JeandleStringConversions {
-    @Param({"7", "16", "80", "1024"})
+    @Param({"7", "16", "80", "1024", "4096", "16384"})
     public int length;
 
     @Param({"LATIN1", "UTF16"})

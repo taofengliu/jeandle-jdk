@@ -490,7 +490,9 @@ public class TestStringIntrinsics {
     }
 
     private static void conversions() throws Exception {
-        for (int n : new int[]{0, 1, 7, 8, 9, 15, 16, 17, 23, 24, 31, 32, 33, 48, 49, 80, 129}) {
+        for (int n : new int[]{0, 1, 7, 8, 9, 15, 16, 17, 23, 24, 31, 32, 33, 48, 49, 80, 129,
+                // Sizes around the copy kernel's inline-vector/libcall boundary.
+                511, 512, 513, 4095, 4096, 4097}) {
             char[] source = new char[n + 4];
             for (int i = 0; i < source.length; i++) {
                 source[i] = (char) ((i * 73 + 129) & 255);
@@ -505,7 +507,17 @@ public class TestStringIntrinsics {
             System.arraycopy(source, 1, expectedChars, 2, n);
             check("getCharsStringU", null, wide, 1, n + 1, dstChars, 2);
             equal(expectedChars, dstChars, "getChars complete destination");
-            for (int fail = -1; fail < n; fail++) {
+            // A dense failure sweep emits the full arrays per position and is
+            // quadratic in transcript size; large sizes sample the boundaries.
+            int[] failures = new int[n <= 129 ? n + 1 : 16];
+            if (n <= 129) {
+                for (int i = 0; i < failures.length; i++) failures[i] = i - 1;
+            } else {
+                int[] sample = {-1, 0, 1, 6, 7, 8, 15, 16, 31, 32,
+                        n / 2, n - 33, n - 16, n - 8, n - 2, n - 1};
+                System.arraycopy(sample, 0, failures, 0, sample.length);
+            }
+            for (int fail : failures) {
                 char[] input = source.clone();
                 if (fail >= 0 && fail < n) input[1 + fail] = 0x1234;
                 for (boolean bytes : new boolean[]{false, true}) {
