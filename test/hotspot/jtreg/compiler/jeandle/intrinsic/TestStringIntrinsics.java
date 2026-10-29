@@ -244,12 +244,14 @@ public class TestStringIntrinsics {
             Path optimized = object.resolveSibling(name.substring(0, name.length() - 2) + "_optimized.ll");
             String ir = Files.readString(optimized);
             require(ir.lines().anyMatch(line ->
-                    line.contains("call void @llvm.memcpy.p1.p1.i64(") && line.contains(", i64 %")),
-                    "copy probe must retain a dynamic heap memcpy: " + optimized);
+                    line.contains("call void @StubRoutines_jshort_disjoint_arraycopy(")
+                            && line.contains(", i64 %")),
+                    "copy probe must retain a dynamic element-safe copy: " + optimized);
             // The object string table must name the native copy implementation.
-            // Inspect the actual codegen output: optimized IR precedes libcall lowering.
-            require(new String(bytes, StandardCharsets.ISO_8859_1).contains("\0memcpy\0"),
-                    "dynamic copy has no memcpy symbol in the ELF object: " + object);
+            // Inspect the actual codegen output as well as the optimized IR.
+            require(new String(bytes, StandardCharsets.ISO_8859_1)
+                            .contains("\0StubRoutines_jshort_disjoint_arraycopy\0"),
+                    "dynamic copy has no element-safe stub symbol in the ELF object: " + object);
             if (wrapper.equals("toBytesStringU")) {
                 // The allocation is tightly coupled to the copy: the payload
                 // is written exactly once by the copy, never pre-zeroed.
@@ -334,6 +336,7 @@ public class TestStringIntrinsics {
         literals();
         reads();
         searchBoundaries();
+        explicitCountOddStorage();
         conversions();
         if (!valid) fallbackCases();
         System.out.println(PASSED);
@@ -489,6 +492,37 @@ public class TestStringIntrinsics {
         check("indexOfIUL", find(u, n, true, b, m, false, from), u, n, b, m, from);
     }
 
+    private static void explicitCountOddStorage() throws Exception {
+        for (int n : new int[]{0, 1, 3, 7, 16, 17, 32, 33}) {
+            byte[] latin = new byte[n];
+            Arrays.fill(latin, (byte) 7);
+            if (n > 0) latin[n - 1] = 9;
+            for (int sourceTail : new int[]{0, 1}) {
+                byte[] source = Arrays.copyOf(utf(unsigned(latin)), 2 * n + sourceTail);
+                if (sourceTail != 0) source[source.length - 1] = 99;
+                for (int m : new int[]{1, 2, 3}) {
+                    byte[] needle = new byte[m];
+                    Arrays.fill(needle, (byte) 7);
+                    needle[m - 1] = 9;
+                    for (int targetTail : new int[]{0, 1}) {
+                        byte[] target = Arrays.copyOf(utf(unsigned(needle)), 2 * m + targetTail);
+                        if (targetTail != 0) target[target.length - 1] = 88;
+                        for (int sourceCount : new int[]{n, Math.max(0, n - 1)}) {
+                            for (int targetCount : new int[]{m, Math.max(1, m - 1)}) {
+                                for (int from : new int[]{0, sourceCount / 2, sourceCount}) {
+                                    check("indexOfIU", find(source, sourceCount, true, target, targetCount, true, from),
+                                            source, sourceCount, target, targetCount, from);
+                                    check("indexOfIUL", find(source, sourceCount, true, needle, targetCount, false, from),
+                                            source, sourceCount, needle, targetCount, from);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private static void conversions() throws Exception {
         for (int n : new int[]{0, 1, 7, 8, 9, 15, 16, 17, 23, 24, 31, 32, 33, 48, 49, 80, 129,
                 // Sizes around the copy kernel's inline-vector/libcall boundary.
@@ -590,6 +624,11 @@ public class TestStringIntrinsics {
             observe(name, new byte[]{1, 2, 9}, new byte[]{1});
         }
         for (String name : new String[]{"indexOfIL", "indexOfIU", "indexOfIUL"}) {
+            observe(name, new byte[8], 4, new byte[]{1, 0}, Integer.MIN_VALUE, 0);
+            observe(name, new byte[8], 4, new byte[]{1, 0}, -1, 0);
+            observe(name, new byte[8], -1, new byte[]{1, 0}, 1, 0);
+            observe(name, new byte[8], Integer.MIN_VALUE, new byte[]{1, 0}, 1, 0);
+            observe(name, new byte[8], 4, new byte[]{1, 0}, Integer.MAX_VALUE, 0);
             observe(name, new byte[8], 4, new byte[]{1, 0}, 1, -1);
             observe(name, new byte[8], Integer.MAX_VALUE, new byte[]{1, 0}, 1, 0);
             observe(name, new byte[8], 4, new byte[]{1, 0}, 1, Integer.MAX_VALUE);

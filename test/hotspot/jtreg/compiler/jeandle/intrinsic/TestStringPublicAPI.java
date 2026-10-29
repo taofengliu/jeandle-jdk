@@ -137,6 +137,63 @@ public class TestStringPublicAPI {
         require(codePoint("x\ud83d\ude00y", 0x1f600, 1) == 1, "supplementary pair");
         require(codePoint("x\ud83d\ude00y", 0x1f600, 2) == -1, "from inside pair");
         require(search("x\ud83d\ude00y", "\ude00", 0) == 2, "substring searches code units");
+        searchBoundaries();
+    }
+
+    private static void searchBoundaries() {
+        for (boolean wide : new boolean[]{false, true}) {
+            char first = wide ? '\u1234' : 'a';
+            char second = (char) (first + 1);
+            char absent = (char) (first + 2);
+            for (int length : new int[]{2, 3, 4, 5, 6, 7, 15, 16, 17, 31, 32, 33, 64, 257}) {
+                char[] repeated = new char[length];
+                Arrays.fill(repeated, first);
+                verifySearchOffsets(new String(repeated), String.valueOf(first));
+                verifySearchOffsets(new String(repeated), String.valueOf(absent));
+                repeated[length - 1] = absent;
+                verifySearchOffsets(new String(repeated), String.valueOf(absent));
+                if (!wide) {
+                    repeated[0] = '\u1234';
+                    verifySearchOffsets(new String(repeated), String.valueOf(first));
+                    verifySearchOffsets(new String(repeated), String.valueOf(absent));
+                }
+                for (int count : new int[]{2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33}) {
+                    if (count > length) continue;
+                    char[] source = new char[length];
+                    for (int i = 0; i < length; i++) source[i] = (i & 1) == 0 ? first : second;
+                    char[] needle = new char[count];
+                    Arrays.fill(needle, first);
+                    needle[1] = absent;
+                    needle[count - 1] = second;
+                    verifySearchOffsets(new String(source), new String(needle));
+                    // Place two matches, including the last legal candidate.
+                    System.arraycopy(needle, 0, source, 0, count);
+                    System.arraycopy(needle, 0, source, length - count, count);
+                    verifySearchOffsets(new String(source), new String(needle));
+                    if (!wide) {
+                        // Preserve a Latin1 needle with a UTF16 source.
+                        source[0] = '\u1234';
+                        verifySearchOffsets(new String(source), new String(needle));
+                    }
+                    if (count >= 4) {
+                        Arrays.fill(source, first);
+                        Arrays.fill(needle, first);
+                        needle[count / 2] = absent;
+                        verifySearchOffsets(new String(source), new String(needle));
+                        System.arraycopy(needle, 0, source, length - count, count);
+                        verifySearchOffsets(new String(source), new String(needle));
+                    }
+                }
+            }
+        }
+    }
+
+    private static void verifySearchOffsets(String source, String needle) {
+        for (int from : new int[]{-1, 0, 1, 2, 7, 15, 16, 31, source.length() - needle.length(),
+                source.length(), Integer.MAX_VALUE}) {
+            require(search(source, needle, from) == referenceSearch(source, needle, from),
+                    "dense candidates and short search boundaries");
+        }
     }
 
     public static int compare(String left, String right) { return left.compareTo(right); }

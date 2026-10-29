@@ -36,7 +36,7 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
-/** Searches with matching endpoints and a selective second character. */
+/** Searches with dense endpoint matches and selective internal characters. */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @State(Scope.Thread)
@@ -50,7 +50,7 @@ public class JeandleStringSearchCounterexample {
     public int needleLength;
     @Param({"LL", "UU", "UL"})
     public String encoding;
-    @Param({"SECOND_MISS", "SECOND_LAST"})
+    @Param({"SECOND_MISS", "SECOND_LAST", "MIDDLE_MISS", "PERIODIC_MISS", "PERIODIC_LAST"})
     public String position;
 
     private static final int STATES = 8;
@@ -71,7 +71,8 @@ public class JeandleStringSearchCounterexample {
     public void setup() throws Throwable {
         if (needleLength > length) throw new IllegalArgumentException("needle longer than source");
         boolean last = position.endsWith("LAST");
-        int distinguishing = 1;
+        boolean periodic = position.startsWith("PERIODIC");
+        int distinguishing = position.equals("MIDDLE_MISS") ? needleLength / 2 : 1;
         if (distinguishing >= needleLength) throw new IllegalArgumentException("needle too short");
         for (int state = 0; state < STATES; state++) {
             char prefix = (char) ((encoding.equals("UU") ? 0x1234 : 'a') + state * 2);
@@ -81,8 +82,14 @@ public class JeandleStringSearchCounterexample {
             Arrays.fill(source, prefix);
             Arrays.fill(needle, prefix);
             needle[distinguishing] = suffix;
+            if (periodic) {
+                if (needleLength < 3) throw new IllegalArgumentException("periodic needle too short");
+                for (int i = 1; i < length; i += 2) source[i] = suffix;
+                needle[distinguishing] = (char) (prefix + 2);
+                needle[needleLength - 1] = suffix;
+            }
             if (encoding.equals("UL")) source[0] = '\u1234';
-            if (last) source[length - needleLength + distinguishing] = suffix;
+            if (last) System.arraycopy(needle, 0, source, length - needleLength, needleLength);
             strings[state] = new String(source);
             targets[state] = new String(needle);
             sources[state] = encode(source, !encoding.equals("LL"));

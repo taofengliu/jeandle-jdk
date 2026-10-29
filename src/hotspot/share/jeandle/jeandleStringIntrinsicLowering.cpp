@@ -166,21 +166,38 @@ bool JeandleIntrinsicLowering::lower_string_intrinsic(vmIntrinsics::ID id) {
       const bool explicit_counts = nargs == 5;
       const bool a_utf16 = id != vmIntrinsics::_indexOfL && id != vmIntrinsics::_indexOfIL;
       const bool b_utf16 = id == vmIntrinsics::_indexOfU || id == vmIntrinsics::_indexOfIU;
+      // Explicit counts address complete code units; an unused trailing byte
+      // does not participate in Java's UTF16 bounds checks.
+      auto search_length = [&](llvm::Value* array, bool utf16) -> llvm::Value* {
+        if (explicit_counts && utf16) {
+          return b.CreateLShr(length(array, false), b.getInt32(1));
+        }
+        return length(array, utf16);
+      };
       llvm::Value* target = args[explicit_counts ? 2 : 1];
-      llvm::Value* b_len = length(target, b_utf16);
+      llvm::Value* b_len = search_length(target, b_utf16);
       if (!explicit_counts) {
         early_return(b.CreateICmpEQ(b_len, b.getInt32(0)), b.getInt32(0));
       }
-      llvm::Value* a_len = length(args[0], a_utf16);
+      llvm::Value* a_len = search_length(args[0], a_utf16);
       llvm::Value* a_count = explicit_counts ? args[1] : a_len;
       llvm::Value* b_count = explicit_counts ? args[3] : b_len;
       llvm::Value* from = explicit_counts ? args[4] : b.getInt32(0);
       // Empty targets differ between trusted explicit-count signatures and
       // must replay Java. Full-search's empty target returned above.
-      guard(b.CreateICmpSLE(b_count, b.getInt32(0)));
-      range(b.getInt32(0), a_count, a_len);
-      range(b.getInt32(0), b_count, b_len);
-      range(from, b.getInt32(0), a_count);
+      if (explicit_counts) {
+        // Lengths are nonnegative. Subtracting one with wrapping arithmetic
+        // checks the target's nonempty interval in a single unsigned test.
+        llvm::Value* invalid_source = b.CreateICmpUGT(a_count, a_len);
+        llvm::Value* invalid_target = b.CreateICmpUGE(b.CreateSub(b_count, b.getInt32(1)), b_len);
+        llvm::Value* invalid_start = b.CreateICmpUGT(from, a_count);
+        guard(b.CreateOr(b.CreateOr(invalid_source, invalid_target), invalid_start));
+      } else {
+        guard(b.CreateICmpSLE(b_count, b.getInt32(0)));
+        range(b.getInt32(0), a_count, a_len);
+        range(b.getInt32(0), b_count, b_len);
+        range(from, b.getInt32(0), a_count);
+      }
       operands = {args[0], a_count, target, b_count, from,
                   b.getInt32((a_utf16 ? 1 : 0) | (b_utf16 ? 2 : 0))};
       break;

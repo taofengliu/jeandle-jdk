@@ -1455,6 +1455,10 @@ entry:
   ret i32 %result
 }
 
+
+
+declare ptr addrspace(1) @memchr(ptr addrspace(1) readonly, i32, i64) #0 nofree willreturn memory(argmem: read)
+
 define private hotspotcc i32 @jeandle.string_indexof(ptr addrspace(1) nocapture readonly %src, i32 %srcCount, ptr addrspace(1) nocapture readonly %tgt, i32 %tgtCount, i32 %from, i32 %encoding) noinline optnone "lower-phase"="1" #0 memory(read) {
 entry:
   %base = load i32, ptr @arrayOopDesc.base_offset_in_bytes.byte
@@ -1469,35 +1473,134 @@ entry:
   %count64 = zext i32 %tgtCount to i64
   %byte.shift = zext i1 %su to i64
   %compare.bytes = shl i64 %count64, %byte.shift
+  %little = icmp eq i16 bitcast (<16 x i1> <i1 true, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false> to i16), 1
   %limit = sub i32 %srcCount, %tgtCount
   %fits = icmp sle i32 %from, %limit
   br i1 %fits, label %prepare, label %miss
 prepare:
   %first = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 0, i1 %tu)
   %single = icmp eq i32 %tgtCount, 1
-  br i1 %single, label %one, label %pair
+  br i1 %single, label %one, label %pair.dispatch
 one:
   %outside.latin1 = icmp ugt i32 %first, 255
   %source.latin1 = xor i1 %su, true
   %impossible = and i1 %outside.latin1, %source.latin1
   br i1 %impossible, label %miss, label %one.search
 one.search:
+  br i1 %su, label %one.word, label %one.byte
+one.word:
   %one.result = call hotspotcc i32 @jeandle.string_find_char(ptr addrspace(1) %sp, i32 %first, i32 %from, i32 %srcCount, i1 %su)
   ret i32 %one.result
-pair:
+one.byte:
+  %one.from = zext i32 %from to i64
+  %one.base = getelementptr i8, ptr addrspace(1) %sp, i64 %one.from
+  %one.left = sub i32 %srcCount, %from
+  %one.count = zext i32 %one.left to i64
+  %one.found = call ptr addrspace(1) @memchr(ptr addrspace(1) %one.base, i32 %first, i64 %one.count) #0 nobuiltin
+  %one.missed = icmp eq ptr addrspace(1) %one.found, null
+  %one.address = ptrtoint ptr addrspace(1) %one.found to i64
+  %one.source = ptrtoint ptr addrspace(1) %sp to i64
+  %one.offset = sub i64 %one.address, %one.source
+  %one.index = trunc i64 %one.offset to i32
+  %one.answer = select i1 %one.missed, i32 -1, i32 %one.index
+  ret i32 %one.answer
+pair.dispatch:
   %pair.only = icmp eq i32 %tgtCount, 2
   %last.offset = sub i32 %tgtCount, 1
+  %candidate.count = sub i32 %limit, %from
+  %small.source = icmp ult i32 %candidate.count, 15
+  br i1 %small.source, label %unprepared, label %pair
+unprepared:
+  br label %scan.header
+pair:
   %last = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 %last.offset, i1 %tu)
-  ; Equal endpoints do not discriminate repeated characters; in that case
-  ; use the adjacent character while retaining complete candidate validation.
+  ; Equal endpoints use the adjacent character as the vector filter.
   %same.ends = icmp eq i32 %first, %last
   br i1 %same.ends, label %second, label %filter
 second:
   %second.char = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 1, i1 %tu)
   br label %filter
 filter:
-  %filter.offset = phi i32 [ %last.offset, %pair ], [ 1, %second ]
-  %filter.char = phi i32 [ %last, %pair ], [ %second.char, %second ]
+  %prepared.filter.offset = phi i32 [ %last.offset, %pair ], [ 1, %second ]
+  %prepared.filter.char = phi i32 [ %last, %pair ], [ %second.char, %second ]
+  br label %scan.header
+scan.header:
+  %pos = phi i32 [ %from, %unprepared ], [ %from, %filter ], [ %next, %vector.next ]
+  %filter.offset = phi i32 [ 0, %unprepared ], [ %prepared.filter.offset, %filter ], [ %filter.offset, %vector.next ]
+  %filter.char = phi i32 [ %first, %unprepared ], [ %prepared.filter.char, %filter ], [ %filter.char, %vector.next ]
+  %remaining = sub i32 %limit, %pos
+  %more.candidates = icmp sge i32 %remaining, 0
+  br i1 %more.candidates, label %scan.width, label %miss
+scan.width:
+  %wide16 = icmp sge i32 %remaining, 15
+  br i1 %wide16, label %vector.prepare, label %short.width
+short.width:
+  %wide4 = icmp sge i32 %remaining, 3
+  br i1 %wide4, label %short.prepare, label %scalar.load
+short.prepare:
+  ; Four complete candidates permit bounded first and endpoint vectors.
+  ; Prepare the endpoint filter only when a first character matches.
+  %short.pos = zext i32 %pos to i64
+  br i1 %su, label %short.first.words, label %short.first.bytes
+short.first.words:
+  %short.word.ptr = getelementptr i16, ptr addrspace(1) %sp, i64 %short.pos
+  %short.word.load = load <4 x i16>, ptr addrspace(1) %short.word.ptr, align 1
+  %short.first16 = trunc i32 %first to i16
+  %short.first.word.ins = insertelement <4 x i16> poison, i16 %short.first16, i32 0
+  %short.first.word.vec = shufflevector <4 x i16> %short.first.word.ins, <4 x i16> poison, <4 x i32> zeroinitializer
+  %short.first.word.eq = icmp eq <4 x i16> %short.word.load, %short.first.word.vec
+  %short.first.word.bits = bitcast <4 x i1> %short.first.word.eq to i4
+  br label %short.first.mask
+short.first.bytes:
+  %short.byte.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %short.pos
+  %short.byte.load = load <4 x i8>, ptr addrspace(1) %short.byte.ptr, align 1
+  %short.first8 = trunc i32 %first to i8
+  %short.first.byte.ins = insertelement <4 x i8> poison, i8 %short.first8, i32 0
+  %short.first.byte.vec = shufflevector <4 x i8> %short.first.byte.ins, <4 x i8> poison, <4 x i32> zeroinitializer
+  %short.first.byte.eq = icmp eq <4 x i8> %short.byte.load, %short.first.byte.vec
+  %short.first.byte.bits = bitcast <4 x i1> %short.first.byte.eq to i4
+  %short.first.fits = icmp ule i32 %first, 255
+  %short.first.byte.mask = select i1 %short.first.fits, i4 %short.first.byte.bits, i4 0
+  br label %short.first.mask
+short.first.mask:
+  %short.first.bits = phi i4 [ %short.first.word.bits, %short.first.words ], [ %short.first.byte.mask, %short.first.bytes ]
+  %short.any.first = icmp ne i4 %short.first.bits, 0
+  br i1 %short.any.first, label %short.filter.prepare, label %short.done
+short.filter.prepare:
+  %short.last = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 %last.offset, i1 %tu)
+  %short.last.index = add i32 %pos, %last.offset
+  %short.last.pos = zext i32 %short.last.index to i64
+  br i1 %su, label %short.filter.words, label %short.filter.bytes
+short.filter.words:
+  %short.last.word.ptr = getelementptr i16, ptr addrspace(1) %sp, i64 %short.last.pos
+  %short.last.word.load = load <4 x i16>, ptr addrspace(1) %short.last.word.ptr, align 1
+  %short.last16 = trunc i32 %short.last to i16
+  %short.last.word.ins = insertelement <4 x i16> poison, i16 %short.last16, i32 0
+  %short.last.word.vec = shufflevector <4 x i16> %short.last.word.ins, <4 x i16> poison, <4 x i32> zeroinitializer
+  %short.last.word.eq = icmp eq <4 x i16> %short.last.word.load, %short.last.word.vec
+  %short.last.word.bits = bitcast <4 x i1> %short.last.word.eq to i4
+  %short.word.matches = and i4 %short.first.bits, %short.last.word.bits
+  br label %short.done
+short.filter.bytes:
+  %short.last.byte.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %short.last.pos
+  %short.last.byte.load = load <4 x i8>, ptr addrspace(1) %short.last.byte.ptr, align 1
+  %short.last8 = trunc i32 %short.last to i8
+  %short.last.byte.ins = insertelement <4 x i8> poison, i8 %short.last8, i32 0
+  %short.last.byte.vec = shufflevector <4 x i8> %short.last.byte.ins, <4 x i8> poison, <4 x i32> zeroinitializer
+  %short.last.byte.eq = icmp eq <4 x i8> %short.last.byte.load, %short.last.byte.vec
+  %short.last.byte.bits = bitcast <4 x i1> %short.last.byte.eq to i4
+  %short.byte.matches = and i4 %short.first.bits, %short.last.byte.bits
+  %short.last.fits = icmp ule i32 %short.last, 255
+  %short.byte.mask = select i1 %short.last.fits, i4 %short.byte.matches, i4 0
+  br label %short.done
+short.done:
+  %short.matches = phi i4 [ 0, %short.first.mask ], [ %short.word.matches, %short.filter.words ], [ %short.byte.mask, %short.filter.bytes ]
+  %short.bits32 = zext i4 %short.matches to i32
+  %short.reverse = call i32 @llvm.bitreverse.i32(i32 %short.bits32)
+  %short.reverse4 = lshr i32 %short.reverse, 28
+  %short.mask = select i1 %little, i32 %short.bits32, i32 %short.reverse4
+  br label %block.ready
+vector.prepare:
   %first16 = trunc i32 %first to i16
   %filter16 = trunc i32 %filter.char to i16
   %first.ins = insertelement <16 x i16> poison, i16 %first16, i32 0
@@ -1514,17 +1617,11 @@ filter:
   %first.bytes16 = shufflevector <16 x i8> %first.byte16.ins, <16 x i8> poison, <16 x i32> zeroinitializer
   %filter.byte16.ins = insertelement <16 x i8> poison, i8 %filter8, i32 0
   %filter.bytes16 = shufflevector <16 x i8> %filter.byte16.ins, <16 x i8> poison, <16 x i32> zeroinitializer
-  %little = icmp eq i16 bitcast (<16 x i1> <i1 true, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false, i1 false> to i16), 1
-  br label %vector.check
-vector.check:
-  %pos = phi i32 [ %from, %filter ], [ %next, %vector.next ]
-  %remaining = sub i32 %limit, %pos
-  %more.candidates = icmp sge i32 %remaining, 0
-  br i1 %more.candidates, label %latin.check, label %miss
+  br label %latin.check
 latin.check:
   %wide32 = icmp sge i32 %remaining, 31
   %latin.wide = and i1 %wide32, %latin
-  br i1 %latin.wide, label %latin.load, label %vector16.check
+  br i1 %latin.wide, label %latin.load, label %vector.load
 latin.load:
   ; Both filter vectors end within the validated source range.
   %latin.pos = zext i32 %pos to i64
@@ -1541,9 +1638,6 @@ latin.load:
   %latin.reverse = call i32 @llvm.bitreverse.i32(i32 %latin.bits)
   %latin.mask = select i1 %little, i32 %latin.bits, i32 %latin.reverse
   br label %block.ready
-vector16.check:
-  %wide16 = icmp sge i32 %remaining, 15
-  br i1 %wide16, label %vector.load, label %short.check
 vector.load:
   %filter.pos = add i32 %pos, %filter.offset
   br i1 %latin, label %latin16.load, label %word16.load
@@ -1565,49 +1659,88 @@ word16.load:
   %eq1 = icmp eq <16 x i16> %v1, %filter.vec
   %candidates = and <16 x i1> %eq0, %eq1
   br label %mask16
-short.check:
-  ; First-character scanning needs only a source block, not sixteen complete
-  ; candidate windows. Candidate bounds are checked before any verification.
-  %source.remaining = sub i32 %srcCount, %pos
-  %source.wide = icmp sge i32 %source.remaining, 16
-  br i1 %source.wide, label %short.load, label %tail.check
-short.load:
-  br i1 %latin, label %short.latin, label %short.word
-short.latin:
-  %short.latin.pos = zext i32 %pos to i64
-  %short.latin.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %short.latin.pos
-  %short.latin.v = load <16 x i8>, ptr addrspace(1) %short.latin.ptr, align 1
-  %short.latin.matches = icmp eq <16 x i8> %short.latin.v, %first.bytes16
-  br label %mask16
-short.word:
-  %short.v = call hotspotcc <16 x i16> @jeandle.string_load_vector(ptr addrspace(1) %sp, i32 %pos, i1 %su)
-  %short.matches = icmp eq <16 x i16> %short.v, %first.vec
-  br label %mask16
 mask16:
-  %matches16 = phi <16 x i1> [ %latin16.matches, %latin16.load ], [ %candidates, %word16.load ], [ %short.latin.matches, %short.latin ], [ %short.matches, %short.word ]
-  %filtered16 = phi i1 [ true, %latin16.load ], [ true, %word16.load ], [ false, %short.latin ], [ false, %short.word ]
+  %matches16 = phi <16 x i1> [ %latin16.matches, %latin16.load ], [ %candidates, %word16.load ]
   %bits16 = bitcast <16 x i1> %matches16 to i16
   %reverse16 = call i16 @llvm.bitreverse.i16(i16 %bits16)
   %ordered16 = select i1 %little, i16 %bits16, i16 %reverse16
   %mask32 = zext i16 %ordered16 to i32
   br label %block.ready
+scalar.load:
+  %scalar.index = phi i32 [ %pos, %short.width ], [ %scalar.next.index, %scalar.next ]
+  %scalar.first = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %sp, i32 %scalar.index, i1 %su)
+  %scalar.first.same = icmp eq i32 %scalar.first, %first
+  br i1 %scalar.first.same, label %scalar.filter, label %scalar.next
+scalar.next:
+  %scalar.next.index = add i32 %scalar.index, 1
+  %scalar.more = icmp sle i32 %scalar.next.index, %limit
+  br i1 %scalar.more, label %scalar.load, label %miss
+scalar.filter:
+  %scalar.last = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 %last.offset, i1 %tu)
+  %scalar.last.index = add i32 %scalar.index, %last.offset
+  %scalar.source.last = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %sp, i32 %scalar.last.index, i1 %su)
+  %scalar.last.same = icmp eq i32 %scalar.source.last, %scalar.last
+  br i1 %scalar.last.same, label %block.ready, label %scalar.next
 block.ready:
-  %mask = phi i32 [ %latin.mask, %latin.load ], [ %mask32, %mask16 ]
-  %block.size = phi i32 [ 32, %latin.load ], [ 16, %mask16 ]
-  %filtered = phi i1 [ true, %latin.load ], [ %filtered16, %mask16 ]
-  %pair.matched = and i1 %pair.only, %filtered
+  %block.pos = phi i32 [ %pos, %latin.load ], [ %pos, %mask16 ], [ %pos, %short.done ], [ %scalar.index, %scalar.filter ]
+  %mask = phi i32 [ %latin.mask, %latin.load ], [ %mask32, %mask16 ], [ %short.mask, %short.done ], [ 1, %scalar.filter ]
+  %block.size = phi i32 [ 32, %latin.load ], [ 16, %mask16 ], [ 4, %short.done ], [ 1, %scalar.filter ]
+  ; Every lane is a complete, in-bounds candidate. Refine dense endpoint
+  ; matches with the adjacent character; empty masks keep the two-load path.
+  %block.has.candidates = icmp ne i32 %mask, 0
+  br i1 %block.has.candidates, label %refine.check, label %vector.next
+refine.check:
+  %mask.minus.one = sub i32 %mask, 1
+  %other.candidates = and i32 %mask, %mask.minus.one
+  %dense = icmp ne i32 %other.candidates, 0
+  %not.adjacent = icmp ne i32 %filter.offset, 1
+  %dense.endpoints = and i1 %dense, %not.adjacent
+  %full.vector = icmp uge i32 %block.size, 16
+  %refine = and i1 %dense.endpoints, %full.vector
+  br i1 %refine, label %adjacent.prepare, label %block.filtered
+adjacent.prepare:
+  %adjacent.char = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %tp, i32 1, i1 %tu)
+  %adjacent.pos = add i32 %pos, 1
+  %block32 = icmp eq i32 %block.size, 32
+  br i1 %block32, label %adjacent.bytes, label %adjacent.words
+adjacent.bytes:
+  %adjacent.byte = trunc i32 %adjacent.char to i8
+  %adjacent.ins32 = insertelement <32 x i8> poison, i8 %adjacent.byte, i32 0
+  %adjacent.vec32 = shufflevector <32 x i8> %adjacent.ins32, <32 x i8> poison, <32 x i32> zeroinitializer
+  %adjacent.offset = zext i32 %adjacent.pos to i64
+  %adjacent.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %adjacent.offset
+  %adjacent.load32 = load <32 x i8>, ptr addrspace(1) %adjacent.ptr, align 1
+  %adjacent.eq32 = icmp eq <32 x i8> %adjacent.load32, %adjacent.vec32
+  %adjacent.bits32 = bitcast <32 x i1> %adjacent.eq32 to i32
+  %adjacent.reverse32 = call i32 @llvm.bitreverse.i32(i32 %adjacent.bits32)
+  %adjacent.mask32 = select i1 %little, i32 %adjacent.bits32, i32 %adjacent.reverse32
+  br label %adjacent.done
+adjacent.words:
+  %adjacent.word = trunc i32 %adjacent.char to i16
+  %adjacent.ins16 = insertelement <16 x i16> poison, i16 %adjacent.word, i32 0
+  %adjacent.vec16 = shufflevector <16 x i16> %adjacent.ins16, <16 x i16> poison, <16 x i32> zeroinitializer
+  %adjacent.load16 = call hotspotcc <16 x i16> @jeandle.string_load_vector(ptr addrspace(1) %sp, i32 %adjacent.pos, i1 %su)
+  %adjacent.eq16 = icmp eq <16 x i16> %adjacent.load16, %adjacent.vec16
+  %adjacent.bits16 = bitcast <16 x i1> %adjacent.eq16 to i16
+  %adjacent.reverse16 = call i16 @llvm.bitreverse.i16(i16 %adjacent.bits16)
+  %adjacent.ordered16 = select i1 %little, i16 %adjacent.bits16, i16 %adjacent.reverse16
+  %adjacent.mask16 = zext i16 %adjacent.ordered16 to i32
+  br label %adjacent.done
+adjacent.done:
+  %adjacent.mask = phi i32 [ %adjacent.mask32, %adjacent.bytes ], [ %adjacent.mask16, %adjacent.words ]
+  %refined.mask = and i32 %mask, %adjacent.mask
+  br label %block.filtered
+block.filtered:
+  %candidate.mask = phi i32 [ %mask, %refine.check ], [ %refined.mask, %adjacent.done ]
   br label %candidate.check
 candidate.check:
-  %pending = phi i32 [ %mask, %block.ready ], [ %cleared, %candidate.next ]
+  %pending = phi i32 [ %candidate.mask, %block.filtered ], [ %cleared, %candidate.next ]
   %any = icmp ne i32 %pending, 0
   br i1 %any, label %candidate, label %vector.next
 candidate:
   %lane = call i32 @llvm.cttz.i32(i32 %pending, i1 true)
-  %index = add i32 %pos, %lane
-  %in.range = icmp sle i32 %index, %limit
-  br i1 %in.range, label %candidate.in.range, label %miss
-candidate.in.range:
-  br i1 %pair.matched, label %hit, label %candidate.validate
+  %index = add i32 %block.pos, %lane
+  br i1 %pair.only, label %hit, label %candidate.validate
 candidate.validate:
   %index64 = zext i32 %index to i64
   %shift = zext i1 %su to i64
@@ -1615,14 +1748,15 @@ candidate.validate:
   %candidate.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %offset
   br i1 %same.encoding, label %candidate.equals, label %candidate.compare
 candidate.equals:
-  %equal.diff = call hotspotcc i32 @jeandle.memcmp(ptr addrspace(1) %candidate.ptr, ptr addrspace(1) %tp, i64 %compare.bytes)
+  %candidate.comparison = call hotspotcc i32 @jeandle.memcmp(ptr addrspace(1) %candidate.ptr, ptr addrspace(1) %tp, i64 %compare.bytes)
+  %candidate.equal = icmp eq i32 %candidate.comparison, 0
   br label %candidate.result
 candidate.compare:
-  %ordered.diff = call hotspotcc i32 @jeandle.string_compare_data(ptr addrspace(1) %candidate.ptr, i32 %tgtCount, ptr addrspace(1) %tp, i32 %tgtCount, i1 %su, i1 %tu)
+  %ordered.comparison = call hotspotcc i32 @jeandle.string_compare_data(ptr addrspace(1) %candidate.ptr, i32 %tgtCount, ptr addrspace(1) %tp, i32 %tgtCount, i1 %su, i1 %tu)
+  %ordered.equal = icmp eq i32 %ordered.comparison, 0
   br label %candidate.result
 candidate.result:
-  %diff = phi i32 [ %equal.diff, %candidate.equals ], [ %ordered.diff, %candidate.compare ]
-  %matched = icmp eq i32 %diff, 0
+  %matched = phi i1 [ %candidate.equal, %candidate.equals ], [ %ordered.equal, %candidate.compare ]
   br i1 %matched, label %hit, label %candidate.next
 candidate.next:
   %without.lowest = sub i32 %pending, 1
@@ -1631,43 +1765,9 @@ candidate.next:
 hit:
   ret i32 %index
 vector.next:
-  %next = add i32 %pos, %block.size
-  br label %vector.check
-tail.check:
-  %i = phi i32 [ %pos, %short.check ], [ %i.next, %tail.next ]
-  %more = icmp sle i32 %i, %limit
-  br i1 %more, label %tail.load, label %miss
-tail.load:
-  %c0 = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %sp, i32 %i, i1 %su)
-  %i.filter = add i32 %i, %filter.offset
-  %c1 = call hotspotcc i32 @jeandle.string_load_char(ptr addrspace(1) %sp, i32 %i.filter, i1 %su)
-  %c0.eq = icmp eq i32 %c0, %first
-  %c1.eq = icmp eq i32 %c1, %filter.char
-  %pair.eq = and i1 %c0.eq, %c1.eq
-  br i1 %pair.eq, label %tail.validate, label %tail.next
-tail.validate:
-  br i1 %pair.only, label %tail.hit, label %tail.compare
-tail.compare:
-  %i64 = zext i32 %i to i64
-  %tail.shift = zext i1 %su to i64
-  %tail.offset = shl i64 %i64, %tail.shift
-  %tail.ptr = getelementptr i8, ptr addrspace(1) %sp, i64 %tail.offset
-  br i1 %same.encoding, label %tail.equals, label %tail.ordered
-tail.equals:
-  %tail.equal.diff = call hotspotcc i32 @jeandle.memcmp(ptr addrspace(1) %tail.ptr, ptr addrspace(1) %tp, i64 %compare.bytes)
-  br label %tail.result
-tail.ordered:
-  %tail.ordered.diff = call hotspotcc i32 @jeandle.string_compare_data(ptr addrspace(1) %tail.ptr, i32 %tgtCount, ptr addrspace(1) %tp, i32 %tgtCount, i1 %su, i1 %tu)
-  br label %tail.result
-tail.result:
-  %tail.diff = phi i32 [ %tail.equal.diff, %tail.equals ], [ %tail.ordered.diff, %tail.ordered ]
-  %tail.matched = icmp eq i32 %tail.diff, 0
-  br i1 %tail.matched, label %tail.hit, label %tail.next
-tail.hit:
-  ret i32 %i
-tail.next:
-  %i.next = add i32 %i, 1
-  br label %tail.check
+  %next = add i32 %block.pos, %block.size
+  ; Keep vector preparation behind the width dispatch for scalar searches.
+  br label %scan.header, !llvm.loop !1
 miss:
   ret i32 -1
 }
@@ -1680,15 +1780,16 @@ entry:
   ret i32 %result
 }
 
+; Native leaf kernels preserve element atomicity without exposing shared
+; array accesses to ordinary LLVM vector memory operations.
+declare i32 @string_compress_stub(ptr addrspace(1) nocapture readonly align 2,
+                                  ptr addrspace(1) nocapture writeonly,
+                                  i32) #0 nofree willreturn memory(argmem: readwrite)
+declare void @string_inflate_stub(ptr addrspace(1) nocapture readonly,
+                                  ptr addrspace(1) nocapture writeonly align 2,
+                                  i32) #0 nofree willreturn memory(argmem: readwrite)
+
 ; Byte and char arrays both store UTF16 code units in native byte order.
-; Separate base constants keep the layout explicit even when they agree.
-; Both sides store equal-width UTF-16 code units, so the copy is a raw byte
-; copy of 2*count bytes. An inline unrolled vector loop with an overlapping
-; final block (no scalar tail, every access align 1 because either side may be
-; only 2-byte aligned) serves sizes where the loop's tight 4x32-byte batches
-; beat a call; from 1KB upward glibc memcpy's large-block strategies (fast
-; short-rep-movsb, alignment peeling, page-crossing handling) measure faster
-; than the loop on current x86-64 servers, so the libcall keeps them.
 define private hotspotcc void @jeandle.string_copy_utf16(ptr addrspace(1) nocapture readonly %src, i32 %srcOff, ptr addrspace(1) nocapture writeonly %dst, i32 %dstOff, i32 %count, i1 %srcBytes) noinline optnone "lower-phase"="1" #0 memory(read, argmem: readwrite) {
 entry:
   %byte.base = load i32, ptr @arrayOopDesc.base_offset_in_bytes.byte
@@ -1702,129 +1803,7 @@ entry:
   %sp = getelementptr i16, ptr addrspace(1) %sdata, i64 %so
   %dp = getelementptr i16, ptr addrspace(1) %ddata, i64 %do
   %n = zext i32 %count to i64
-  %bytes = shl i64 %n, 1
-  %huge = icmp uge i64 %bytes, 1024
-  br i1 %huge, label %lib.call, label %size.dispatch
-lib.call:
-  call void @llvm.memcpy.p1.p1.i64(ptr addrspace(1) align 2 %dp, ptr addrspace(1) align 2 %sp, i64 %bytes, i1 false)
-  ret void
-size.dispatch:
-  %is.vector = icmp uge i64 %bytes, 32
-  br i1 %is.vector, label %vec4.check, label %qword.dispatch
-; Overlapping head/tail stores cover bytes < 8 without a loop.
-small.dispatch:
-  %sm.zero = icmp eq i64 %bytes, 0
-  br i1 %sm.zero, label %small.done, label %small.d1
-small.d1:
-  %sm.is1 = icmp eq i64 %bytes, 1
-  br i1 %sm.is1, label %small.byte, label %small.d2
-small.d2:
-  %sm.is2 = icmp ult i64 %bytes, 4
-  br i1 %sm.is2, label %small.word, label %small.tail
-small.done:
-  ret void
-small.byte:
-  %sm.s1 = getelementptr i8, ptr addrspace(1) %sp, i64 0
-  %sm.c1 = load i8, ptr addrspace(1) %sm.s1, align 1
-  %sm.d1 = getelementptr i8, ptr addrspace(1) %dp, i64 0
-  store i8 %sm.c1, ptr addrspace(1) %sm.d1, align 1
-  ret void
-small.word:
-  %sm.sh = getelementptr i8, ptr addrspace(1) %sp, i64 0
-  %sm.ch = load i16, ptr addrspace(1) %sm.sh, align 1
-  %sm.dh = getelementptr i8, ptr addrspace(1) %dp, i64 0
-  store i16 %sm.ch, ptr addrspace(1) %sm.dh, align 1
-  %sm.last2 = sub i64 %bytes, 2
-  %sm.s2 = getelementptr i8, ptr addrspace(1) %sp, i64 %sm.last2
-  %sm.c2 = load i16, ptr addrspace(1) %sm.s2, align 1
-  %sm.d2 = getelementptr i8, ptr addrspace(1) %dp, i64 %sm.last2
-  store i16 %sm.c2, ptr addrspace(1) %sm.d2, align 1
-  ret void
-small.tail:
-  %sm.sh4 = getelementptr i8, ptr addrspace(1) %sp, i64 0
-  %sm.ch4 = load i32, ptr addrspace(1) %sm.sh4, align 1
-  %sm.dh4 = getelementptr i8, ptr addrspace(1) %dp, i64 0
-  store i32 %sm.ch4, ptr addrspace(1) %sm.dh4, align 1
-  %sm.last4 = sub i64 %bytes, 4
-  %sm.s4 = getelementptr i8, ptr addrspace(1) %sp, i64 %sm.last4
-  %sm.c4 = load i32, ptr addrspace(1) %sm.s4, align 1
-  %sm.d4 = getelementptr i8, ptr addrspace(1) %dp, i64 %sm.last4
-  store i32 %sm.c4, ptr addrspace(1) %sm.d4, align 1
-  ret void
-; Four 32-byte blocks per iteration; the batch stays inside [0, bytes-32) so the
-; overlapping final block alone covers the tail for every length.
-vec4.check:
-  %v4 = phi i64 [ 0, %size.dispatch ], [ %v4.next, %vec4.store ]
-  %v4.room = sub i64 %bytes, %v4
-  %v4.fits = icmp uge i64 %v4.room, 160
-  br i1 %v4.fits, label %vec4.load, label %vec1.check
-vec4.load:
-  %v4.o1 = add i64 %v4, 32
-  %v4.o2 = add i64 %v4, 64
-  %v4.o3 = add i64 %v4, 96
-  %v4.p0 = getelementptr i8, ptr addrspace(1) %sp, i64 %v4
-  %v4.l0 = load <32 x i8>, ptr addrspace(1) %v4.p0, align 1
-  %v4.p1 = getelementptr i8, ptr addrspace(1) %sp, i64 %v4.o1
-  %v4.l1 = load <32 x i8>, ptr addrspace(1) %v4.p1, align 1
-  %v4.p2 = getelementptr i8, ptr addrspace(1) %sp, i64 %v4.o2
-  %v4.l2 = load <32 x i8>, ptr addrspace(1) %v4.p2, align 1
-  %v4.p3 = getelementptr i8, ptr addrspace(1) %sp, i64 %v4.o3
-  %v4.l3 = load <32 x i8>, ptr addrspace(1) %v4.p3, align 1
-  br label %vec4.store
-vec4.store:
-  %v4.d0 = getelementptr i8, ptr addrspace(1) %dp, i64 %v4
-  store <32 x i8> %v4.l0, ptr addrspace(1) %v4.d0, align 1
-  %v4.d1 = getelementptr i8, ptr addrspace(1) %dp, i64 %v4.o1
-  store <32 x i8> %v4.l1, ptr addrspace(1) %v4.d1, align 1
-  %v4.d2 = getelementptr i8, ptr addrspace(1) %dp, i64 %v4.o2
-  store <32 x i8> %v4.l2, ptr addrspace(1) %v4.d2, align 1
-  %v4.d3 = getelementptr i8, ptr addrspace(1) %dp, i64 %v4.o3
-  store <32 x i8> %v4.l3, ptr addrspace(1) %v4.d3, align 1
-  %v4.next = add i64 %v4, 128
-  br label %vec4.check
-; At most three whole blocks remain before the final one.
-vec1.check:
-  %v1 = phi i64 [ %v4, %vec4.check ], [ %v1.next, %vec1.store ]
-  %v1.limit = sub i64 %bytes, 32
-  %v1.more = icmp ult i64 %v1, %v1.limit
-  br i1 %v1.more, label %vec1.store, label %vec.final
-vec1.store:
-  %v1.src = getelementptr i8, ptr addrspace(1) %sp, i64 %v1
-  %v1.chunk = load <32 x i8>, ptr addrspace(1) %v1.src, align 1
-  %v1.dst = getelementptr i8, ptr addrspace(1) %dp, i64 %v1
-  store <32 x i8> %v1.chunk, ptr addrspace(1) %v1.dst, align 1
-  %v1.next = add i64 %v1, 32
-  br label %vec1.check
-vec.final:
-  %v.final.off = sub i64 %bytes, 32
-  %v.final.src = getelementptr i8, ptr addrspace(1) %sp, i64 %v.final.off
-  %v.final.chunk = load <32 x i8>, ptr addrspace(1) %v.final.src, align 1
-  %v.final.dst = getelementptr i8, ptr addrspace(1) %dp, i64 %v.final.off
-  store <32 x i8> %v.final.chunk, ptr addrspace(1) %v.final.dst, align 1
-  ret void
-; Overlapping qword path for 8 <= bytes < 32, shaped like the vector path.
-qword.dispatch:
-  %is.qword = icmp uge i64 %bytes, 8
-  br i1 %is.qword, label %qword.preheader, label %small.dispatch
-qword.preheader:
-  %qw.limit = sub i64 %bytes, 8
-  br label %qword.check
-qword.check:
-  %qw = phi i64 [ 0, %qword.preheader ], [ %qw.next, %qword.store ]
-  %qw.more = icmp ult i64 %qw, %qw.limit
-  br i1 %qw.more, label %qword.store, label %qword.final
-qword.store:
-  %qw.src = getelementptr i8, ptr addrspace(1) %sp, i64 %qw
-  %qw.chunk = load i64, ptr addrspace(1) %qw.src, align 1
-  %qw.dst = getelementptr i8, ptr addrspace(1) %dp, i64 %qw
-  store i64 %qw.chunk, ptr addrspace(1) %qw.dst, align 1
-  %qw.next = add i64 %qw, 8
-  br label %qword.check
-qword.final:
-  %qw.f.src = getelementptr i8, ptr addrspace(1) %sp, i64 %qw.limit
-  %qw.f.chunk = load i64, ptr addrspace(1) %qw.f.src, align 1
-  %qw.f.dst = getelementptr i8, ptr addrspace(1) %dp, i64 %qw.limit
-  store i64 %qw.f.chunk, ptr addrspace(1) %qw.f.dst, align 1
+  call void @StubRoutines_jshort_disjoint_arraycopy(ptr addrspace(1) align 2 %sp, ptr addrspace(1) align 2 %dp, i64 %n) #0
   ret void
 }
 
@@ -1839,88 +1818,8 @@ entry:
   %do = zext i32 %dstOff to i64
   %sp = getelementptr i16, ptr addrspace(1) %sdata, i64 %so
   %dp = getelementptr i8, ptr addrspace(1) %ddata, i64 %do
-  %n = zext i32 %count to i64
-  br label %vector32.check
-; Two validated blocks per iteration improve load/store overlap; a dirty pair
-; re-enters the single-block loop at the same position, preserving the
-; commit-only-validated-bytes contract without re-scanning earlier progress.
-vector32.check:
-  %pos32 = phi i64 [ 0, %entry ], [ %next32, %vector32.store ]
-  %remaining32 = sub i64 %n, %pos32
-  %wide32 = icmp uge i64 %remaining32, 32
-  br i1 %wide32, label %vector32.load, label %vector.check
-vector32.load:
-  %p0 = getelementptr i16, ptr addrspace(1) %sp, i64 %pos32
-  %v0 = load <16 x i16>, ptr addrspace(1) %p0, align 2
-  %pos32.hi = add i64 %pos32, 16
-  %p16 = getelementptr i16, ptr addrspace(1) %sp, i64 %pos32.hi
-  %v16 = load <16 x i16>, ptr addrspace(1) %p16, align 2
-  %bad0 = icmp ugt <16 x i16> %v0, splat (i16 255)
-  %bad16 = icmp ugt <16 x i16> %v16, splat (i16 255)
-  %any0 = call i1 @llvm.vector.reduce.or.v16i1(<16 x i1> %bad0)
-  %any16 = call i1 @llvm.vector.reduce.or.v16i1(<16 x i1> %bad16)
-  %any.bad32 = or i1 %any0, %any16
-  br i1 %any.bad32, label %vector.check, label %vector32.store
-vector32.store:
-  %narrow0 = trunc <16 x i16> %v0 to <16 x i8>
-  %narrow16 = trunc <16 x i16> %v16 to <16 x i8>
-  %out0 = getelementptr i8, ptr addrspace(1) %dp, i64 %pos32
-  store <16 x i8> %narrow0, ptr addrspace(1) %out0, align 1
-  %out16 = getelementptr i8, ptr addrspace(1) %dp, i64 %pos32.hi
-  store <16 x i8> %narrow16, ptr addrspace(1) %out16, align 1
-  %next32 = add i64 %pos32, 32
-  br label %vector32.check
-vector.check:
-  %pos = phi i64 [ %pos32, %vector32.check ], [ %pos32, %vector32.load ], [ %next, %vector.store ]
-  %remaining = sub i64 %n, %pos
-  %wide = icmp uge i64 %remaining, 16
-  br i1 %wide, label %vector.load, label %tail.check
-vector.load:
-  %vp = getelementptr i16, ptr addrspace(1) %sp, i64 %pos
-  %v = load <16 x i16>, ptr addrspace(1) %vp, align 2
-  %bad = icmp ugt <16 x i16> %v, splat (i16 255)
-  %any.bad = call i1 @llvm.vector.reduce.or.v16i1(<16 x i1> %bad)
-  br i1 %any.bad, label %prefix.check, label %vector.store
-vector.store:
-  %narrow = trunc <16 x i16> %v to <16 x i8>
-  %out = getelementptr i8, ptr addrspace(1) %dp, i64 %pos
-  store <16 x i8> %narrow, ptr addrspace(1) %out, align 1
-  %next = add i64 %pos, 16
-  br label %vector.check
-prefix.check:
-  %low.bad = shufflevector <16 x i1> %bad, <16 x i1> poison, <8 x i32> <i32 0, i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7>
-  %low.bad.bits = bitcast <8 x i1> %low.bad to i8
-  %low.valid = icmp eq i8 %low.bad.bits, 0
-  br i1 %low.valid, label %prefix.store, label %tail.check
-prefix.store:
-  ; The validated lower half can be committed under the bulk-array contract.
-  %low = shufflevector <16 x i16> %v, <16 x i16> poison, <8 x i32> <i32 0, i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7>
-  %low.narrow = trunc <8 x i16> %low to <8 x i8>
-  %low.out = getelementptr i8, ptr addrspace(1) %dp, i64 %pos
-  store <8 x i8> %low.narrow, ptr addrspace(1) %low.out, align 1
-  %prefix.next = add i64 %pos, 8
-  br label %tail.check
-; Re-read the remaining characters scalarly, committing the exact legal prefix.
-; There is no deoptimization after any destination write.
-tail.check:
-  %i = phi i64 [ %pos, %vector.check ], [ %pos, %prefix.check ], [ %prefix.next, %prefix.store ], [ %i.next, %tail.store ]
-  %more = icmp ult i64 %i, %n
-  br i1 %more, label %tail.load, label %success
-tail.load:
-  %p = getelementptr i16, ptr addrspace(1) %sp, i64 %i
-  %c = load atomic i16, ptr addrspace(1) %p unordered, align 2
-  %valid = icmp ule i16 %c, 255
-  br i1 %valid, label %tail.store, label %failure
-tail.store:
-  %c8 = trunc i16 %c to i8
-  %q = getelementptr i8, ptr addrspace(1) %dp, i64 %i
-  store atomic i8 %c8, ptr addrspace(1) %q unordered, align 1
-  %i.next = add i64 %i, 1
-  br label %tail.check
-success:
-  ret i32 %count
-failure:
-  ret i32 0
+  %result = call i32 @string_compress_stub(ptr addrspace(1) %sp, ptr addrspace(1) %dp, i32 %count) #0
+  ret i32 %result
 }
 
 define private hotspotcc void @jeandle.string_inflate(ptr addrspace(1) nocapture readonly %src, i32 %srcOff, ptr addrspace(1) nocapture writeonly %dst, i32 %dstOff, i32 %count, i1 %dstBytes) noinline optnone "lower-phase"="1" #0 memory(read, argmem: readwrite) {
@@ -1934,55 +1833,7 @@ entry:
   %do = zext i32 %dstOff to i64
   %sp = getelementptr i8, ptr addrspace(1) %sdata, i64 %so
   %dp = getelementptr i16, ptr addrspace(1) %ddata, i64 %do
-  %n = zext i32 %count to i64
-  br label %vector32.check
-; Two blocks per iteration; inflation has no failure path, so the pair store is
-; unconditional and only the final partial block region uses the 16-char loop.
-vector32.check:
-  %pos32 = phi i64 [ 0, %entry ], [ %next32, %vector32.store ]
-  %remaining32 = sub i64 %n, %pos32
-  %wide32 = icmp uge i64 %remaining32, 32
-  br i1 %wide32, label %vector32.store, label %vector.check
-vector32.store:
-  %vp32 = getelementptr i8, ptr addrspace(1) %sp, i64 %pos32
-  %v32 = load <16 x i8>, ptr addrspace(1) %vp32, align 1
-  %wide32.chars = zext <16 x i8> %v32 to <16 x i16>
-  %out32 = getelementptr i16, ptr addrspace(1) %dp, i64 %pos32
-  store <16 x i16> %wide32.chars, ptr addrspace(1) %out32, align 2
-  %pos32.hi = add i64 %pos32, 16
-  %vp32.hi = getelementptr i8, ptr addrspace(1) %sp, i64 %pos32.hi
-  %v32.hi = load <16 x i8>, ptr addrspace(1) %vp32.hi, align 1
-  %wide32.chars.hi = zext <16 x i8> %v32.hi to <16 x i16>
-  %out32.hi = getelementptr i16, ptr addrspace(1) %dp, i64 %pos32.hi
-  store <16 x i16> %wide32.chars.hi, ptr addrspace(1) %out32.hi, align 2
-  %next32 = add i64 %pos32, 32
-  br label %vector32.check
-vector.check:
-  %pos = phi i64 [ %pos32, %vector32.check ], [ %next, %vector.store ]
-  %remaining = sub i64 %n, %pos
-  %wide = icmp uge i64 %remaining, 16
-  br i1 %wide, label %vector.store, label %tail.check
-vector.store:
-  %vp = getelementptr i8, ptr addrspace(1) %sp, i64 %pos
-  %v = load <16 x i8>, ptr addrspace(1) %vp, align 1
-  %wide.chars = zext <16 x i8> %v to <16 x i16>
-  %out = getelementptr i16, ptr addrspace(1) %dp, i64 %pos
-  store <16 x i16> %wide.chars, ptr addrspace(1) %out, align 2
-  %next = add i64 %pos, 16
-  br label %vector.check
-tail.check:
-  %i = phi i64 [ %pos, %vector.check ], [ %i.next, %tail.store ]
-  %more = icmp ult i64 %i, %n
-  br i1 %more, label %tail.store, label %done
-tail.store:
-  %p = getelementptr i8, ptr addrspace(1) %sp, i64 %i
-  %c = load atomic i8, ptr addrspace(1) %p unordered, align 1
-  %c16 = zext i8 %c to i16
-  %q = getelementptr i16, ptr addrspace(1) %dp, i64 %i
-  store atomic i16 %c16, ptr addrspace(1) %q unordered, align 2
-  %i.next = add i64 %i, 1
-  br label %tail.check
-done:
+  call void @string_inflate_stub(ptr addrspace(1) %sp, ptr addrspace(1) %dp, i32 %count) #0
   ret void
 }
 
@@ -2326,7 +2177,7 @@ declare void @llvm.memcpy.p1.p1.i64(ptr addrspace(1) noalias nocapture writeonly
 ;
 ; Purpose:
 ;   Provides an always-present, local definition for the memcmp symbol used
-;   by array equality and same-encoding substring verification.
+;   by array equality.
 ;
 ; Semantics (bcmp, not memcmp):
 ;   Returns 0 when the two ranges are equal, 1 when they are not. Every
@@ -2501,3 +2352,6 @@ attributes #0 = { nounwind "gc-leaf-function" }
 
 ; Java array lengths are nonnegative signed integers.
 !0 = !{i32 0, i32 -2147483648}
+
+!1 = distinct !{!1, !2}
+!2 = !{!"llvm.licm.disable"}
