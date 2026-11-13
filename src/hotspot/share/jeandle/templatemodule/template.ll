@@ -72,6 +72,8 @@
 
 ; Byte offsets for Klass structure fields.
 @Klass.access_flags_offset = external global i32
+@Klass.modifier_flags_offset = external global i32
+@Klass.super_offset = external global i32
 @Klass.java_mirror_offset = external global i32
 @Klass.layout_helper_offset = external global i32
 @Klass.secondary_super_cache_offset = external global i32
@@ -240,6 +242,41 @@ entry:
   %klass_addr = getelementptr inbounds i8, ptr addrspace(1) %mirror, i32 %klass_offset
   %klass = load atomic ptr addrspace(0), ptr addrspace(1) %klass_addr unordered, align 8
   ret ptr addrspace(0) %klass
+}
+
+; Semantic Klass queries remain visible to constant folding until phase 1.
+define hotspotcc i32 @jeandle.klass_modifiers(ptr nocapture nonnull readonly %klass) noinline memory(read) "lower-phase"="1" #0 {
+entry:
+  %offset = load i32, ptr @Klass.modifier_flags_offset
+  %address = getelementptr inbounds i8, ptr %klass, i32 %offset
+  %flags = load atomic i32, ptr %address unordered, align 4
+  ret i32 %flags
+}
+
+define hotspotcc i32 @jeandle.klass_access_flags(ptr nocapture nonnull readonly %klass, i32 %mask) noinline memory(read) "lower-phase"="1" #0 {
+entry:
+  %offset = load i32, ptr @Klass.access_flags_offset
+  %address = getelementptr inbounds i8, ptr %klass, i32 %offset
+  %flags = load atomic i32, ptr %address unordered, align 4
+  %masked = and i32 %flags, %mask
+  ret i32 %masked
+}
+
+define hotspotcc ptr @jeandle.klass_super(ptr nocapture nonnull readonly %klass) noinline memory(read) "lower-phase"="1" #0 {
+entry:
+  %offset = load i32, ptr @Klass.super_offset
+  %address = getelementptr inbounds i8, ptr %klass, i32 %offset
+  %super = load atomic ptr, ptr %address unordered, align 8
+  ret ptr %super
+}
+
+define hotspotcc nonnull ptr addrspace(1) @jeandle.klass_mirror(ptr nocapture nonnull readonly %klass) noinline memory(read) "lower-phase"="1" #0 {
+entry:
+  %offset = load i32, ptr @Klass.java_mirror_offset
+  %address = getelementptr inbounds i8, ptr %klass, i32 %offset
+  %handle = load ptr, ptr %address, align 8
+  %mirror = load ptr addrspace(1), ptr %handle, align 8
+  ret ptr addrspace(1) %mirror
 }
 
 ; Load Klass::layout_helper from a Klass pointer. Keeping this as a phase-1

@@ -38,6 +38,7 @@
 #include "jeandle/jeandleUtils.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
+#include "ci/ciEnv.hpp"
 #include "ci/ciField.hpp"
 #include "ci/ciInstanceKlass.hpp"
 #include "ci/ciKlass.hpp"
@@ -208,6 +209,17 @@ bool JeandleIntrinsicLowering::is_supported(vmIntrinsics::ID id) {
 
     // getClass
     case vmIntrinsics::_getClass:
+    case vmIntrinsics::_getModifiers:
+    case vmIntrinsics::_getClassAccessFlags:
+    case vmIntrinsics::_isInterface:
+    case vmIntrinsics::_isArray:
+    case vmIntrinsics::_isPrimitive:
+    case vmIntrinsics::_isHidden:
+    case vmIntrinsics::_getSuperclass:
+    case vmIntrinsics::_isInstance:
+    case vmIntrinsics::_isAssignableFrom:
+    case vmIntrinsics::_Class_cast:
+    case vmIntrinsics::_getCallerClass:
 
     // System time queries
     case vmIntrinsics::_currentTimeMillis:
@@ -537,6 +549,21 @@ bool JeandleIntrinsicLowering::lower(vmIntrinsics::ID id, const ciMethod* target
     case vmIntrinsics::_getClass:
       return lower_java_op("jeandle.get_class",
                            {CTRL_NONE, MEM_READ});
+
+    case vmIntrinsics::_getModifiers:
+    case vmIntrinsics::_getClassAccessFlags:
+    case vmIntrinsics::_isInterface:
+    case vmIntrinsics::_isArray:
+    case vmIntrinsics::_isPrimitive:
+    case vmIntrinsics::_isHidden:
+    case vmIntrinsics::_getSuperclass:
+    case vmIntrinsics::_isInstance:
+    case vmIntrinsics::_isAssignableFrom:
+      return lower_class_query(id);
+    case vmIntrinsics::_Class_cast:
+      return lower_class_cast();
+    case vmIntrinsics::_getCallerClass:
+      return lower_caller_class();
 
     case vmIntrinsics::_currentTimeMillis:
       return lower_native_time_func(
@@ -4210,5 +4237,173 @@ bool JeandleIntrinsicLowering::lower_arrayequals(BasicType element_type) {
 
   _interp->_jvm->push(T_BOOLEAN, result);
 
+  return true;
+}
+
+bool JeandleIntrinsicLowering::lower_class_query(vmIntrinsics::ID id) {
+  llvm::IRBuilder<>& b = _interp->_ir_builder;
+  llvm::LLVMContext& ctx = *_interp->_context;
+  const bool binary = id == vmIntrinsics::_isInstance || id == vmIntrinsics::_isAssignableFrom;
+  llvm::Value* argument = binary ? _interp->_jvm->raw_peek(0).value() : nullptr;
+  llvm::Value* mirror = _interp->_jvm->raw_peek(binary ? 1 : 0).value();
+  if (id == vmIntrinsics::_getClassAccessFlags) {
+    _interp->null_check(mirror);
+  } else if (id == vmIntrinsics::_isAssignableFrom) {
+    _interp->null_check(argument);
+  }
+  if (binary) {
+    _interp->_jvm->apop();
+  }
+  _interp->_jvm->apop();
+
+  llvm::Value* klass = _interp->call_java_op("jeandle.load_mirror_klass", {mirror});
+  llvm::Value* primitive = b.CreateIsNull(klass, "class.is_primitive");
+  if (id == vmIntrinsics::_isPrimitive) {
+    _interp->_jvm->push(T_BOOLEAN, b.CreateZExt(primitive, b.getInt32Ty()));
+    return true;
+  }
+
+  const bool returns_mirror = id == vmIntrinsics::_getSuperclass;
+  BasicType result_basic_type = _target->signature()->return_type()->basic_type();
+  llvm::Type* result_type = JeandleType::java2llvm(result_basic_type, ctx);
+  llvm::Value* zero = llvm::Constant::getNullValue(result_type);
+  llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx, "class.query_merge", _interp->_llvm_func);
+  llvm::BasicBlock* primitive_bb = llvm::BasicBlock::Create(ctx, "class.primitive", _interp->_llvm_func);
+  llvm::BasicBlock* reference_bb = llvm::BasicBlock::Create(ctx, "class.reference", _interp->_llvm_func);
+  llvm::SmallVector<std::pair<llvm::Value*, llvm::BasicBlock*>, 5> results;
+  auto finish = [&](llvm::Value* value) {
+    results.push_back({value, b.GetInsertBlock()});
+    b.CreateBr(merge);
+  };
+  b.CreateCondBr(primitive, primitive_bb, reference_bb);
+  b.SetInsertPoint(primitive_bb);
+  if (id == vmIntrinsics::_getModifiers || id == vmIntrinsics::_getClassAccessFlags) {
+    finish(b.getInt32(JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT));
+  } else if (id == vmIntrinsics::_isAssignableFrom) {
+    finish(b.CreateZExt(b.CreateICmpEQ(mirror, argument), b.getInt32Ty()));
+  } else {
+    finish(zero);
+  }
+  b.SetInsertPoint(reference_bb);
+
+  if (returns_mirror) {
+    llvm::Value* interface_flags = _interp->call_java_op(
+        "jeandle.klass_access_flags", {klass, b.getInt32(JVM_ACC_INTERFACE)});
+    llvm::BasicBlock* interface_bb = llvm::BasicBlock::Create(ctx, "class.interface", _interp->_llvm_func);
+    llvm::BasicBlock* non_interface_bb = llvm::BasicBlock::Create(ctx, "class.non_interface", _interp->_llvm_func);
+    b.CreateCondBr(b.CreateICmpNE(interface_flags, b.getInt32(0)), interface_bb, non_interface_bb);
+    b.SetInsertPoint(interface_bb);
+    finish(zero);
+    b.SetInsertPoint(non_interface_bb);
+    llvm::Value* layout = _interp->call_java_op("jeandle.layout_helper", {klass});
+    llvm::BasicBlock* array_bb = llvm::BasicBlock::Create(ctx, "class.array_super", _interp->_llvm_func);
+    llvm::BasicBlock* instance_bb = llvm::BasicBlock::Create(ctx, "class.instance_super", _interp->_llvm_func);
+    b.CreateCondBr(b.CreateICmpSLT(layout, b.getInt32(0)), array_bb, instance_bb);
+    b.SetInsertPoint(array_bb);
+    llvm::Value* object_handle = JeandleCompilation::current()->find_or_insert_oop(
+        ciEnv::current()->Object_klass()->java_mirror());
+    finish(b.CreateLoad(result_type, object_handle));
+    b.SetInsertPoint(instance_bb);
+    llvm::Value* super = _interp->call_java_op("jeandle.klass_super", {klass});
+    llvm::BasicBlock* object_bb = llvm::BasicBlock::Create(ctx, "class.object_super", _interp->_llvm_func);
+    llvm::BasicBlock* super_bb = llvm::BasicBlock::Create(ctx, "class.super_mirror", _interp->_llvm_func);
+    b.CreateCondBr(b.CreateIsNull(super), object_bb, super_bb);
+    b.SetInsertPoint(object_bb);
+    finish(zero);
+    b.SetInsertPoint(super_bb);
+    finish(_interp->call_java_op("jeandle.klass_mirror", {super}));
+  } else if (id == vmIntrinsics::_isAssignableFrom) {
+    llvm::Value* sub = _interp->call_java_op("jeandle.load_mirror_klass", {argument});
+    llvm::BasicBlock* primitive_sub_bb = llvm::BasicBlock::Create(ctx, "class.primitive_sub", _interp->_llvm_func);
+    llvm::BasicBlock* reference_sub_bb = llvm::BasicBlock::Create(ctx, "class.reference_sub", _interp->_llvm_func);
+    b.CreateCondBr(b.CreateIsNull(sub), primitive_sub_bb, reference_sub_bb);
+    b.SetInsertPoint(primitive_sub_bb);
+    finish(zero);
+    b.SetInsertPoint(reference_sub_bb);
+    llvm::Value* subtype = _interp->call_java_op("jeandle.check_klass_subtype", {sub, klass});
+    finish(b.CreateZExt(subtype, b.getInt32Ty()));
+  } else if (id == vmIntrinsics::_isInstance) {
+    finish(_interp->call_java_op("jeandle.instanceof", {klass, argument}));
+  } else if (id == vmIntrinsics::_getModifiers) {
+    finish(_interp->call_java_op("jeandle.klass_modifiers", {klass}));
+  } else if (id == vmIntrinsics::_isArray) {
+    llvm::Value* layout = _interp->call_java_op("jeandle.layout_helper", {klass});
+    finish(b.CreateZExt(b.CreateICmpSLT(layout, b.getInt32(0)), b.getInt32Ty()));
+  } else {
+    int mask = id == vmIntrinsics::_getClassAccessFlags ? static_cast<int>(JVM_ACC_WRITTEN_FLAGS) :
+               id == vmIntrinsics::_isInterface ? static_cast<int>(JVM_ACC_INTERFACE) :
+                                                 static_cast<int>(JVM_ACC_IS_HIDDEN_CLASS);
+    llvm::Value* flags = _interp->call_java_op("jeandle.klass_access_flags", {klass, b.getInt32(mask)});
+    finish(id == vmIntrinsics::_getClassAccessFlags ? flags :
+           b.CreateZExt(b.CreateICmpNE(flags, b.getInt32(0)), b.getInt32Ty()));
+  }
+
+  b.SetInsertPoint(merge);
+  _interp->_block->set_tail_llvm_block(merge);
+  llvm::PHINode* result = b.CreatePHI(result_type, results.size(), "class.query_result");
+  for (const auto& incoming : results) {
+    result->addIncoming(incoming.first, incoming.second);
+  }
+  _interp->_jvm->push(result_basic_type, result);
+  return true;
+}
+
+bool JeandleIntrinsicLowering::lower_class_cast() {
+  ciKlass* holder = _interp->_bytecodes.get_declared_method_holder();
+  if (holder == nullptr) {
+    return false;
+  }
+  llvm::IRBuilder<>& b = _interp->_ir_builder;
+  llvm::LLVMContext& ctx = *_interp->_context;
+  llvm::Value* object = _interp->_jvm->apop();
+  llvm::Value* mirror = _interp->_jvm->apop();
+  llvm::BasicBlock* null_bb = b.GetInsertBlock();
+  llvm::BasicBlock* non_null_bb = llvm::BasicBlock::Create(ctx, "class.cast_non_null", _interp->_llvm_func);
+  llvm::BasicBlock* check_bb = llvm::BasicBlock::Create(ctx, "class.cast_check", _interp->_llvm_func);
+  llvm::BasicBlock* slow_bb = llvm::BasicBlock::Create(ctx, "class.cast_slow", _interp->_llvm_func);
+  llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx, "class.cast_merge", _interp->_llvm_func);
+  // Null succeeds even for primitive Class mirrors. The receiver was checked
+  // by invoke() before entering the intrinsic handler.
+  b.CreateCondBr(b.CreateIsNull(object), merge, non_null_bb);
+  b.SetInsertPoint(non_null_bb);
+  llvm::Value* klass = _interp->call_java_op("jeandle.load_mirror_klass", {mirror});
+  b.CreateCondBr(b.CreateIsNull(klass), slow_bb, check_bb);
+  b.SetInsertPoint(check_bb);
+  llvm::Value* matches = _interp->call_java_op("jeandle.check_instanceof", {klass, object});
+  b.CreateCondBr(matches, merge, slow_bb);
+  b.SetInsertPoint(slow_bb);
+  llvm::InvokeInst* slow = _interp->emit_java_call(
+      const_cast<ciMethod*>(_target), holder, _target->signature(), {mirror, object},
+      /*has_receiver=*/true, /*is_method_handle_invoke=*/false,
+      _interp->_bytecodes.cur_bc_raw(), /*call_does_dispatch=*/false);
+  RETURN_ON_JEANDLE_ERROR(true);
+  // Keep the original Java exception construction and message. A normal
+  // fallback also avoids repeatedly deoptimizing a frequently failing cast.
+  b.CreateBr(merge);
+  llvm::BasicBlock* slow_tail = b.GetInsertBlock();
+  b.SetInsertPoint(merge);
+  _interp->_block->set_tail_llvm_block(merge);
+  llvm::PHINode* result = b.CreatePHI(object->getType(), 3, "class.cast_result");
+  result->addIncoming(object, null_bb);
+  result->addIncoming(object, check_bb);
+  result->addIncoming(slow, slow_tail);
+  _interp->_jvm->push(T_OBJECT, result);
+  return true;
+}
+
+bool JeandleIntrinsicLowering::lower_caller_class() {
+  ciKlass* holder = _interp->_bytecodes.get_declared_method_holder();
+  if (holder == nullptr) {
+    return false;
+  }
+  // Inlinee IR is cached by method, so the original call remains until the
+  // LLVM inline driver can resolve its committed logical caller scope.
+  llvm::InvokeInst* call = _interp->emit_java_call(
+      const_cast<ciMethod*>(_target), holder, _target->signature(), {},
+      /*has_receiver=*/false, /*is_method_handle_invoke=*/false,
+      _interp->_bytecodes.cur_bc_raw(), /*call_does_dispatch=*/false);
+  RETURN_ON_JEANDLE_ERROR(true);
+  call->addFnAttr(llvm::Attribute::get(*_interp->_context, "jeandle-caller-class"));
+  _interp->_jvm->push(T_OBJECT, call);
   return true;
 }
