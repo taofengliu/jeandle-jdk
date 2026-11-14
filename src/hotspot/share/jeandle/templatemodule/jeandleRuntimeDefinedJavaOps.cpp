@@ -1257,6 +1257,12 @@ void RuntimeDefinedJavaOps::define_global_variables(llvm::Module& template_modul
   define_global("JavaThread.tlab_pf_top_offset",                    int64_type, static_cast<uint64_t>(JavaThread::tlab_pf_top_offset()));
   define_global("markWord.prototype_value",                         int64_type, static_cast<uint64_t>(markWord::prototype().value()));
 
+  define_global("JVM_ACC_PUBLIC", int32_type, static_cast<uint64_t>(JVM_ACC_PUBLIC));
+  define_global("JVM_ACC_FINAL", int32_type, static_cast<uint64_t>(JVM_ACC_FINAL));
+  define_global("JVM_ACC_ABSTRACT", int32_type, static_cast<uint64_t>(JVM_ACC_ABSTRACT));
+  define_global("JVM_ACC_INTERFACE", int32_type, static_cast<uint64_t>(JVM_ACC_INTERFACE));
+  define_global("JVM_ACC_IS_HIDDEN_CLASS", int32_type, static_cast<uint64_t>(JVM_ACC_IS_HIDDEN_CLASS));
+  define_global("JVM_ACC_WRITTEN_FLAGS", int32_type, static_cast<uint64_t>(JVM_ACC_WRITTEN_FLAGS));
   define_global("JVM_ACC_IS_VALUE_BASED_CLASS",                     int32_type, static_cast<uint64_t>(JVM_ACC_IS_VALUE_BASED_CLASS));
   define_global("JVM_ACC_HAS_FINALIZER",                            int32_type, static_cast<uint64_t>(JVM_ACC_HAS_FINALIZER));
   define_global("oopSize",                                          int32_type, static_cast<uint64_t>(oopSize));

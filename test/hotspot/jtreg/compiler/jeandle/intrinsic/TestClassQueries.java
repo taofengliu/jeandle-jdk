@@ -54,15 +54,21 @@ public class TestClassQueries {
                 compiled.shouldMatch("Method `[^\\n]*" + method + "[^\\n]*` is parsed as intrinsic");
             }
             new FileCheck(dump, Wrapper.class.getMethod("queryModifiers", Class.class), false)
-                    .checkPattern("call .*@jeandle\\.klass_modifiers");
+                    .checkPattern("call .*@jeandle\\.class_get_modifiers");
             new FileCheck(dump, Wrapper.class.getMethod("queryFlags", Class.class), false)
-                    .checkPattern("call .*@jeandle\\.klass_access_flags");
+                    .checkPattern("call .*@jeandle\\.class_get_access_flags");
             new FileCheck(dump, Wrapper.class.getMethod("queryAssignable", Class.class, Class.class), false)
                     .checkPattern("call .*@jeandle\\.check_klass_subtype");
             new FileCheck(dump, Wrapper.class.getMethod("queryFoldArray"), true).check("ret i32 1");
             new FileCheck(dump, Wrapper.class.getMethod("queryFoldModifiers"), true).check("ret i32 1041");
             new FileCheck(dump, Wrapper.class.getMethod("queryTyped", String.class), true)
                     .checkNotPattern("@jeandle\\.check_instanceof");
+            for (String method : List.of("queryMergeArray", "queryMergePrimitive", "queryMergeInterface")) {
+                new FileCheck(dump, Wrapper.class.getMethod(method, boolean.class), true).check("ret i32 1");
+            }
+            new FileCheck(dump, Wrapper.class.getMethod("queryMergeHidden", boolean.class), true).check("ret i32 0");
+            new FileCheck(dump, Wrapper.class.getMethod("queryMergeModifiers", boolean.class), true).check("ret i32 17");
+            new FileCheck(dump, Wrapper.class.getMethod("queryMergeFlags", boolean.class), true).check("ret i32 1041");
             FileCheck typed = new FileCheck(dump, Wrapper.class.getMethod("queryTyped", String.class), true);
             typed.checkPattern("icmp ne ptr addrspace\\(1\\) %0, null");
             typed.checkPattern("ret i32");
@@ -119,6 +125,25 @@ public class TestClassQueries {
         public static boolean queryPhi(boolean choice) {
             Class<?> c = choice ? String[].class : String[].class;
             return c.isArray();
+        }
+
+        public static boolean queryMergeArray(boolean choice) {
+            return (choice ? String[].class : int[].class).isArray();
+        }
+        public static boolean queryMergePrimitive(boolean choice) {
+            return (choice ? int.class : void.class).isPrimitive();
+        }
+        public static boolean queryMergeInterface(boolean choice) {
+            return (choice ? Runnable.class : Cloneable.class).isInterface();
+        }
+        public static boolean queryMergeHidden(boolean choice) {
+            return (choice ? String.class : Integer.class).isHidden();
+        }
+        public static int queryMergeModifiers(boolean choice) {
+            return (choice ? String.class : Integer.class).getModifiers();
+        }
+        public static int queryMergeFlags(boolean choice) {
+            return Reflection.getClassAccessFlags(choice ? int.class : void.class);
         }
 
         public static void main(String[] args) throws Exception {
@@ -201,6 +226,14 @@ public class TestClassQueries {
             Asserts.assertFalse(queryTyped(null));
             Asserts.assertTrue(queryFoldSuper() == Object.class);
             Asserts.assertTrue(queryPhi(true) && queryPhi(false));
+            for (boolean choice : new boolean[] {true, false}) {
+                Asserts.assertTrue(queryMergeArray(choice));
+                Asserts.assertTrue(queryMergePrimitive(choice));
+                Asserts.assertTrue(queryMergeInterface(choice));
+                Asserts.assertFalse(queryMergeHidden(choice));
+                Asserts.assertEquals(queryMergeModifiers(choice), 17);
+                Asserts.assertEquals(queryMergeFlags(choice), 1041);
+            }
             System.gc();
             Asserts.assertTrue(querySuper(String.class) == Object.class, "mirror survives collection");
             System.out.println("CLASS-RESULT:" + digest);

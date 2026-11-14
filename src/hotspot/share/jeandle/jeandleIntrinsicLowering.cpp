@@ -4256,12 +4256,24 @@ bool JeandleIntrinsicLowering::lower_class_query(vmIntrinsics::ID id) {
   }
   _interp->_jvm->apop();
 
-  llvm::Value* klass = _interp->call_java_op("jeandle.load_mirror_klass", {mirror});
-  llvm::Value* primitive = b.CreateIsNull(klass, "class.is_primitive");
-  if (id == vmIntrinsics::_isPrimitive) {
-    _interp->_jvm->push(T_BOOLEAN, b.CreateZExt(primitive, b.getInt32Ty()));
+  const char* property = nullptr;
+  switch (id) {
+    case vmIntrinsics::_getModifiers: property = "jeandle.class_get_modifiers"; break;
+    case vmIntrinsics::_getClassAccessFlags: property = "jeandle.class_get_access_flags"; break;
+    case vmIntrinsics::_isArray: property = "jeandle.class_is_array"; break;
+    case vmIntrinsics::_isInterface: property = "jeandle.class_is_interface"; break;
+    case vmIntrinsics::_isPrimitive: property = "jeandle.class_is_primitive"; break;
+    case vmIntrinsics::_isHidden: property = "jeandle.class_is_hidden"; break;
+    default: break;
+  }
+  if (property != nullptr) {
+    _interp->_jvm->push(_target->signature()->return_type()->basic_type(),
+                       _interp->call_java_op(property, {mirror}));
     return true;
   }
+
+  llvm::Value* klass = _interp->call_java_op("jeandle.load_mirror_klass", {mirror});
+  llvm::Value* primitive = b.CreateIsNull(klass, "class.is_primitive");
 
   const bool returns_mirror = id == vmIntrinsics::_getSuperclass;
   BasicType result_basic_type = _target->signature()->return_type()->basic_type();
@@ -4277,9 +4289,7 @@ bool JeandleIntrinsicLowering::lower_class_query(vmIntrinsics::ID id) {
   };
   b.CreateCondBr(primitive, primitive_bb, reference_bb);
   b.SetInsertPoint(primitive_bb);
-  if (id == vmIntrinsics::_getModifiers || id == vmIntrinsics::_getClassAccessFlags) {
-    finish(b.getInt32(JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT));
-  } else if (id == vmIntrinsics::_isAssignableFrom) {
+  if (id == vmIntrinsics::_isAssignableFrom) {
     finish(b.CreateZExt(b.CreateICmpEQ(mirror, argument), b.getInt32Ty()));
   } else {
     finish(zero);
@@ -4324,18 +4334,6 @@ bool JeandleIntrinsicLowering::lower_class_query(vmIntrinsics::ID id) {
     finish(b.CreateZExt(subtype, b.getInt32Ty()));
   } else if (id == vmIntrinsics::_isInstance) {
     finish(_interp->call_java_op("jeandle.instanceof", {klass, argument}));
-  } else if (id == vmIntrinsics::_getModifiers) {
-    finish(_interp->call_java_op("jeandle.klass_modifiers", {klass}));
-  } else if (id == vmIntrinsics::_isArray) {
-    llvm::Value* layout = _interp->call_java_op("jeandle.layout_helper", {klass});
-    finish(b.CreateZExt(b.CreateICmpSLT(layout, b.getInt32(0)), b.getInt32Ty()));
-  } else {
-    int mask = id == vmIntrinsics::_getClassAccessFlags ? static_cast<int>(JVM_ACC_WRITTEN_FLAGS) :
-               id == vmIntrinsics::_isInterface ? static_cast<int>(JVM_ACC_INTERFACE) :
-                                                 static_cast<int>(JVM_ACC_IS_HIDDEN_CLASS);
-    llvm::Value* flags = _interp->call_java_op("jeandle.klass_access_flags", {klass, b.getInt32(mask)});
-    finish(id == vmIntrinsics::_getClassAccessFlags ? flags :
-           b.CreateZExt(b.CreateICmpNE(flags, b.getInt32(0)), b.getInt32Ty()));
   }
 
   b.SetInsertPoint(merge);
@@ -4349,45 +4347,35 @@ bool JeandleIntrinsicLowering::lower_class_query(vmIntrinsics::ID id) {
 }
 
 bool JeandleIntrinsicLowering::lower_class_cast() {
-  ciKlass* holder = _interp->_bytecodes.get_declared_method_holder();
-  if (holder == nullptr) {
+  if (_interp->too_many_traps(_interp->_method, _interp->_bytecodes.cur_bci(),
+                              Deoptimization::Reason_intrinsic)) {
     return false;
   }
   llvm::IRBuilder<>& b = _interp->_ir_builder;
   llvm::LLVMContext& ctx = *_interp->_context;
-  llvm::Value* object = _interp->_jvm->apop();
-  llvm::Value* mirror = _interp->_jvm->apop();
-  llvm::BasicBlock* null_bb = b.GetInsertBlock();
+  // Preserve both operands for reexecution of the original invoke after a trap.
+  llvm::Value* object = _interp->_jvm->raw_peek(0).value();
+  llvm::Value* mirror = _interp->_jvm->raw_peek(1).value();
   llvm::BasicBlock* non_null_bb = llvm::BasicBlock::Create(ctx, "class.cast_non_null", _interp->_llvm_func);
   llvm::BasicBlock* check_bb = llvm::BasicBlock::Create(ctx, "class.cast_check", _interp->_llvm_func);
-  llvm::BasicBlock* slow_bb = llvm::BasicBlock::Create(ctx, "class.cast_slow", _interp->_llvm_func);
-  llvm::BasicBlock* merge = llvm::BasicBlock::Create(ctx, "class.cast_merge", _interp->_llvm_func);
+  llvm::BasicBlock* fail_bb = llvm::BasicBlock::Create(ctx, "class.cast_fail", _interp->_llvm_func);
+  llvm::BasicBlock* pass_bb = llvm::BasicBlock::Create(ctx, "class.cast_pass", _interp->_llvm_func);
   // Null succeeds even for primitive Class mirrors. The receiver was checked
   // by invoke() before entering the intrinsic handler.
-  b.CreateCondBr(b.CreateIsNull(object), merge, non_null_bb);
+  b.CreateCondBr(b.CreateIsNull(object), pass_bb, non_null_bb);
   b.SetInsertPoint(non_null_bb);
   llvm::Value* klass = _interp->call_java_op("jeandle.load_mirror_klass", {mirror});
-  b.CreateCondBr(b.CreateIsNull(klass), slow_bb, check_bb);
+  b.CreateCondBr(b.CreateIsNull(klass), fail_bb, check_bb);
   b.SetInsertPoint(check_bb);
   llvm::Value* matches = _interp->call_java_op("jeandle.check_instanceof", {klass, object});
-  b.CreateCondBr(matches, merge, slow_bb);
-  b.SetInsertPoint(slow_bb);
-  llvm::InvokeInst* slow = _interp->emit_java_call(
-      const_cast<ciMethod*>(_target), holder, _target->signature(), {mirror, object},
-      /*has_receiver=*/true, /*is_method_handle_invoke=*/false,
-      _interp->_bytecodes.cur_bc_raw(), /*call_does_dispatch=*/false);
-  RETURN_ON_JEANDLE_ERROR(true);
-  // Keep the original Java exception construction and message. A normal
-  // fallback also avoids repeatedly deoptimizing a frequently failing cast.
-  b.CreateBr(merge);
-  llvm::BasicBlock* slow_tail = b.GetInsertBlock();
-  b.SetInsertPoint(merge);
-  _interp->_block->set_tail_llvm_block(merge);
-  llvm::PHINode* result = b.CreatePHI(object->getType(), 3, "class.cast_result");
-  result->addIncoming(object, null_bb);
-  result->addIncoming(object, check_bb);
-  result->addIncoming(slow, slow_tail);
-  _interp->_jvm->push(T_OBJECT, result);
+  b.CreateCondBr(matches, pass_bb, fail_bb);
+  _interp->uncommon_trap(Deoptimization::Reason_intrinsic,
+                         Deoptimization::Action_maybe_recompile, fail_bb);
+  b.SetInsertPoint(pass_bb);
+  _interp->_block->set_tail_llvm_block(pass_bb);
+  _interp->_jvm->apop();
+  _interp->_jvm->apop();
+  _interp->_jvm->push(T_OBJECT, object);
   return true;
 }
 

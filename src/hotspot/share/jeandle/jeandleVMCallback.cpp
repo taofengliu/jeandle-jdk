@@ -530,6 +530,13 @@ uintptr_t JeandleVMCallback::get_mirror_klass(int oop_id) {
   return record_klass_metadata(klass);
 }
 
+int JeandleVMCallback::get_super_check_offset(uintptr_t klass_ptr) {
+  if (klass_ptr == 0) {
+    return -1;
+  }
+  return reinterpret_cast<Klass*>(klass_ptr)->super_check_offset();
+}
+
 int JeandleVMCallback::get_klass_modifiers(uintptr_t klass_ptr) {
   if (klass_ptr == 0) {
     return -1;
@@ -1183,6 +1190,7 @@ void JeandleVMCallback::register_callbacks() {
   callbacks.GetOopKlass = &JeandleVMCallback::get_oop_klass;
   callbacks.GetKlassConstant = &JeandleVMCallback::get_klass_constant;
   callbacks.GetMirrorKlass = &JeandleVMCallback::get_mirror_klass;
+  callbacks.GetSuperCheckOffset = &JeandleVMCallback::get_super_check_offset;
   callbacks.GetKlassModifiers = &JeandleVMCallback::get_klass_modifiers;
   callbacks.GetKlassAccessFlags = &JeandleVMCallback::get_klass_access_flags;
   callbacks.GetSuperKlass = &JeandleVMCallback::get_super_klass;

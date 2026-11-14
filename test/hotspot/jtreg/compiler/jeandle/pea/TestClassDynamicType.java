@@ -71,16 +71,16 @@ public class TestClassDynamicType {
                 report.round(0).after().assertAbsent("@jeandle.check_instanceof(");
                 report.round(0).after().assertPresent("@jeandle.check_klass_subtype(");
             }
-            for (Method target : new Method[] {instance, array, deopt, arrayDeopt}) {
+            for (Method target : new Method[] {instance, array, cast, arrayCast, deopt, arrayDeopt}) {
                 Asserts.assertEquals(run.report(target).finalAfter().peaAllocCount(), 0,
                         target + ": dynamic type inspection must not materialize");
                 Asserts.assertEquals(run.finalIR(target).loweredAllocCount(), 0);
             }
-            for (Method target : new Method[] {cast, arrayCast, publish}) {
+            for (Method target : new Method[] {publish}) {
                 PEATestUtils.PEAReport report = run.report(target);
                 Asserts.assertEquals(report.finalAfter().allocationBCIs(),
                         report.round0Before().allocationBCIs(),
-                        target + ": ordinary fallback/publication retains original identity");
+                        target + ": publication retains original identity");
             }
             String deoptCallee = PEATestUtils.MethodId.of(requestDeopt).llvmFunctionName();
             PEATestUtils.VirtualObjectDescriptor cell = run.report(deopt).finalAfter()
@@ -120,12 +120,14 @@ public class TestClassDynamicType {
                 testCast(String.class);
                 throw new AssertionError("incompatible instance cast succeeded");
             } catch (ClassCastException expected) {
+                Asserts.assertEquals(expected.getMessage(), "Cannot cast " + Cell.class.getName() + " to java.lang.String");
                 paths |= 256;
             }
             try {
                 testArrayCast(Object[].class);
                 throw new AssertionError("incompatible array cast succeeded");
             } catch (ClassCastException expected) {
+                Asserts.assertEquals(expected.getMessage(), "Cannot cast [I to [Ljava.lang.Object;");
                 paths |= 512;
             }
             check(testPublish(Cell.class) == 37 && ((Cell) published).value == 37, 1024);

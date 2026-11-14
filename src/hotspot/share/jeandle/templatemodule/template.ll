@@ -147,6 +147,12 @@
 @markWord.unused_mark_value = external global i64
 
 ; Global definitions
+@JVM_ACC_PUBLIC = external global i32
+@JVM_ACC_FINAL = external global i32
+@JVM_ACC_ABSTRACT = external global i32
+@JVM_ACC_INTERFACE = external global i32
+@JVM_ACC_IS_HIDDEN_CLASS = external global i32
+@JVM_ACC_WRITTEN_FLAGS = external global i32
 @JVM_ACC_IS_VALUE_BASED_CLASS = external global i32
 @JVM_ACC_HAS_FINALIZER = external global i32
 @oopSize = external global i32
@@ -290,7 +296,95 @@ entry:
   ret i32 %layout_helper
 }
 
-; Query a Klass' current initialization state. Keeping this opaque through
+; Keep complete Class properties visible until mirror merges are simplified.
+define hotspotcc i32 @jeandle.class_is_array(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  br i1 %primitive, label %primitive_result, label %reference
+primitive_result:
+  ret i32 0
+reference:
+  %layout = call hotspotcc i32 @jeandle.layout_helper(ptr %klass)
+  %test = icmp slt i32 %layout, 0
+  %result = zext i1 %test to i32
+  ret i32 %result
+}
+
+define hotspotcc i32 @jeandle.class_is_interface(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  br i1 %primitive, label %primitive_result, label %reference
+primitive_result:
+  ret i32 0
+reference:
+  %mask = load i32, ptr @JVM_ACC_INTERFACE
+  %flags = call hotspotcc i32 @jeandle.klass_access_flags(ptr %klass, i32 %mask)
+  %test = icmp ne i32 %flags, 0
+  %result = zext i1 %test to i32
+  ret i32 %result
+}
+
+define hotspotcc i32 @jeandle.class_is_primitive(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  %result = zext i1 %primitive to i32
+  ret i32 %result
+}
+
+define hotspotcc i32 @jeandle.class_is_hidden(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  br i1 %primitive, label %primitive_result, label %reference
+primitive_result:
+  ret i32 0
+reference:
+  %mask = load i32, ptr @JVM_ACC_IS_HIDDEN_CLASS
+  %flags = call hotspotcc i32 @jeandle.klass_access_flags(ptr %klass, i32 %mask)
+  %test = icmp ne i32 %flags, 0
+  %result = zext i1 %test to i32
+  ret i32 %result
+}
+
+define hotspotcc i32 @jeandle.class_get_modifiers(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  br i1 %primitive, label %primitive_result, label %reference
+primitive_result:
+  %public = load i32, ptr @JVM_ACC_PUBLIC
+  %final = load i32, ptr @JVM_ACC_FINAL
+  %abstract = load i32, ptr @JVM_ACC_ABSTRACT
+  %public_final = or i32 %public, %final
+  %primitive_flags = or i32 %public_final, %abstract
+  ret i32 %primitive_flags
+reference:
+  %result = call hotspotcc i32 @jeandle.klass_modifiers(ptr %klass)
+  ret i32 %result
+}
+
+define hotspotcc i32 @jeandle.class_get_access_flags(ptr addrspace(1) nocapture nonnull readonly %mirror) noinline "lower-phase"="1" #0 {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  %primitive = icmp eq ptr %klass, null
+  br i1 %primitive, label %primitive_result, label %reference
+primitive_result:
+  %public = load i32, ptr @JVM_ACC_PUBLIC
+  %final = load i32, ptr @JVM_ACC_FINAL
+  %abstract = load i32, ptr @JVM_ACC_ABSTRACT
+  %public_final = or i32 %public, %final
+  %primitive_flags = or i32 %public_final, %abstract
+  ret i32 %primitive_flags
+reference:
+  %mask = load i32, ptr @JVM_ACC_WRITTEN_FLAGS
+  %flags = call hotspotcc i32 @jeandle.klass_access_flags(ptr %klass, i32 %mask)
+  ret i32 %flags
+}
+
+; Query a Klass's current initialization state. Keeping this opaque through
 ; phase 0 lets ConstantFieldFolding replace the query with true for a constant
 ; Klass already known by the VM to be initialized. Otherwise phase 1 lowers it
 ; to the runtime state load, preserving later class initialization.
@@ -363,6 +457,42 @@ return_false:
 ; Check if the sub_klass extends from the super_klass using both primary and secondary supers.
 ; Fast path: checks primary super chain.
 ; Slow path: scans secondary supers array if needed.
+define hotspotcc i1 @jeandle.check_klass_subtype_with_offset(ptr addrspace(0) nocapture %sub_klass, ptr addrspace(0) nocapture %super_klass, i32 %super_check_offset) "lower-phase"="1" #0 {
+entry:
+  %is_same_klass = icmp eq ptr addrspace(0) %sub_klass, %super_klass
+  br i1 %is_same_klass, label %return_true, label %check_primary_supers
+
+check_primary_supers:
+  ; Load super_check klass from _primary_supers of the sub_klass.
+  %super_check_addr = getelementptr inbounds i8, ptr addrspace(0) %sub_klass, i32 %super_check_offset
+  %super_check = load atomic ptr addrspace(0), ptr addrspace(0) %super_check_addr unordered, align 8
+
+  %is_super_match = icmp eq ptr %super_klass, %super_check
+  br i1 %is_super_match, label %return_true, label %check_secondary_supers
+
+check_secondary_supers:
+  ; Check if there are secondary supers.
+  %secondary_super_cache_offset = load i32, ptr @Klass.secondary_super_cache_offset
+  %has_secondary = icmp eq i32 %super_check_offset, %secondary_super_cache_offset
+  br i1 %has_secondary, label %slow_path, label %return_false
+
+slow_path:
+  %is_subtype_slow = call hotspotcc i1 @jeandle.check_klass_subtype_slow_path(ptr addrspace(0) %sub_klass, ptr addrspace(0) %super_klass)
+  br i1 %is_subtype_slow, label %return_true, label %return_false
+
+return_true:
+  ret i1 true
+return_false:
+  ret i1 false
+}
+
+define hotspotcc i1 @jeandle.checkcast_nonnull_with_offset(ptr addrspace(0) nocapture %super_klass, ptr addrspace(1) nocapture nonnull %oop, i32 %super_check_offset) noinline "lower-phase"="1" #0 {
+entry:
+  %sub_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nonnull %oop)
+  %is_subtype = call hotspotcc i1 @jeandle.check_klass_subtype_with_offset(ptr addrspace(0) %sub_klass, ptr addrspace(0) %super_klass, i32 %super_check_offset)
+  ret i1 %is_subtype
+}
+
 define hotspotcc i1 @jeandle.check_klass_subtype(ptr addrspace(0) nocapture %sub_klass, ptr addrspace(0) nocapture %super_klass) "lower-phase"="1" #0 {
 entry:
   %is_same_klass = icmp eq ptr addrspace(0) %sub_klass, %super_klass
