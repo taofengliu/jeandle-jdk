@@ -230,7 +230,7 @@ public final class PEATestUtils {
     );
     private static final Pattern STATS = Pattern.compile(
             "^;; PEA stats @(.*): NeverEscapes=(\\d+) PartiallyEscapes=(\\d+)"
-                    + " AlwaysEscapes=(\\d+)$"
+                    + " AlwaysEscapes=(\\d+)(?: CopyFolds=(\\d+))?$"
     );
     private static final Pattern SUMMARY = Pattern.compile(
             "^;; PEA-SUMMARY function (.*?) rounds=(\\S+) stop=(\\S+)$"
@@ -1191,6 +1191,7 @@ public final class PEATestUtils {
         private final int neverEscapes;
         private final int partiallyEscapes;
         private final int alwaysEscapes;
+        private final int copyFolds;
         private final List<PEAEffect> effects;
         private final List<PEALockReplay> lockReplays;
         private final Map<PEALockReplayGroup, List<PEALockReplay>> lockReplayGroups;
@@ -1201,6 +1202,7 @@ public final class PEATestUtils {
 
         private PEARound(int iteration, IRBody before, IRBody after,
                          int neverEscapes, int partiallyEscapes, int alwaysEscapes,
+                         int copyFolds,
                          List<PEAEffect> effects, List<PEALockReplay> lockReplays,
                          boolean hasStats, boolean transformIdle) {
             this.iteration = iteration;
@@ -1209,6 +1211,7 @@ public final class PEATestUtils {
             this.neverEscapes = neverEscapes;
             this.partiallyEscapes = partiallyEscapes;
             this.alwaysEscapes = alwaysEscapes;
+            this.copyFolds = copyFolds;
             this.effects = List.copyOf(effects);
             this.lockReplays = List.copyOf(lockReplays);
             LockReplayGrouping grouping = groupLockReplays(this.lockReplays, iteration);
@@ -1243,6 +1246,13 @@ public final class PEATestUtils {
         public int alwaysEscapes() {
             requireStats();
             return alwaysEscapes;
+        }
+
+        /** jeandle.copy pseudo calls folded this round, or -1 when the
+         *  statistics line predates the CopyFolds field. */
+        public int copyFolds() {
+            requireStats();
+            return copyFolds;
         }
 
         public boolean hasStats() {
@@ -1704,6 +1714,9 @@ public final class PEATestUtils {
                     current.never = Integer.parseInt(stats.group(2));
                     current.partial = Integer.parseInt(stats.group(3));
                     current.always = Integer.parseInt(stats.group(4));
+                    if (stats.group(5) != null) {
+                        current.copyFolds = Integer.parseInt(stats.group(5));
+                    }
                     continue;
                 }
 
@@ -1797,6 +1810,7 @@ public final class PEATestUtils {
         private int never;
         private int partial;
         private int always;
+        private int copyFolds = -1;
 
         private RoundBuilder(int iteration) {
             this.iteration = iteration;
@@ -1816,7 +1830,8 @@ public final class PEATestUtils {
             return new PEARound(iteration,
                     IRBody.fromModuleLines(beforeLines, method),
                     IRBody.fromModuleLines(afterLines, method),
-                    never, partial, always, effects, lockReplays, statsSeen, transformIdle);
+                    never, partial, always, copyFolds,
+                    effects, lockReplays, statsSeen, transformIdle);
         }
 
         private void validateEffects(MethodId method) {
@@ -4081,6 +4096,11 @@ public final class PEATestUtils {
                     + "catchret|cleanupret|unreachable)\\b");
     private static final Pattern ASSIGNED_OPCODE = Pattern.compile(
             "^" + LLVM_LOCAL_NAME + "\\s*=\\s*([a-z][a-z0-9.]*)\\b");
+    private static final Pattern FIXED_VECTOR_OPERAND = Pattern.compile(
+            "^<(\\d+) x ([^<>]+)>\\s+(.+)$");
+    private static final Pattern SHUFFLE_INDEX = Pattern.compile("^i32 (\\d+)$");
+    private static final Pattern SHUFFLE_SPLAT = Pattern.compile(
+            "^splat\\s*\\(i32 (\\d+)\\)$");
     private static final Set<String> PURE_POISON_OPCODES = Set.of(
             "add", "fadd", "sub", "fsub", "mul", "fmul", "udiv", "sdiv",
             "fdiv", "urem", "srem", "frem", "shl", "lshr", "ashr", "and",
@@ -4149,6 +4169,7 @@ public final class PEATestUtils {
     public static void assertStructuralParserContracts() {
         assertPhiParserContracts();
         assertCrossProcessNormalizerContracts();
+        assertShufflePoisonParserContracts();
 
         List<String> deadConstantBranch = List.of(
                 "entry:",
@@ -4285,6 +4306,49 @@ public final class PEATestUtils {
                 usedFrozenPoison, "used frozen poison", "synthetic");
     }
 
+    private static void assertShufflePoisonParserContracts() {
+        String first = "<4 x i16> %input, <4 x i16> poison, ";
+        String second = "<4 x i16> poison, <4 x i16> %input, ";
+        for (String operands : List.of(
+                first + "<2 x i32> <i32 0, i32 4>",
+                second + "<2 x i32> <i32 3, i32 4>",
+                first + "<2 x i32> <i32 0, i32 poison>",
+                first + "<2 x i32> poison",
+                "<4 x i16> %left, <4 x i16> %right, <2 x i32> poison",
+                "<4 x i16> %left, <4 x i16> %right, "
+                        + "<2 x i32> <i32 0, i32 poison>",
+                first + "<2 x i32> <i32 0, i32 undef>",
+                first + "<2 x i32> %unknown",
+                first + "<2 x i32> <i32 0, i32 8>",
+                "<4 x i16> <i16 poison, i16 2, i16 3, i16 4>, "
+                        + "<4 x i16> zeroinitializer, <2 x i32> zeroinitializer")) {
+            Asserts.assertTrue(rejectsLivePoison(List.of(
+                    "entry:", "%value = shufflevector " + operands,
+                    "ret <2 x i16> %value"), "selected or unproven shuffle poison"),
+                    "shuffle parser must reject selected poison and unproven masks: "
+                            + operands);
+        }
+
+        for (String operands : List.of(
+                first + "<2 x i32> <i32 0, i32 3>",
+                second + "<2 x i32> <i32 4, i32 7>",
+                first + "<2 x i32> zeroinitializer",
+                first + "<2 x i32> splat (i32 1)",
+                "<4 x i16> <i16 1, i16 2, i16 3, i16 4>, "
+                        + "<4 x i16> poison, <2 x i32> <i32 1, i32 2>")) {
+            validateNoLivePoison(List.of(
+                    "entry:", "%value = shufflevector " + operands,
+                    "ret <2 x i16> %value"), "unselected shuffle poison", "synthetic");
+        }
+        validateNoLivePoison(List.of(
+                "entry:",
+                "%low = shufflevector <16 x i16> %vector, <16 x i16> poison, "
+                        + "<8 x i32> <i32 0, i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7>",
+                "%bytes = trunc <8 x i16> %low to <8 x i8>",
+                "store <8 x i8> %bytes, ptr %output, align 1",
+                "ret void"), "narrowed valid lower shuffle lanes", "synthetic");
+    }
+
     private static void assertCrossProcessNormalizerContracts() {
         List<String> runtimeFunctionsFirst = List.of(
                 "define void @\"pkg_Test_work()V.111111.root\"() {",
@@ -4404,6 +4468,7 @@ public final class PEATestUtils {
             String instruction = withoutInlineComment(lines.get(i));
             String reachableInstruction = withoutUnreachablePhiIncoming(
                     instruction, reachability.blocks());
+            reachableInstruction = withoutUnselectedShuffleOperands(reachableInstruction);
             if (!containsPoison(reachableInstruction)) {
                 continue;
             }
@@ -4418,6 +4483,70 @@ public final class PEATestUtils {
                 throw new IllegalStateException(context + ": live poison in "
                         + method + ": " + instruction);
             }
+        }
+    }
+
+    // A fixed shuffle depends only on the input lanes named by its constant mask.
+    // Unknown masks remain conservative, as do poison lanes in a selected input.
+    private static String withoutUnselectedShuffleOperands(String instruction) {
+        Matcher opcode = ASSIGNED_OPCODE.matcher(instruction);
+        if (!opcode.find() || !opcode.group(1).equals("shufflevector")) {
+            return instruction;
+        }
+        try {
+            List<String> operands = splitTopLevelSegments(
+                    instruction.substring(opcode.end()).trim(), "shuffle operands");
+            if (operands.size() != 3) {
+                return instruction;
+            }
+            Matcher first = FIXED_VECTOR_OPERAND.matcher(operands.get(0));
+            Matcher second = FIXED_VECTOR_OPERAND.matcher(operands.get(1));
+            Matcher mask = FIXED_VECTOR_OPERAND.matcher(operands.get(2));
+            if (!first.matches() || !second.matches() || !mask.matches()
+                    || !first.group(1).equals(second.group(1))
+                    || !first.group(2).equals(second.group(2))
+                    || !mask.group(2).equals("i32")) {
+                return instruction;
+            }
+            int inputLanes = Integer.parseInt(first.group(1));
+            int resultLanes = Integer.parseInt(mask.group(1));
+            if (inputLanes <= 0 || resultLanes <= 0) {
+                return instruction;
+            }
+            String maskValue = mask.group(3);
+            Matcher splat = SHUFFLE_SPLAT.matcher(maskValue);
+            List<String> indices;
+            if (maskValue.equals("zeroinitializer")) {
+                indices = List.of("i32 0");
+            } else if (splat.matches()) {
+                indices = List.of("i32 " + splat.group(1));
+            } else if (maskValue.startsWith("<") && maskValue.endsWith(">")) {
+                indices = splitTopLevelSegments(
+                        maskValue.substring(1, maskValue.length() - 1), "shuffle mask");
+                if (indices.size() != resultLanes) {
+                    return instruction;
+                }
+            } else {
+                return instruction;
+            }
+            boolean usesFirst = false;
+            boolean usesSecond = false;
+            for (String index : indices) {
+                Matcher lane = SHUFFLE_INDEX.matcher(index);
+                if (!lane.matches()) {
+                    return instruction;
+                }
+                long selected = Long.parseLong(lane.group(1));
+                if (selected >= 2L * inputLanes) {
+                    return instruction;
+                }
+                usesFirst |= selected < inputLanes;
+                usesSecond |= selected >= inputLanes;
+            }
+            return (usesFirst ? operands.get(0) : "") + ", "
+                    + (usesSecond ? operands.get(1) : "") + ", " + operands.get(2);
+        } catch (IllegalArgumentException malformed) {
+            return instruction;
         }
     }
 

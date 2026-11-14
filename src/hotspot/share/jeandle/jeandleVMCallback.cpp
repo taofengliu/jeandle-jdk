@@ -36,6 +36,7 @@
 #include "jeandle/jeandleProfile.hpp"
 
 #include "jeandle/__hotspotHeadersBegin__.hpp"
+#include "ci/ciArray.hpp"
 #include "ci/ciClassList.hpp"
 #include "ci/ciEnv.hpp"
 #include "ci/ciInstanceKlass.hpp"
@@ -47,16 +48,19 @@
 #include "ci/ciField.hpp"
 #include "ci/ciInstance.hpp"
 #include "ci/ciMetadata.hpp"
+#include "ci/ciMethod.hpp"
 #include "ci/ciObject.hpp"
 #include "ci/ciType.hpp"
 #include "ci/ciUtilities.inline.hpp"
 #include "code/oopRecorder.hpp"
 #include "logging/log.hpp"
+#include "oops/arrayOop.hpp"
 #include "oops/fieldInfo.inline.hpp"
 #include "oops/fieldStreams.inline.hpp"
 #include "oops/instanceMirrorKlass.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/klass.inline.hpp"
+#include "oops/klassVtable.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/typeArrayKlass.hpp"
 #include "runtime/globals.hpp"
@@ -123,6 +127,12 @@ bool constant_field(int oop_id, int offset, ciField*& field, ciConstant& con, in
   }
 
   if (base_oop->is_array()) {
+    // Array length is immutable even when its elements are not stable.
+    if (offset == arrayOopDesc::length_offset_in_bytes()) {
+      con = ciConstant(T_INT, base_oop->as_array()->length());
+      return true;
+    }
+
     JeandleCompilation* compilation = JeandleCompilation::current();
     JeandleCompiledCode* compiled_code = compilation->compiled_code();
     int base_stable_dimension = compiled_code->stable_array_dimension(oop_id);
@@ -403,7 +413,7 @@ JeandleVMCallback::get_constant_field(int oop_id, int offset) {
 
   int basic_type;
   if (field == nullptr) {
-    // @Stable array element.
+    // Array length or @Stable array element.
     basic_type = con.basic_type();
   } else {
     // Instance or static field.
@@ -560,6 +570,60 @@ int JeandleVMCallback::get_klass_access_flags(uintptr_t klass_ptr) {
 bool JeandleVMCallback::is_hidden_klass(uintptr_t klass_ptr) {
   Klass* klass = reinterpret_cast<Klass*>(klass_ptr);
   return klass->is_hidden();
+}
+
+llvm::jeandle::ConstantFieldResult
+JeandleVMCallback::get_klass_constant_field(uintptr_t klass_ptr, int offset,
+                                           int bit_width) {
+  if (klass_ptr == 0 || offset < 0) {
+    return {-1, 0};
+  }
+  VM_ENTRY_MARK;
+  Klass* klass = reinterpret_cast<Klass*>(klass_ptr);
+  ciEnv* env = ciEnv::current();
+  ciMetadata* metadata = env->get_metadata(reinterpret_cast<Metadata*>(klass));
+  if (metadata == nullptr || !metadata->is_klass() || !metadata->is_loaded()) {
+    return {-1, 0};
+  }
+  ciKlass* ci_klass = metadata->as_klass();
+
+  // Klass access flags are set during class-file parsing. Match C2's
+  // LoadNode::load_array_final_field folding of the full flags word.
+  if (offset == in_bytes(Klass::access_flags_offset()) && bit_width == 32) {
+    record_klass_metadata(ci_klass);
+    return {T_INT, ci_klass->access_flags()};
+  }
+
+  // Vtable entries are available only after linking. A known Klass has an
+  // exact dispatch table even when its Java type admits subclasses.
+  if ((!klass->is_instance_klass() && !klass->is_array_klass()) ||
+      (ci_klass->is_instance_klass() && !ci_klass->as_instance_klass()->is_linked()) ||
+      bit_width != BitsPerWord) {
+    return {-1, 0};
+  }
+  const int entry_offset = offset - in_bytes(Klass::vtable_start_offset()) -
+                           in_bytes(vtableEntry::method_offset());
+  if (entry_offset < 0 || entry_offset % vtableEntry::size_in_bytes() != 0) {
+    return {-1, 0};
+  }
+  const int index = entry_offset / vtableEntry::size_in_bytes();
+  klassVtable vtable = klass->vtable();
+  if (index >= vtable.length()) {
+    return {-1, 0};
+  }
+  Method* target = vtable.unchecked_method_at(index);
+  if (target == nullptr) {
+    return {-1, 0};
+  }
+  ciMethod* method = env->get_method(target);
+  record_klass_metadata(ci_klass);
+  // The embedded method must remain discoverable for unloading, and
+  // redefinition can replace a vtable entry. The evolution dependency covers
+  // both: Dependencies::encode_content_bytes records every dependency
+  // argument, including this method, in the oop recorder at install time.
+  Metadata* encoding = method->constant_encoding();
+  env->dependencies()->assert_evol_method(method);
+  return {T_ADDRESS, static_cast<int64_t>(reinterpret_cast<uintptr_t>(encoding))};
 }
 
 bool JeandleVMCallback::is_klass_initialized(uintptr_t klass_ptr) {
@@ -1073,9 +1137,11 @@ uintptr_t JeandleVMCallback::get_signature_arg_type_klass(uintptr_t method, int 
 
 llvm::jeandle::CloneInstanceInfoResult
 JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
-                                           bool klass_exact) {
+                                           bool klass_exact,
+                                           llvm::jeandle::CloneInstanceInfoPurpose purpose) {
   VM_ENTRY_MARK;
   using llvm::jeandle::CloneInstanceFieldInfo;
+  using llvm::jeandle::CloneInstanceInfoPurpose;
   using llvm::jeandle::CloneInstanceInfoStatus;
 
   Klass* holder = reinterpret_cast<Klass*>(klass_ptr);
@@ -1089,21 +1155,36 @@ JeandleVMCallback::get_clone_instance_info(uintptr_t klass_ptr,
   }
   ciInstanceKlass* ik = meta->as_instance_klass();
 
-  // Match ArrayCopyNode::get_count(). Injected fields are not represented by
-  // nof_nonstatic_fields(), so C2 declines rather than copying an incomplete
-  // instance layout.
+  // Injected fields are not represented by nof_nonstatic_fields(), so the
+  // layout would be incomplete — decline for every caller.
   if ((!klass_exact && (ik->is_interface() || ik->has_subklass())) ||
       ik->has_injected_fields()) {
     return {static_cast<int>(CloneInstanceInfoStatus::NotApplicable), -1, {}};
   }
   const int field_count = ik->nof_nonstatic_fields();
-  if (field_count > ArrayCopyLoadStoreMaxElem) {
+  if (purpose != CloneInstanceInfoPurpose::FieldState &&
+      purpose != CloneInstanceInfoPurpose::ScalarCopy) {
     return {static_cast<int>(CloneInstanceInfoStatus::NotApplicable),
             field_count, {}};
   }
 
-  if (copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true,
-                                      T_OBJECT)) {
+  // Match ArrayCopyNode::get_count() for raw load/store copy expansion.
+  // Field-state folding needs the complete layout without this expansion bound.
+  if (purpose == CloneInstanceInfoPurpose::ScalarCopy &&
+      field_count > ArrayCopyLoadStoreMaxElem) {
+    return {static_cast<int>(CloneInstanceInfoStatus::NotApplicable),
+            field_count, {}};
+  }
+
+  // Semantic field loads need no read barriers with the supported collectors;
+  // InsertGCBarriers handles any ordinary reference stores emitted by replay.
+  // A collector with read barriers needs its own semantic-load support before
+  // being admitted here. Raw copy expansion retains the bulk barrier policy.
+  const bool requires_gc_barriers =
+      purpose == CloneInstanceInfoPurpose::ScalarCopy
+          ? copy_requires_gc_barriers(/*tightly_coupled_alloc=*/true, T_OBJECT)
+          : !(UseG1GC || UseSerialGC);
+  if (requires_gc_barriers) {
     return {
         static_cast<int>(CloneInstanceInfoStatus::RequiresGCBarriers),
         field_count, {}};
@@ -1161,6 +1242,7 @@ void JeandleVMCallback::register_callbacks() {
   callbacks.GetKlassModifierFlags = &JeandleVMCallback::get_klass_modifier_flags;
   callbacks.GetKlassAccessFlags = &JeandleVMCallback::get_klass_access_flags;
   callbacks.IsHiddenKlass = &JeandleVMCallback::is_hidden_klass;
+  callbacks.GetKlassConstantField = &JeandleVMCallback::get_klass_constant_field;
   callbacks.IsKlassInitialized = &JeandleVMCallback::is_klass_initialized;
   callbacks.GetJavaMirror = &JeandleVMCallback::get_java_mirror;
   callbacks.GetInlineCalleeIR = &JeandleVMCallback::get_inline_callee_ir;
