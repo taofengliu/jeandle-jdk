@@ -60,8 +60,11 @@ public class TestLibmConstantEval {
             raw.checkPatternAnywhere("call double (@StubRoutines_d|@SharedRuntime_d|inttoptr)");
             // The optimized dump folds the call into a hex double constant.
             FileCheck optimized = new FileCheck(dump, method, true);
-            optimized.checkNot("StubRoutines_d");
-            optimized.checkNot("SharedRuntime_d");
+            // Unused runtime aliases can remain in the module. Only an
+            // executed call would mean constant evaluation did not fold.
+            optimized.checkNot("call double @StubRoutines_d");
+            optimized.checkNot("call double @SharedRuntime_d");
+            optimized.checkNot("call double inttoptr");
             optimized.checkPatternAnywhere("fadd double .*0x");
         }
     }

@@ -46,9 +46,10 @@ public class TestStripMinedLoopShapes {
     private static final int BUDGET = 8;
     private static final String STRUCTURAL_OPTIONS =
         "--print-after=safepoint-strip-mining " +
+        "--print-after=safepoint-budget-strip-mining " +
         "--print-after=safepoint-poll-elimination";
     private static final String TRACE_OPTIONS =
-        "--debug-only=safepoint-strip-mining,safepoint-poll-elimination";
+        "--debug-only=safepoint-strip-mining,safepoint-budget-strip-mining,safepoint-poll-elimination";
     private static final String[] SCENARIOS = {
         "exclusiveLess", "decreasingArray", "notEqualIncreasing",
         "strideTwoConstant", "arrayLength", "twoRecurrences",
@@ -360,13 +361,17 @@ public class TestStripMinedLoopShapes {
             method + ": the relocated outer poll must carry the marker attribute");
     }
 
-    private static void assertUnminedWithPoll(String output, String method) {
+    private static void assertBudgetMined(String output, String method) {
         Asserts.assertTrue(minedSection(output, method).isEmpty(),
-            method + ": unsupported shape must remain unwrapped");
+            method + ": expected the independent-counter fallback");
+        String batch = IRDumpParser.extractNthSection(
+            output, "After", "SafepointBudgetStripMining", suffix(method), 0);
+        Asserts.assertTrue(batch.contains(".batch.poll"),
+            method + ": missing bounded-counter outer poll");
         String afterElimination = IRDumpParser.extractNthSection(
             output, "After", "SafepointPollElimination", suffix(method), 1);
         Asserts.assertEquals(IRDumpParser.countPolls(afterElimination), 2,
-            method + ": the original loop poll and return poll must survive");
+            method + ": the outer poll and return poll must survive");
     }
 
     private static void runStructural() throws Exception {
@@ -380,9 +385,9 @@ public class TestStripMinedLoopShapes {
         assertMined(output, "twoRecurrences");
         assertMined(output, "withContinue");
         assertMined(output, "withEarlyReturn");
-        assertUnminedWithPoll(output, "decreasingArray");
-        assertUnminedWithPoll(output, "arrayLength");
-        assertUnminedWithPoll(output, "withBreak");
+        assertBudgetMined(output, "decreasingArray");
+        assertBudgetMined(output, "arrayLength");
+        assertBudgetMined(output, "withBreak");
 
         Asserts.assertTrue(minedSection(output, "exactBudget").isEmpty(),
             "exactBudget: a loop of exactly N iterations is within budget");
@@ -417,6 +422,9 @@ public class TestStripMinedLoopShapes {
         assertTrace(output, "decreasingArray", "inclusive loop not versionable");
         assertTrace(output, "arrayLength", "no canonical integer induction");
         assertTrace(output, "withBreak", "no supported latch compare");
+        for (String method : List.of("decreasingArray", "arrayLength", "withBreak")) {
+            assertTrace(output, method, "bounded-counter batch:");
+        }
         assertTrace(output, "exactBudget", "within budget (short loop)");
     }
 }
