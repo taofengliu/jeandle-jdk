@@ -212,7 +212,7 @@ public class TestStripMinedLoopVersioning {
         Asserts.assertFalse(IRDumpParser.traceChunkContains(
                 output, suffix(method), "strip-mine: wrapped loop"),
             method + ": rejected loop must remain unwrapped");
-        assertTrace(output, method, "keep-one");
+        assertTrace(output, method, "retained-poll-cut (kept 1 of 1)");
     }
 
     private static void runStructural() throws Exception {

@@ -37,7 +37,7 @@ public class TestSafepointBudgetLoops {
     private static volatile int sink;
     private static volatile Object live;
     private static final String[] METHODS = {
-        "current", "widened", "irregular", "swapping", "covered"
+        "current", "widened", "irregular", "swapping", "covered", "split"
     };
 
     static int current(int n) {
@@ -82,6 +82,24 @@ public class TestSafepointBudgetLoops {
         return sum + (a == b ? 1 : 0);
     }
 
+    static int split(int[] steps, int n, int stop) {
+        int sum = 0;
+        int i = 0;
+        while (i < n) {
+            if (i == stop) break;
+            if ((i & 1) == 0) {
+                sum += i;
+                sink = sum;
+                i += steps[i & 3];
+                continue;
+            }
+            sum -= i;
+            sink = sum;
+            i += steps[i & 3];
+        }
+        return sum ^ i;
+    }
+
     static int callA(int i) { sink = i; return i + 1; }
     static int callB(int i) { sink = i; return i - 1; }
 
@@ -107,6 +125,13 @@ public class TestSafepointBudgetLoops {
                 int sum = 0;
                 for (int j = 0; j < n && j != stop; j += steps[j & 3]) sum += j;
                 Asserts.assertEquals(irregular(steps, n, stop), sum, "side exit");
+                int splitSum = 0;
+                int j = 0;
+                for (; j < n && j != stop; j += steps[j & 3]) {
+                    splitSum += (j & 1) == 0 ? j : -j;
+                }
+                Asserts.assertEquals(split(steps, n, stop), splitSum ^ j,
+                                     "split backedge state");
             }
             int sum = 0;
             for (int j = 0; j < n; j += steps[j & 3]) sum += j;
@@ -134,7 +159,7 @@ public class TestSafepointBudgetLoops {
             return;
         }
         for (boolean pea : new boolean[] {false, true}) {
-            for (int budget : new int[] {0, 1, 4, 32}) {
+            for (int budget : new int[] {0, 1, 2, 4, 32}) {
                 List<String> cmd = new ArrayList<>(List.of(
                     "-Xcomp", "-Xbatch", "-XX:-TieredCompilation",
                     "-XX:+UnlockDiagnosticVMOptions", "-XX:+UseJeandleCompiler",
@@ -168,8 +193,14 @@ public class TestSafepointBudgetLoops {
                         String batch = IRDumpParser.extractNthSection(
                             out.getOutput(), "After", "SafepointBudgetStripMining", suffix, 0);
                         Asserts.assertFalse(batch.isEmpty(), method + ": missing fallback pass");
-                        Asserts.assertTrue(batch.contains(".batch.poll") || batch.contains(".outer.latch"),
+                        Asserts.assertTrue(batch.contains(".batch.poll") || batch.contains(".outer.latch")
+                            || (batch.contains("batch.outer:") && batch.contains(".fast:")),
                                            method + ": expected a bounded batch, PEA=" + pea);
+                        if (method.equals("split")) {
+                            Asserts.assertTrue(batch.contains("batch.outer:")
+                                    && batch.contains(".fast:"),
+                                    "split backedges must reach clone fallback, PEA=" + pea);
+                        }
                     } else {
                         Asserts.assertFalse(early.contains(".batch.poll"), "disabled fallback");
                     }

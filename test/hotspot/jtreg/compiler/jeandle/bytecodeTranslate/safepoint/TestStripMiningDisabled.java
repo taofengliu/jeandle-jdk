@@ -55,7 +55,7 @@ import jdk.test.lib.process.ProcessTools;
  *    int loop and the exact-boundary loop polling, while deleting the loop
  *    whose constant maximum is immediately below the threshold.
  *  - The constant loop becomes deopt-state-only and is deleted atomically by
- *    loop-deletion-prep. Runtime-bound long loops keep one poll (keep-one).
+ *    loop-deletion-prep. Runtime-bound long loops keep one poll (a retained poll cut).
  *
  * Each mode (structural / trace) spawns two children: one disables Jeandle
  * strip mining while enabling C2 counted-loop safepoints, and the other enables
@@ -275,17 +275,16 @@ public class TestStripMiningDisabled {
     }
 
     private static void checkDisabledStructural(String out, String variant) {
-        // Runtime-bound pre-test int loop: its symbolic maximum backedge count
-        // is INT_MAX, so it does not satisfy the strict exclusive threshold.
+        // The runtime-bound pre-test int loop has a maximum of INT_MAX
+        // backedges, below the full 32-bit iteration-range threshold.
         String intSuffix = CLASS + "_countedIntRuntimeBound";
         checkPipelineShape(out, intSuffix, variant);
-        Asserts.assertEquals(pollsInEarlyAfter(out, intSuffix), 2,
-            variant + ": " + intSuffix + ": boundary-risk loop must retain its loop poll");
+        Asserts.assertEquals(pollsInEarlyAfter(out, intSuffix), 1,
+            variant + ": " + intSuffix + ": bounded int loop must leave only its return poll");
 
-        // A constant maximum immediately below INT_MAX satisfies the strict
-        // threshold, while a maximum equal to INT_MAX does not. The false
-        // runtime guard keeps these structural tests fast without making the
-        // branch constant during compilation.
+        // Both signed-maximum boundaries lie within the full 32-bit policy.
+        // The false runtime guard avoids executing billions of iterations
+        // without making the branch constant during compilation.
         String belowSuffix = CLASS + "_countedIntBelowExclusiveLimit";
         checkPipelineShape(out, belowSuffix, variant);
         Asserts.assertEquals(pollsInEarlyAfter(out, belowSuffix), 1,
@@ -293,8 +292,8 @@ public class TestStripMiningDisabled {
 
         String atSuffix = CLASS + "_countedIntAtExclusiveLimit";
         checkPipelineShape(out, atSuffix, variant);
-        Asserts.assertEquals(pollsInEarlyAfter(out, atSuffix), 2,
-            variant + ": " + atSuffix + ": exact-limit loop must retain its loop poll");
+        Asserts.assertEquals(pollsInEarlyAfter(out, atSuffix), 1,
+            variant + ": " + atSuffix + ": signed-maximum loop must leave only its return poll");
 
         // Constant-bounded int loop: its live recurrence is needed only by the
         // loop poll's deopt state, so deletion prep removes the loop and poll
@@ -308,30 +307,29 @@ public class TestStripMiningDisabled {
         Asserts.assertEquals(IRDumpParser.countPolls(afterDeletionPrep), 1,
             variant + ": " + constSuffix + ": deletion prep must leave only the return poll");
 
-        // Runtime-bound long loop: keep-one, same reasoning as the int case.
+        // An unbounded long range still requires a loop poll.
         String longSuffix = CLASS + "_countedLongRuntimeBound";
         checkPipelineShape(out, longSuffix, variant);
         Asserts.assertEquals(pollsInEarlyAfter(out, longSuffix), 2,
-            variant + ": " + longSuffix + ": keep-one must leave the loop poll plus the return poll");
+            variant + ": " + longSuffix + ": coverage must leave the loop poll plus the return poll");
     }
 
     private static void checkDisabledTrace(String out, String variant) {
         String intSuffix = CLASS + "_countedIntRuntimeBound";
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, intSuffix, "keep-one (keeper in"),
-            variant + ": " + intSuffix + ": exact symbolic limit must retain one loop poll");
-        // Match the pass-header prefix, not the bare word: the delete-all reason
-        // string "int-counted-no-strip-mining" contains "strip-mining".
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, intSuffix, "retained-poll-cut (kept 0 of 1)"),
+            variant + ": " + intSuffix + ": proven full int range must delete its loop poll");
+        // Match the pass-header prefix to distinguish mining from cleanup.
         Asserts.assertFalse(IRDumpParser.traceChunkContains(out, intSuffix, "strip-mining<"),
             variant + ": " + intSuffix + ": the strip-mining pass must not run when disabled");
 
         String belowSuffix = CLASS + "_countedIntBelowExclusiveLimit";
         Asserts.assertTrue(IRDumpParser.traceChunkContains(out, belowSuffix,
-                "delete-all (int-counted-no-strip-mining), erased 1 of 1 poll(s)"),
+                "retained-poll-cut (kept 0 of 1)"),
             variant + ": " + belowSuffix + ": below-limit loop must delete its loop poll");
 
         String atSuffix = CLASS + "_countedIntAtExclusiveLimit";
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, atSuffix, "keep-one (keeper in"),
-            variant + ": " + atSuffix + ": exact-limit loop must retain one loop poll");
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, atSuffix, "retained-poll-cut (kept 0 of 1)"),
+            variant + ": " + atSuffix + ": signed-maximum loop must delete its loop poll");
 
         String constSuffix = CLASS + "_countedConst5000";
         Asserts.assertTrue(IRDumpParser.traceChunkContains(out, constSuffix,
@@ -339,7 +337,7 @@ public class TestStripMiningDisabled {
             variant + ": " + constSuffix + ": deletion prep must delete the constant loop");
 
         String longSuffix = CLASS + "_countedLongRuntimeBound";
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, longSuffix, "keep-one (keeper in"),
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, longSuffix, "retained-poll-cut (kept 1 of 1)"),
             variant + ": " + longSuffix + ": early mode must keep one poll for a runtime-bound loop");
     }
 

@@ -215,8 +215,8 @@ public class TestSafepointLoopCoverage {
         String output = out.getOutput();
 
         assertEarlyPolls(output, "unconditionalCall", 1);
-        assertEarlyPolls(output, "conditionalCall", 2);
-        assertEarlyPolls(output, "allocationOnly", 2);
+        assertEarlyPolls(output, "conditionalCall", 1);
+        assertEarlyPolls(output, "allocationOnly", 1);
         assertEarlyPolls(output, "callsOnBothBranches", 1);
         assertEarlyPolls(output, "multipleBackedges", 3);
         assertEarlyPolls(output, "nestedDoWhileCall", 1);
@@ -234,11 +234,11 @@ public class TestSafepointLoopCoverage {
         verifyResults(out.getStdout());
         String output = out.getOutput();
 
-        assertTrace(output, "unconditionalCall", "delete-all (call-covered)");
-        assertTrace(output, "conditionalCall", "keep-one (keeper in");
-        assertTrace(output, "allocationOnly", "keep-one (keeper in");
-        assertTrace(output, "callsOnBothBranches", "delete-all (call-covered)");
-        assertTrace(output, "multipleBackedges", "keep-all (no dominating keeper)");
-        assertTrace(output, "nestedDoWhileCall", "delete-all (call-covered)");
+        assertTrace(output, "unconditionalCall", "retained-poll-cut (kept 0 of 1)");
+        assertTrace(output, "conditionalCall", "retained-poll-cut (kept 0 of 1)");
+        assertTrace(output, "allocationOnly", "retained-poll-cut (kept 0 of 1)");
+        assertTrace(output, "callsOnBothBranches", "retained-poll-cut (kept 0 of 1)");
+        assertTrace(output, "multipleBackedges", "retained-poll-cut (kept 2 of 2)");
+        assertTrace(output, "nestedDoWhileCall", "retained-poll-cut (kept 0 of 1)");
     }
 }

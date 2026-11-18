@@ -349,10 +349,8 @@ public class TestStripMinedCountedLoop {
             suffix + ": expected the loop to be strip-mined");
         Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "(N=1000, inclusive=0, batch-stride=1000"),
             suffix + ": expected default batch size 1000, exclusive bound");
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "keep-one (keeper in "),
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "retained-poll-cut (kept 1 of 1)"),
             suffix + ": after-strip-mining must keep the relocated poll");
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, ".outer.latch), erased 0 of 1 poll(s)"),
-            suffix + ": the single relocated poll in the outer latch must survive");
     }
 
     // =========================================================================
@@ -374,7 +372,7 @@ public class TestStripMinedCountedLoop {
         String suffix = CLASS + "_countedShortConstant";
         Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "within budget (short loop)"),
             suffix + ": strip-mining must reject the short loop as within budget");
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "delete-all (within-budget), erased 1 of 1 poll(s)"),
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "retained-poll-cut (kept 0 of 1)"),
             suffix + ": after-strip-mining must delete the within-budget loop poll");
         Asserts.assertFalse(IRDumpParser.traceChunkContains(out, suffix, "wrapped loop"),
             suffix + ": a within-budget loop must not be wrapped");
@@ -482,7 +480,7 @@ public class TestStripMinedCountedLoop {
     // countedStride3RuntimeBound: Java int addition has no nsw guarantee, so
     // with a runtime bound SCEV cannot prove the strided IV does not wrap and
     // both strip-mining runs reject the loop. Poll elimination falls back to
-    // keep-one: the original back-edge poll survives (plus the return poll).
+    // a retained poll cut: the original back-edge poll survives (plus the return poll).
     // =========================================================================
 
     private static void checkCountedStride3RuntimeBoundStructural(String out) {
@@ -491,14 +489,14 @@ public class TestStripMinedCountedLoop {
         Asserts.assertNull(findStripMiningAfter(out, suffix, ".outer"),
             suffix + ": unprovable no-wrap must leave the loop unwrapped");
         Asserts.assertEquals(IRDumpParser.countPolls(pollElimAfter(out, suffix, 1)), 2,
-            suffix + ": keep-one must leave the back-edge poll plus the return poll");
+            suffix + ": coverage must leave the back-edge poll plus the return poll");
     }
 
     private static void checkCountedStride3RuntimeBoundTrace(String out) {
         String suffix = CLASS + "_countedStride3RuntimeBound";
         Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "cannot prove exclusive no-wrap"),
             suffix + ": strip-mining must reject the strided runtime-bound loop");
-        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "keep-one"),
+        Asserts.assertTrue(IRDumpParser.traceChunkContains(out, suffix, "retained-poll-cut (kept 1 of 1)"),
             suffix + ": poll elimination must keep the surviving back-edge poll");
         Asserts.assertFalse(IRDumpParser.traceChunkContains(out, suffix, "wrapped loop"),
             suffix + ": unprovable no-wrap must leave the loop unwrapped");

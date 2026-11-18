@@ -77,6 +77,30 @@ public class TestSafepointBudgetRuntime {
         finalB = b;
     }
 
+    public static void splitWorker(Object a, Object b, long limit) {
+        int i = START;
+        long sum = 0;
+        long iterations = 0;
+        while ((long) i < limit) {
+            if (stop) break;
+            Object tmp = a;
+            a = b;
+            b = tmp;
+            sum += i;
+            i++;
+            iterations++;
+            observed = a;
+            progress = iterations;
+            if ((i & 1) == 0) continue;
+            // Distinct backward bytecodes retain their own deopt BCIs.
+            if (stop) break;
+        }
+        result = sum;
+        finalIV = i;
+        finalA = a;
+        finalB = b;
+    }
+
     private static void awaitProgress(long value) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (progress <= value && System.nanoTime() < deadline) Thread.sleep(1);
@@ -90,7 +114,9 @@ public class TestSafepointBudgetRuntime {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            for (String mode : new String[] {"normal", "osr"}) {
+            for (String mode : new String[] {"normal", "osr", "clone-normal", "clone-osr"}) {
+                boolean cloned = mode.startsWith("clone-");
+                String method = cloned ? "splitWorker" : "worker";
                 Path log = Path.of("budget-runtime-" + mode + ".xml").toAbsolutePath();
                 List<String> cmd = new ArrayList<>(List.of(
                     "-Xbatch", "-XX:-TieredCompilation", "-XX:CompileThreshold=100",
@@ -100,14 +126,18 @@ public class TestSafepointBudgetRuntime {
                     "-XX:JeandleLoopStripMiningIter=32",
                     "-XX:JeandleLLVMOptions=--print-after=safepoint-budget-strip-mining",
                     "-XX:CompileCommand=compileonly," + TestSafepointBudgetRuntime.class.getName()
-                        + "::worker", TestSafepointBudgetRuntime.class.getName(), mode));
+                        + "::" + method, TestSafepointBudgetRuntime.class.getName(), mode));
                 OutputAnalyzer out = ProcessTools.executeProcess(
                     ProcessTools.createLimitedTestJavaProcessBuilder(cmd));
                 out.shouldHaveExitValue(0).shouldContain("STATE_OK");
                 String ir = IRDumpParser.extractNthSection(out.getOutput(), "After",
-                    "SafepointBudgetStripMining", "TestSafepointBudgetRuntime_worker", 0);
-                Asserts.assertTrue(ir.contains(".batch.check:") && ir.contains(".batch.poll:")
-                    && ir.contains("batch.tick.next"), "worker did not use counter batches: " + mode);
+                    "SafepointBudgetStripMining", "TestSafepointBudgetRuntime_" + method, 0);
+                Asserts.assertTrue(ir.contains("batch.tick.next"),
+                                   "worker did not use bounded batches: " + mode);
+                Asserts.assertTrue(cloned
+                    ? ir.contains("batch.outer:") && ir.contains(".fast:")
+                    : ir.contains(".batch.check:") && ir.contains(".batch.poll:"),
+                    "worker did not use the expected batch strategy: " + mode);
                 String output = out.getOutput();
                 int begin = output.indexOf("ACTIVE_BEFORE_GC");
                 int end = output.indexOf("ACTIVE_AFTER_GC");
@@ -122,19 +152,21 @@ public class TestSafepointBudgetRuntime {
                     + compileId + "'[^>]*>.*?</deoptimized>").matcher(xml);
                 Asserts.assertTrue(active.find(), "no actual active-frame deoptimization");
                 String event = active.group();
-                Asserts.assertTrue(event.contains("TestSafepointBudgetRuntime worker")
+                Asserts.assertTrue(event.contains("TestSafepointBudgetRuntime " + method)
                     && event.contains("compiler='jeandle'"),
                                    "deoptimized frame does not belong to worker");
-                Asserts.assertEquals(event.contains("compile_kind='osr'"), mode.equals("osr"),
+                Asserts.assertEquals(event.contains("compile_kind='osr'"), mode.endsWith("osr"),
                                      "incorrect active frame compilation mode");
                 System.out.println(output.substring(begin));
+                System.out.println("ACTIVE_DEOPT_EVENT " + event.replace('\n', ' '));
             }
             return;
         }
         WB = WhiteBox.getWhiteBox();
-        boolean osr = args[0].equals("osr");
+        boolean osr = args[0].endsWith("osr");
+        boolean cloned = args[0].startsWith("clone-");
         Method target = TestSafepointBudgetRuntime.class.getDeclaredMethod(
-                "worker", Object.class, Object.class, long.class);
+                cloned ? "splitWorker" : "worker", Object.class, Object.class, long.class);
         if (!osr) {
             if (!WB.enqueueMethodForCompilation(target, 4))
                 throw new RuntimeException("compilation was not queued");
@@ -146,7 +178,10 @@ public class TestSafepointBudgetRuntime {
         Object first = new byte[1024];
         Object second = new byte[2048];
         Thread thread = new Thread(() -> {
-            try { worker(first, second, Long.MAX_VALUE); }
+            try {
+                if (cloned) splitWorker(first, second, Long.MAX_VALUE);
+                else worker(first, second, Long.MAX_VALUE);
+            }
             catch (Throwable t) { failure = t; }
         });
         thread.setDaemon(true);
@@ -172,7 +207,9 @@ public class TestSafepointBudgetRuntime {
         if (collections() <= beforeCollections) throw new RuntimeException("no GC occurred");
         Object liveOop = observed;
         if (liveOop != first && liveOop != second) throw new RuntimeException("lost live oop");
-        System.out.println("GC completed while worker active; progress=" + progress);
+        System.out.println("GC completed while worker active; progress=" + progress
+                           + " collectionsBefore=" + beforeCollections
+                           + " collectionsAfter=" + collections());
 
         System.out.println("ACTIVE_AFTER_GC");
         if (WB.handshakeWalkStack(thread, false) != 1)

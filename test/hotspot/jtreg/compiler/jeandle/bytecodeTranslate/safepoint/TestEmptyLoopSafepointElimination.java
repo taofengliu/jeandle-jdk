@@ -226,7 +226,7 @@ public class TestEmptyLoopSafepointElimination {
                     trace, suffix, "loop-deletion-prep: deleting"),
                 suffix + ": observable loop must not be deleted");
             Asserts.assertTrue(IRDumpParser.traceChunkContains(
-                    trace, suffix, "keep-one"),
+                    trace, suffix, "retained-poll-cut (kept 1 of 1)"),
                 suffix + ": observable loop must retain safepoint coverage");
         }
     }
