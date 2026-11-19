@@ -822,6 +822,9 @@ JeandleAbstractInterpreter::JeandleAbstractInterpreter(const JeandleParseContext
                                                        _work_list(),
                                                        _sync_lock(LockValue()),
                                                        _trap_hist(trap_hist) {
+  if (_method->has_exception_handlers()) {
+    _llvm_func->addFnAttr(llvm::jeandle::Attribute::JavaHasExceptionHandlers);
+  }
   // Fill basic blocks with LLVM IR.
   interpret();
 }
@@ -3456,16 +3459,27 @@ void JeandleAbstractInterpreter::uncommon_trap_if_should_post_on_exceptions(Deop
   _block->set_tail_llvm_block(fallthrough_block);
 }
 
-bool JeandleAbstractInterpreter::has_exception_handler() {
-  // TODO: When inline is implemented, the caller chain should also be traversed
-  // to check whether any caller has exception handlers,
-  // similar to C2 GraphKit::has_ex_handler().
+llvm::Value* JeandleAbstractInterpreter::has_exception_handler() {
+  if (_method->has_exception_handlers()) {
+    return _ir_builder.getTrue();
+  }
+  if (_parse_context.is_root()) {
+    return _ir_builder.getFalse();
+  }
 
-  return _method->has_exception_handlers();
+  // Inlinee IR is shared by callers. Resolve GraphKit::has_ex_handler's
+  // caller-chain query in each root copy once its inline scope is known.
+  llvm::FunctionCallee query = _module.getOrInsertFunction(
+      "jeandle.has_exception_handler", _ir_builder.getInt1Ty());
+  llvm::Function* function = llvm::cast<llvm::Function>(query.getCallee());
+  // Keep it opaque until specialization so different inline scopes cannot
+  // have their queries merged by common subexpression elimination.
+  function->addFnAttr(llvm::Attribute::NoUnwind);
+  function->addFnAttr(llvm::Attribute::WillReturn);
+  return _ir_builder.CreateCall(query);
 }
 
-// This is a logical copy of GraphKit::builtin_throw
-// TODO: may need to adjust it for Jeandle's features.
+// Follow GraphKit::builtin_throw, deferring caller-dependent hotness until inline.
 void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reason, llvm::BasicBlock* insert_block) {
   bool treat_throw_as_hot = false;
   int cur_bci = _bytecodes.cur_bci();
@@ -3477,14 +3491,36 @@ void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reaso
       treat_throw_as_hot = true;
     }
 
-    // Alternatively, if there's a history of traps for this reason, and there is a local
-    // exception handler that can catch it, we also treat it as hot.
-    if (trap_count(reason) != 0 &&
-        _method->method_data()->trap_count(reason) != 0 &&
-        has_exception_handler()) {
-      treat_throw_as_hot = true;
+    // A handler anywhere in the inline chain makes throws hot once this
+    // method has trapped for the same reason, even at another bytecode.
+    if (!treat_throw_as_hot && trap_count(reason) != 0 &&
+        _method->method_data()->trap_count(reason) != 0) {
+      llvm::IRBuilder<>::InsertPointGuard guard(_ir_builder);
+      if (insert_block != nullptr) {
+        _ir_builder.SetInsertPoint(insert_block);
+      }
+      llvm::Value* handled = has_exception_handler();
+      if (llvm::ConstantInt* constant = llvm::dyn_cast<llvm::ConstantInt>(handled)) {
+        treat_throw_as_hot = constant->isOne();
+      } else {
+        llvm::BasicBlock* hot_throw = llvm::BasicBlock::Create(*_context, "hot_builtin_throw", _llvm_func);
+        llvm::BasicBlock* cold_throw = llvm::BasicBlock::Create(*_context, "cold_builtin_throw", _llvm_func);
+        _ir_builder.CreateCondBr(handled, hot_throw, cold_throw);
+        emit_builtin_throw(reason, hot_throw, true);
+        RETURN_VOID_ON_JEANDLE_ERROR();
+        emit_builtin_throw(reason, cold_throw, false);
+        return;
+      }
     }
   }
+
+  emit_builtin_throw(reason, insert_block, treat_throw_as_hot);
+}
+
+void JeandleAbstractInterpreter::emit_builtin_throw(Deoptimization::DeoptReason reason,
+                                                    llvm::BasicBlock* insert_block,
+                                                    bool treat_throw_as_hot) {
+  int cur_bci = _bytecodes.cur_bci();
 
   // If this throw happens frequently, an uncommon trap might cause
   // a performance pothole.  If there is a local exception handler,
@@ -3512,6 +3548,10 @@ void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reaso
         break;
       default:
         break;
+    }
+
+    if (env->failing()) {
+      JEANDLE_REPORT_ERROR_AND_RET_VOID(env->failure_reason());
     }
 
     if (ex_obj != nullptr) {
@@ -3549,8 +3589,8 @@ void JeandleAbstractInterpreter::builtin_throw(Deoptimization::DeoptReason reaso
   // Slow path: Bail to interpreter
   ciMethod* m = Deoptimization::reason_is_speculate(reason) ? JeandleCompilation::current()->method() : nullptr;
   Deoptimization::DeoptAction action = Deoptimization::Action_maybe_recompile;
-  // If we have triggered deoptimization too many times,
-  // Immediately invalidate the code using Deoptimization::Action_none.
+  // A hot throw that cannot omit its trace runs in the interpreter without
+  // changing trap history or invalidating the compiled method.
   if (treat_throw_as_hot && (_method->method_data()->trap_recompiled_at(cur_bci, m) || too_many_traps(reason))) {
     action = Deoptimization::Action_none;
   }

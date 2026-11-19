@@ -499,8 +499,10 @@ class JeandleAbstractInterpreter : public StackObj {
   void dispatch_exception_to_handler(llvm::Value* exception_oop, llvm::LandingPadInst* landingpad = nullptr);
   void throw_exception(llvm::Value* exception_oop, llvm::LandingPadInst* landingpad = nullptr);
   void uncommon_trap_if_should_post_on_exceptions(Deoptimization::DeoptReason reason);
-  bool has_exception_handler();
-  void builtin_throw(Deoptimization::DeoptReason reason, llvm::BasicBlock *insert_block);
+  llvm::Value* has_exception_handler();
+  void builtin_throw(Deoptimization::DeoptReason reason, llvm::BasicBlock* insert_block);
+  void emit_builtin_throw(Deoptimization::DeoptReason reason, llvm::BasicBlock* insert_block,
+                          bool treat_throw_as_hot);
 
   void newarray(int element_type);
   void anewarray(int klass_index);
